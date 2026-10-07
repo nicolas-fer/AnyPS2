@@ -1,0 +1,28 @@
+1. prioridade maior preempta
+alta: começou (arg=7)
+principal: depois do StartThread
+alta: acordou
+principal: depois do SignalSema
+2. mesma prioridade não preempta
+principal: antes do Rotate
+igual: rodou depois do Rotate
+principal: depois do Rotate
+3. sleep/wakeup
+principal: dormindo
+baixa: acorda a principal
+principal: acordada
+baixa: voltou
+principal: baixa terminou
+4. ping-pong
+ping 0
+pong 0
+ping 1
+pong 1
+ping 2
+pong 2
+5. terminate + start
+vítima: início 1
+principal: status depois de terminate=16
+vítima: início 2
+principal: prioridade=50
+fim

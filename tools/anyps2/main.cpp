@@ -3,7 +3,9 @@
 // Fase 1: inspeção de ELF e desmontagem do código R5900.
 // Fase 2+: "anyps2 recomp" gera o projeto C++/CMake a partir do ELF.
 
+#include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -14,6 +16,8 @@
 #include <string_view>
 #include <vector>
 
+#include "anyps2/analysis/analyzer.h"
+#include "anyps2/codegen/generator.h"
 #include "anyps2/common/bytes.h"
 #include "anyps2/common/error.h"
 #include "anyps2/elf/elf_file.h"
@@ -32,7 +36,7 @@ using anyps2::hex;
 namespace elf = anyps2::elf;
 namespace r5900 = anyps2::r5900;
 
-constexpr const char* kVersion = "0.1.0 (Fase 1)";
+constexpr const char* kVersion = "0.2.0 (Fase 2)";
 
 void printUsage() {
     std::cout <<
@@ -54,8 +58,12 @@ Uso:
   anyps2 disasm-bin <arquivo.bin> [--base ENDERECO] [--mark-noncanonical]
       Desmonta um binário cru de palavras little-endian.
 
-  anyps2 recomp <arquivo.elf> -o <diretório>
-      (Fase 2 — ainda não implementado.)
+  anyps2 recomp <arquivo.elf> -o <diretório> [--name NOME] [--root RAIZ]
+               [--function 0xENDERECO ...]
+      Gera um projeto CMake com o código C++ recompilado. Compile com
+      "cmake -S <diretório> -B <diretório>/build && cmake --build ...".
+      --root aponta para a raiz do AnyPS2 (padrão: a usada neste build).
+      --function adiciona inícios de função que a análise não achou.
 
   anyps2 --version | --help
 )";
@@ -321,6 +329,65 @@ int cmdDisasmBin(const std::vector<std::string_view>& args) {
     return 0;
 }
 
+std::string sanitizeName(std::string s) {
+    for (char& ch : s) {
+        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') ch = '_';
+    }
+    if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0]))) s = "ps2_" + s;
+    return s;
+}
+
+int cmdRecomp(const std::vector<std::string_view>& args) {
+    std::optional<std::string> path, out, name;
+    std::string root = ANYPS2_SOURCE_DIR;
+    anyps2::analysis::AnalysisOptions aopt;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const auto a = args[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= args.size()) throw Error("faltou valor para " + std::string(a));
+            return std::string(args[++i]);
+        };
+        if (a == "-o" || a == "--output") out = next();
+        else if (a == "--name") name = next();
+        else if (a == "--root") root = next();
+        else if (a == "--function") aopt.extraFunctions.push_back(parseNumber(next()));
+        else if (!path) path = std::string(a);
+        else throw Error("argumento inesperado: " + std::string(a));
+    }
+    if (!path || !out) throw Error("uso: anyps2 recomp <arquivo.elf> -o <diretório> [--name NOME]");
+    const auto f = elf::ElfFile::loadFromFile(*path);
+    if (!f.isR5900()) {
+        std::cerr << "anyps2: aviso: " << f.name() << " não declara a máquina R5900 em e_flags\n";
+    }
+    const auto model = anyps2::analysis::analyze(f, aopt);
+    anyps2::codegen::GeneratorOptions gopt;
+    gopt.outputDir = *out;
+    gopt.anyps2Root = root;
+    gopt.projectName = sanitizeName(name ? *name : std::filesystem::path(*path).stem().string());
+    const auto report = anyps2::codegen::generateProject(f, model, gopt);
+
+    std::cout << "Projeto gerado em " << *out << " (alvo '" << gopt.projectName << "')\n";
+    std::cout << "  funções:     " << report.functions << "\n";
+    std::cout << "  instruções:  " << report.instructions << "\n";
+    std::cout << "  arquivos C++:" << " " << report.sourceFiles << "\n";
+    if (report.invalidWords) {
+        std::cout << "  palavras inválidas dentro de funções: " << report.invalidWords
+                  << " (lançam erro se executadas)\n";
+    }
+    if (!report.unsupported.empty()) {
+        std::cout << "  instruções ainda não suportadas (lançam erro se executadas):\n";
+        for (const auto& [mnemonic, count] : report.unsupported) {
+            std::cout << "    " << mnemonic << ": " << count << "\n";
+        }
+    }
+    for (const auto& w : report.warnings) {
+        std::cout << "  aviso " << hex(w.address) << ": " << w.message << "\n";
+    }
+    std::cout << "Compile com:\n  cmake -S " << *out << " -B " << *out << "/build -DCMAKE_BUILD_TYPE=Release\n"
+              << "  cmake --build " << *out << "/build\n";
+    return 0;
+}
+
 int run(int argc, char** argv) {
     if (argc < 2) {
         printUsage();
@@ -340,9 +407,7 @@ int run(int argc, char** argv) {
     if (cmd == "symbols") return cmdSymbols(args);
     if (cmd == "disasm") return cmdDisasm(args);
     if (cmd == "disasm-bin") return cmdDisasmBin(args);
-    if (cmd == "recomp") {
-        throw Error("'recomp' ainda não está implementado: o gerador de C++ faz parte da Fase 2");
-    }
+    if (cmd == "recomp") return cmdRecomp(args);
     throw Error("comando desconhecido '" + std::string(cmd) + "' (use --help)");
 }
 

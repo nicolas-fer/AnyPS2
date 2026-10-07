@@ -1,0 +1,5 @@
+lido[0]: linha 1
+lido[1]: segunda linha
+lido[2]: valor=1234
+tamanho=33 byte6=1
+arquivo inexistente: NULL

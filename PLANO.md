@@ -66,85 +66,92 @@ sistema nativas; estados inesperados lançam exceção).
 | Fixture ELF real (GNU as `-march=r5900`) + fuzz do parser | ✅ |
 | CLI: `info`, `symbols`, `disasm`, `disasm-bin` | ✅ |
 
-## Fase 2 — Gerador de C++ + runtime mínimo 🔜
+## Fase 2 — Gerador de C++ + runtime mínimo ✅
 
 Meta: um homebrew de console (printf) compilado com o ps2dev rodando nativo.
+**Atingida**: `tests/homebrew/hello` (ps2dev, GCC 15.2) imprime nativo; outros
+três homebrews (CPU, threads, arquivos) rodam com saída idêntica à esperada.
 
 ### 2.1 Análise (recompiler/analysis)
-- ⬜ Descoberta de funções: símbolos `STT_FUNC`; alvos de `JAL`; entry point;
-  ponteiros de função em `.data`/`.rodata` (palavras que apontam para início
-  plausível de código); heurística de prólogo (`addiu sp,sp,-N`) para ELFs
-  sem símbolos.
-- ⬜ Limites de função e blocos básicos; alvos de desvio dentro da função
-  viram rótulos.
-- ⬜ Jump tables: reconhecer o padrão `sltiu/beq → sll → lui/addiu → addu → lw → jr`
-  e ler a tabela do ELF; `jr` não resolvido vira despacho dinâmico.
-- ⬜ Arquivo de configuração TOML por jogo (funções extras, funções a pular,
-  stubs por nome/endereço, patches de instrução), gerado/editável.
+- ✅ Descoberta de funções: símbolos `STT_FUNC`, entry point, alvos de `JAL`,
+  lacunas de código sem símbolo (ignorando padding), `--function` na CLI.
+- ✅ Rótulos internos, retornos de chamada e alvos de desvios externos viram
+  pontos de entrada.
+- ✅ Jump tables sem casar padrões: toda palavra de `.data/.rodata` (e todo par
+  `lui/addiu|ori`) que aponta para código vira ponto de entrada, e cada
+  `jr reg` faz um `switch` local sobre os rótulos da função, caindo no
+  despacho dinâmico se o alvo for outra função.
+- ⬜ Arquivo TOML por jogo (stubs, funções a pular, patches): adiado para a
+  Fase 7, quando houver um jogo comercial que precise. Hoje há `--function`.
 
 ### 2.2 Gerador (recompiler/codegen)
-- ⬜ Uma função C++ por função MIPS: `void f_00100024(Context* ctx)`.
-- ⬜ Tradução instrução a instrução para C++ legível (macros/inline do runtime).
-- ⬜ Delay slots: avaliar a condição antes, executar o slot, depois desviar;
-  likely: slot só no caminho tomado. Desvio para o meio de outra função →
-  chamada + retorno (tail call).
-- ⬜ `JAL` para função conhecida → chamada direta; `JALR`/`JR` não-ra →
-  `ctx->dispatch(endereço)` via tabela de funções (erro claro se o endereço
-  não for uma função conhecida).
-- ⬜ Instruções inválidas/não suportadas → erro em tempo de geração com
-  endereço e palavra; opcionalmente `throw` em tempo de execução se estiver
-  em código nunca alcançável comprovadamente.
-- ⬜ Saída: projeto CMake pronto (`anyps2 recomp jogo.elf -o saida/`), com
-  arquivos divididos por tamanho para compilar em paralelo.
+- ✅ Uma função C++ por função MIPS (`fn_XXXXXXXX`), com `goto` para rótulos.
+- ✅ Delay slots (condição/alvo lidos antes do slot), branches likely, slot
+  que também é alvo de desvio, `bal` para obter o PC, `jalr rd` com rd ≠ ra.
+- ✅ Chamadas diretas com verificação do endereço de retorno; reentrada no
+  meio da função por um `switch` de entrada. Como todo o estado do guest vive
+  no `Context`, o despachante pode retomar qualquer ponto de entrada —
+  `setjmp/longjmp` e retornos por registrador funcionam.
+- ✅ Instruções inválidas e macroinstruções do VU0 viram
+  `unsupported(...)`, que lança erro com endereço e texto se executadas, e são
+  contadas no relatório do `anyps2 recomp`.
+- ✅ Projeto CMake gerado (`anyps2 recomp jogo.elf -o saida/`), código dividido
+  em arquivos para compilar em paralelo, imagem dos segmentos ao lado do
+  executável.
 
 ### 2.3 Runtime mínimo (runtime/)
-- ⬜ `Context`: 32 GPRs de 128 bits (portável: struct com 2×u64, sem
-  `__int128`, que o MSVC não tem), HI/LO/HI1/LO1, SA, PC, FPU (32 regs +
-  ACC + FCR31), COP0 básico.
-- ⬜ Memória: 32 MB de RDRAM com espelhos (kuseg, kseg0/1, 0x2000_0000 e
-  0x3000_0000), scratchpad de 16 KB em 0x7000_0000, região de I/O com
-  despacho para handlers (acesso não tratado → erro com endereço e tamanho).
-- ⬜ Carregador: copia PT_LOAD, zera bss, monta argc/argv, pilha e heap.
-- ⬜ Syscalls básicas do kernel do EE em HLE: `Exit`, `SetupThread`,
-  `SetupHeap`, `EndOfHeap`, `FlushCache`, `GsPutIMR`/`GsGetIMR`, `GetThreadId`,
-  `CreateSema`... (lista guiada pelo que o crt0 do ps2sdk chama). Syscall
-  desconhecida → erro com número e PC.
-- ⬜ FPU com semântica do PS2 (sem NaN/Inf, saturação, flags) — inicialmente
-  IEEE com verificação, com modo "exato" opcional.
+- ✅ `Context` com GPRs de 128 bits (union portátil, sem `__int128`), HI/LO e
+  HI1/LO1, SA, FPU, COP0, registradores do VU0 usados por QMFC2/QMTC2/LQC2/SQC2.
+- ✅ Memória: 32 MB com espelhos (kuseg, kseg0/1, 0x2000_0000, 0x3000_0000),
+  scratchpad, page table de 4 KB, MMIO por dispositivo; acesso desalinhado ou
+  não mapeado lança erro com endereço e PC.
+- ✅ Semântica de todas as instruções do EE fora do VU0: MIPS III do R5900,
+  MMI completo, FPU do PS2 (sem NaN/Inf/denormais, saturação em ±Fmax, flags).
+- ✅ Kernel do EE em HLE (≈90 syscalls nomeadas; as ausentes lançam erro com o
+  nome): SetupThread/SetupHeap/argv, OSD, GS IMR, Copy/SetSyscall/TLB usados
+  pelo crt0 do ps2sdk, handlers de INTC/DMAC.
+- ✅ SIF em HLE no nível do protocolo (não por stubs de função): o IOP do HLE
+  interpreta os comandos SIFCMD/SIF RPC enviados por `sceSifSetDma` e responde
+  escrevendo no buffer do EE + interrupção DMAC SIF0, executando o handler do
+  próprio programa. Servidores: fileio (tty:, host:) e iopheap.
+- ✅ Registradores de hardware conhecidos (timers, INTC, DMAC, GS, SIO) e erro
+  claro para os desconhecidos ou para iniciar DMA (Fase 4).
 
 ### 2.4 Testes
-- ⬜ Testes por instrução **executados**: cada instrução gerada roda contra
-  vetores de entrada/saída (incl. MMI e casos de borda: overflow, divisão por
-  zero, shifts ≥ 32).
-- ⬜ Homebrew de ponta a ponta compilado com o ps2dev (imagem Docker oficial
-  no CI): `hello` (printf), aritmética 64/128 bits, ponto flutuante,
-  `setjmp/longjmp`, ponteiros de função, `switch` com jump table.
-  Saída comparada com o esperado.
+- ✅ 10 testes de semântica do runtime (vetores por instrução e casos de borda).
+- ✅ 5 testes da análise/gerador sobre o fixture.
+- ✅ 4 homebrews de ponta a ponta no CTest (recomp → cmake → build → run → diff):
+  `hello`, `cputest` (oráculo: o mesmo C compilado no host + asm do R5900
+  auto-verificado: delay slots, likely, loads parciais, 38 MMI, FPU do PS2),
+  `threads` (ordem de escalonamento), `fileio` (host:).
+- ✅ Código gerado + runtime limpos sob ASan/UBSan.
 
-### Riscos da Fase 2 (avise antes de seguir)
-- **printf do ps2sdk não é só uma syscall**: no EE, `printf` vai por SIF RPC
-  para o módulo `ioman`/`fileio` do IOP (`tty:`). Para a meta da fase vamos
-  precisar de um HLE mínimo de SIF RPC (servidor fileio só com `write` em
-  `tty:`/`host:`) — um pedaço pequeno da Fase 6 antecipado.
-- Código não-estruturado (setjmp/longjmp, troca de contexto, retorno para
-  endereço calculado) não cabe em "uma função C++ por função MIPS"; precisa
-  de saída por exceção/despacho, que será testada com homebrew específico.
+### Limitações conhecidas da Fase 2
+- FPU: o PS2 arredonda em direção a zero; usamos o arredondamento do host
+  (para o mais próximo). Resultados podem diferir no último bit. Valores com
+  expoente 255 (que no PS2 são números normais) são aproximados por ±Fmax.
+- Código automodificável ou carregado em tempo de execução (overlays) não é
+  suportado: só o que está no ELF é recompilado.
+- Salto para um endereço que a análise não marcou como entrada gera erro
+  claro; a correção é `--function 0x...` (ou, no futuro, o TOML).
+- Desempenho ainda não foi trabalhado (estado sempre em memória).
 
-## Fase 3 — Kernel do EE: threads, semáforos, timers, interrupções ⬜
+## Fase 3 — Kernel do EE: threads, semáforos, timers, interrupções (parcial)
 
-- ⬜ Threads do EE (prioridade, `StartThread`, `SleepThread`, `WakeupThread`,
-  `RotateThreadReadyQueue`, `ChangeThreadPriority`, `iWakeupThread`...).
-  Como o código recompilado usa a pilha do host, cada thread do EE precisa
-  de uma pilha própria: threads do host com "bastão" (só uma roda por vez,
-  escalonamento decidido pelo nosso kernel), o que é portável entre
-  Windows/Linux sem assembly.
-- ⬜ Semáforos e event flags (`CreateSema`, `WaitSema`, `SignalSema`, `PollSema`,
-  versões `i*` de interrupção).
-- ⬜ Alarmes e timers (`SetAlarm`, `ReleaseAlarm`), contadores T0–T3.
-- ⬜ INTC/DMAC: `AddIntcHandler`, `AddDmacHandler`, `EnableIntc`, VBlank
-  (start/end) sintético a 50/60 Hz.
-- ⬜ Testes: homebrew com produtor/consumidor, prioridades, alarmes,
-  handler de VBlank.
+Threads e semáforos foram antecipados porque o próprio crt0 do ps2sdk cria
+uma thread (`KernelTopThread`) antes do `main`.
+
+- ✅ Threads do EE: Create/Delete/Start/Exit/ExitDelete/Terminate,
+  Sleep/Wakeup/CancelWakeup, Suspend/Resume, ChangeThreadPriority,
+  RotateThreadReadyQueue, ReleaseWait, ReferThreadStatus, GetThreadId e
+  variantes `i*`. Cada thread do EE roda numa thread do host com pilha de
+  64 MB, mas só uma executa por vez ("bastão"), com prioridade estrita e troca
+  só em syscalls, como no kernel real. Deadlock (todas bloqueadas) vira erro
+  listando as threads.
+- ✅ Semáforos (Create/Delete/Signal/Wait/Poll/ReferSemaStatus + `i*`).
+- ⬜ Alarmes (`SetAlarm`, `DelayThread`), timers T0–T3 com interrupção.
+- ⬜ VBlank (start/end) sintético a 50/60 Hz e INTC geral.
+- ⬜ Event flags.
 
 Riscos: jogos que dependem de temporização exata entre threads/interrupções.
 Começamos com um relógio virtual determinístico (útil para testes) e

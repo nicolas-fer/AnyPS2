@@ -14,10 +14,52 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
                          memória, GS, VU, IOP, SPU2, pad, CDVD...)
 ```
 
-> **Status: Fase 1 de 7 concluída.** Ainda não roda nenhum programa do PS2.
+> **Status: Fases 1 e 2 concluídas, Fase 3 parcial.** Homebrews de console
+> compilados com o ps2dev (printf, threads, arquivos, MMI, FPU) são
+> recompilados e rodam nativos. Ainda não há gráficos, som, VU nem jogos.
 > Veja o [PLANO.md](PLANO.md) para o roteiro completo.
 
-## O que funciona hoje (Fase 1)
+## Experimente
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+build/tools/anyps2 recomp tests/homebrew/hello/hello.elf -o /tmp/hello
+cmake -S /tmp/hello -B /tmp/hello/build && cmake --build /tmp/hello/build
+/tmp/hello/build/hello a b
+# Ola do PS2! argc=3
+```
+
+O `hello.elf` é um homebrew comum do ps2dev (`printf` do newlib). No
+executável nativo, o `printf` percorre o mesmo caminho que no console: newlib
+→ libcglue → `fioWrite` → SIF RPC → servidor fileio do IOP (aqui em HLE) →
+stdout.
+
+## O que funciona hoje
+
+### Fase 2 — recompilação e runtime
+
+- **`anyps2 recomp`** gera um projeto CMake: uma função C++ por função MIPS,
+  delay slots e branches likely, chamadas diretas, despacho dinâmico para
+  `jr`/`jalr`, e reentrada no meio de funções (o que faz `setjmp/longjmp` e
+  retornos por registrador funcionarem).
+- **Runtime**: CPU com registradores de 128 bits, memória de 32 MB com
+  espelhos e scratchpad, semântica de todas as instruções do EE exceto as
+  vetoriais do VU0 (MIPS III, MMI completo, FPU do PS2 sem IEEE).
+- **Kernel do EE em HLE**: threads com o escalonador do kernel real
+  (prioridade estrita, troca só em syscalls), semáforos, handlers de
+  interrupção DMAC/INTC, heap, argv, OSD, e as syscalls que o crt0 do ps2sdk usa.
+- **IOP em HLE via SIF**: os comandos SIFCMD/SIF RPC que o programa envia por
+  DMA são interpretados e respondidos pelo protocolo real (o handler de
+  interrupção do próprio programa roda). Servidores: `fileio` (`tty:` e
+  `host:`, este relativo a `ANYPS2_HOST_DIR`) e `iopheap`.
+- Tudo que falta lança erro claro: syscall não implementada (com nome),
+  registrador de hardware desconhecido (com endereço), instrução do VU0,
+  servidor RPC ausente, deadlock entre threads (com a lista de threads).
+
+Diagnóstico: `ANYPS2_TRACE=syscall,iop,hw,call` imprime syscalls, comandos
+SIF, acessos a hardware e chamadas.
+
+### Fase 1 — ELF e decodificador
 
 - **Parser de ELF32** (MIPS little-endian): cabeçalho, program headers,
   seções, símbolos, relocações REL/RELA, numeração estendida de seções,
@@ -69,8 +111,9 @@ As divergências em relação ao binutils são intencionais e documentadas em
 
 ## Compilando
 
-Requisitos: CMake ≥ 3.20 e um compilador C++20 (MSVC 2022, GCC ≥ 11 ou
-Clang ≥ 14). A Fase 1 não tem dependências externas (o SDL entra na Fase 4).
+Requisitos: CMake ≥ 3.20 e um compilador C/C++20 (MSVC 2022, GCC ≥ 11 ou
+Clang ≥ 14). Sem dependências externas por enquanto (o SDL entra na Fase 4).
+O build do Windows/MSVC está no CI mas não foi validado localmente.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -79,7 +122,27 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 Opções: `-DANYPS2_WARNINGS_AS_ERRORS=ON` (usado no CI),
-`-DANYPS2_BUILD_TESTS=OFF`.
+`-DANYPS2_BUILD_TESTS=OFF`, `-DANYPS2_E2E_TESTS=OFF` (pula os testes de ponta
+a ponta, que recompilam e compilam 4 homebrews, ~15 s com `ctest -j4`).
+
+### Testes
+
+| Suíte | O que verifica |
+|---|---|
+| `decoder`, `decoder_coverage`, `disasm`, `golden` | Fase 1: decodificador e disassembler (ver abaixo) |
+| `elf`, `fixture` | parser de ELF, 20 mil mutações, fixture real |
+| `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
+| `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
+| `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio` | homebrews do ps2dev recompilados, compilados e executados; saída comparada |
+
+O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
+(inteiros de 32/64 bits, jump tables, ponteiros de função, recursão,
+`setjmp/longjmp`, qsort, libc, ponto flutuante) e traz uma parte em assembly
+do R5900 que se auto-verifica (delay slots, likely, `bal`, LWL/LWR/LDL/SDL,
+38 operações MMI, FPU do PS2: divisão por zero → ±Fmax, saturação etc.).
+
+Os ELFs dos homebrews são versionados; para regerá-los é preciso o toolchain
+do ps2dev (Docker): `tests/homebrew/build.sh`.
 
 ## Usando a CLI
 
@@ -106,19 +169,22 @@ Exemplo (fixture `tests/fixtures/hello_r5900.elf`):
   10005c:	4be108a8 	vadd.xyzw	$vf2xyzw,$vf1xyzw,$vf1xyzw
 ```
 
-`anyps2 recomp` existe, mas ainda responde com erro explícito: o gerador de
-C++ é a Fase 2.
+`anyps2 recomp jogo.elf -o saida/ [--name NOME] [--function 0xENDERECO]`
+gera o projeto e mostra um relatório (funções, instruções, instruções ainda
+não suportadas que lançariam erro se executadas).
 
 ## Estrutura do repositório
 
 ```
 common/       utilitários compartilhados (erros, leitura little-endian)
-recompiler/   biblioteca: ELF, decodificador/disassembler R5900 (e, na Fase 2,
-              análise de funções e gerador de C++)
-runtime/      biblioteca linkada pelo código gerado (começa na Fase 2)
+recompiler/   biblioteca: ELF, decodificador/disassembler R5900, análise de
+              funções (analysis/) e gerador de C++ (codegen/)
+runtime/      biblioteca linkada pelo código gerado: contexto, memória,
+              semântica das instruções (ops.h), kernel do EE, hardware, IOP/SIF
+cmake/        AnyPS2Runtime.cmake (incluído pelos projetos gerados)
 tools/        CLI anyps2
-tests/        framework mínimo, testes unitários, golden do objdump,
-              fixtures e scripts (objdump_oracle.py, gen_instruction_table.py)
+tests/        framework mínimo, testes unitários, golden do objdump, fixtures,
+              homebrews de ponta a ponta (homebrew/) e scripts
 PLANO.md      roteiro detalhado das 7 fases
 ```
 
@@ -135,10 +201,15 @@ python3 tests/scripts/objdump_oracle.py check --tests build/tests/anyps2_tests
 
 ## O que falta
 
-Tudo a partir da Fase 2: análise de funções e jump tables, gerador de C++,
-runtime (CPU, memória, syscalls), kernel do EE, GS/GIF/VIF/DMA, VU0/VU1,
-IOP, SPU2, pad, memory card e CDVD. Os riscos de cada fase estão no
-[PLANO.md](PLANO.md).
+- Fase 3: alarmes/`DelayThread`, timers com interrupção, VBlank, event flags.
+- Fase 4: DMAC, GIF, VIF, Graphics Synthesizer, janela SDL.
+- Fase 5: VU0/VU1 (as macroinstruções do VU0 hoje lançam erro).
+- Fase 6: módulos do IOP (pad, memory card, CDVD, SPU2/áudio, carregar IRX).
+- Fase 7: jogos comerciais.
+
+Limitações atuais (detalhes no [PLANO.md](PLANO.md)): a FPU usa o
+arredondamento do host (o PS2 trunca), não há suporte a código carregado em
+tempo de execução (overlays) e o desempenho ainda não foi otimizado.
 
 ## Aspectos legais
 
