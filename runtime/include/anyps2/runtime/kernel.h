@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "anyps2/runtime/context.h"
+#include "anyps2/runtime/timing.h"
 
 namespace anyps2::rt {
 
@@ -51,7 +52,23 @@ public:
     // Interrupções (chamadas pelo HLE de hardware/IOP).
     void raiseDmacInterrupt(unsigned channel, std::uint32_t pc);
     bool canDeliverDmac(unsigned channel) const;
-    void raiseIntcInterrupt(unsigned cause, std::uint32_t pc);
+    // Marca a causa no INTC_STAT; a entrega acontece em serviceInterrupts.
+    void raiseIntc(unsigned cause) { intcStat_ |= 1u << cause; }
+    void queueAlarm(const Timing::Alarm& alarm);
+    // Entrega interrupções INTC pendentes e alarmes vencidos (se permitido) e
+    // troca de thread se alguma de prioridade maior ficou pronta.
+    // idle = chamado com todas as threads bloqueadas (ignora Status.EIE, como
+    // a thread ociosa do kernel real).
+    void serviceInterrupts(std::uint32_t pc, bool allowReschedule = true, bool idle = false);
+    // Custo (ciclos) contabilizado por syscall no relógio virtual.
+    static constexpr std::int64_t kSyscallCycles = 200;
+
+    // Registradores INTC_STAT/INTC_MASK (acessados pelo hardware).
+    std::uint32_t intcStat() const { return intcStat_; }
+    void clearIntcStat(std::uint32_t bits) { intcStat_ &= ~bits; }
+    std::uint32_t intcMask() const { return intcMask_; }
+    void toggleIntcMask(std::uint32_t bits) { intcMask_ ^= bits; }
+    bool inInterrupt() const { return interruptDepth_ > 0; }
 
     struct Semaphore {
         std::int32_t count = 0;
@@ -89,7 +106,7 @@ private:
     std::int32_t addHandler(std::vector<Handler>& list, unsigned cause, std::uint32_t fn,
                             std::int32_t next, std::uint32_t arg, std::uint32_t gp);
     void runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, unsigned cause,
-                     std::uint32_t pc);
+                     std::uint32_t pc, bool ignoreEie = false);
 
     // ---- Threads ---------------------------------------------------------
     Thread* thread(std::int32_t id, std::uint32_t pc, bool allowSelf = true);
@@ -102,6 +119,8 @@ private:
     // estiver pronta (ou se a corrente bloqueou).
     void reschedule(std::uint32_t pc);
     void blockCurrent(std::uint32_t waitType, std::int32_t waitId, std::uint32_t pc);
+    // Sem thread pronta: avança o relógio até algum evento acordar uma.
+    Thread* waitForReady(std::uint32_t pc);
     void switchTo(Thread* next, std::uint32_t pc);
     void waitForBaton(Thread* self);
     void hostThreadMain(Thread* t);
@@ -134,6 +153,13 @@ private:
     std::vector<Handler> dmacHandlers_;
     std::int32_t nextHandlerId_ = 1;
     std::uint32_t intcMask_ = 0;
+    std::uint32_t intcStat_ = 0;
+    struct PendingAlarm {
+        std::int32_t id;
+        std::uint16_t lines;
+        std::uint32_t handler, arg, gp;
+    };
+    std::vector<PendingAlarm> pendingAlarms_;
     std::uint32_t dmacMask_ = 0;
     std::uint32_t osdConfig_ = 0;
     std::uint32_t osdConfig2_[2] = {0, 0};

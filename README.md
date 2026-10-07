@@ -14,8 +14,8 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
                          memória, GS, VU, IOP, SPU2, pad, CDVD...)
 ```
 
-> **Status: Fases 1 e 2 concluídas, Fase 3 parcial.** Homebrews de console
-> compilados com o ps2dev (printf, threads, arquivos, MMI, FPU) são
+> **Status: Fases 1, 2 e 3 concluídas.** Homebrews de console compilados com
+> o ps2dev (printf, threads, timers, VBlank, arquivos, MMI, FPU) são
 > recompilados e rodam nativos. Ainda não há gráficos, som, VU nem jogos.
 > Veja o [PLANO.md](PLANO.md) para o roteiro completo.
 
@@ -46,8 +46,14 @@ stdout.
   espelhos e scratchpad, semântica de todas as instruções do EE exceto as
   vetoriais do VU0 (MIPS III, MMI completo, FPU do PS2 sem IEEE).
 - **Kernel do EE em HLE**: threads com o escalonador do kernel real
-  (prioridade estrita, troca só em syscalls), semáforos, handlers de
-  interrupção DMAC/INTC, heap, argv, OSD, e as syscalls que o crt0 do ps2sdk usa.
+  (prioridade estrita, troca só em syscalls/interrupções), semáforos,
+  alarmes, handlers de interrupção DMAC/INTC, heap, argv, OSD, e as syscalls
+  que o crt0 do ps2sdk usa.
+- **Tempo e interrupções (Fase 3)**: relógio do EE real ou virtual
+  (determinístico), timers T0–T3 com comparação/overflow, VBlank a 59,94 Hz
+  (INTC, `GS_CSR`, `SetVSyncFlag`). O código gerado tem safepoints nos
+  laços, então interrupções chegam mesmo durante espera ativa; o
+  `DelayThread` do ps2sdk funciona sobre o Timer 2 emulado.
 - **IOP em HLE via SIF**: os comandos SIFCMD/SIF RPC que o programa envia por
   DMA são interpretados e respondidos pelo protocolo real (o handler de
   interrupção do próprio programa roda). Servidores: `fileio` (`tty:` e
@@ -56,8 +62,14 @@ stdout.
   registrador de hardware desconhecido (com endereço), instrução do VU0,
   servidor RPC ausente, deadlock entre threads (com a lista de threads).
 
-Diagnóstico: `ANYPS2_TRACE=syscall,iop,hw,call` imprime syscalls, comandos
-SIF, acessos a hardware e chamadas.
+Variáveis de ambiente do executável gerado:
+
+| Variável | Efeito |
+|---|---|
+| `ANYPS2_TRACE=syscall,iop,hw,call` | imprime syscalls/trocas de thread, comandos SIF, acessos a hardware e chamadas |
+| `ANYPS2_CLOCK=virtual` | relógio determinístico (padrão: `real`) |
+| `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
+| `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
 
 ### Fase 1 — ELF e decodificador
 
@@ -123,7 +135,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 Opções: `-DANYPS2_WARNINGS_AS_ERRORS=ON` (usado no CI),
 `-DANYPS2_BUILD_TESTS=OFF`, `-DANYPS2_E2E_TESTS=OFF` (pula os testes de ponta
-a ponta, que recompilam e compilam 4 homebrews, ~15 s com `ctest -j4`).
+a ponta, que recompilam e compilam 5 homebrews, ~20 s com `ctest -j6`).
 
 ### Testes
 
@@ -133,7 +145,8 @@ a ponta, que recompilam e compilam 4 homebrews, ~15 s com `ctest -j4`).
 | `elf`, `fixture` | parser de ELF, 20 mil mutações, fixture real |
 | `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
 | `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
-| `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio` | homebrews do ps2dev recompilados, compilados e executados; saída comparada |
+| `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes |
+| `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio`, `e2e_timers`, `e2e_timers_real` | homebrews do ps2dev recompilados, compilados e executados; saída comparada (relógio virtual, e `timers` também no real) |
 
 O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
 (inteiros de 32/64 bits, jump tables, ponteiros de função, recursão,
@@ -201,7 +214,6 @@ python3 tests/scripts/objdump_oracle.py check --tests build/tests/anyps2_tests
 
 ## O que falta
 
-- Fase 3: alarmes/`DelayThread`, timers com interrupção, VBlank, event flags.
 - Fase 4: DMAC, GIF, VIF, Graphics Synthesizer, janela SDL.
 - Fase 5: VU0/VU1 (as macroinstruções do VU0 hoje lançam erro).
 - Fase 6: módulos do IOP (pad, memory card, CDVD, SPU2/áudio, carregar IRX).

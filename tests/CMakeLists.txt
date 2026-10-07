@@ -6,6 +6,7 @@ add_executable(anyps2_tests
     unit/test_golden.cpp
     unit/test_runtime_ops.cpp
     unit/test_codegen.cpp
+    unit/test_timing.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
 target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime)
@@ -18,7 +19,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
@@ -50,8 +51,14 @@ if(ANYPS2_E2E_TESTS)
     endif()
 
     function(anyps2_e2e name)
-        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND" "ARGS" ${ARGN})
-        set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})
+        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK" "ARGS" ${ARGN})
+        if(NOT E_NAME)
+            set(E_NAME ${name})
+        endif()
+        if(NOT E_CLOCK)
+            set(E_CLOCK virtual)
+        endif()
+        set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${E_NAME})
         string(REPLACE ";" "|" args "${E_ARGS}")
         set(cmd ${CMAKE_COMMAND}
             -DANYPS2=$<TARGET_FILE:anyps2>
@@ -61,6 +68,7 @@ if(ANYPS2_E2E_TESTS)
             -DANYPS2_ROOT=${PROJECT_SOURCE_DIR}
             "-DGENERATOR=${CMAKE_GENERATOR}"
             -DBUILD_TYPE=${e2e_build_type}
+            -DCLOCK=${E_CLOCK}
             -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
             "-DARGS=${args}")
         if(E_EXPECTED_COMMAND)
@@ -69,12 +77,16 @@ if(ANYPS2_E2E_TESTS)
             list(APPEND cmd -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.txt)
         endif()
         list(APPEND cmd -P ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_homebrew.cmake)
-        add_test(NAME e2e_${name} COMMAND ${cmd})
-        set_tests_properties(e2e_${name} PROPERTIES TIMEOUT 900 LABELS e2e)
+        add_test(NAME e2e_${E_NAME} COMMAND ${cmd})
+        set_tests_properties(e2e_${E_NAME} PROPERTIES TIMEOUT 900 LABELS e2e)
     endfunction()
 
     anyps2_e2e(hello ARGS a b)
     anyps2_e2e(cputest ARGS x y EXPECTED_COMMAND $<TARGET_FILE:cputest_host>)
     anyps2_e2e(threads)
     anyps2_e2e(fileio)
+    anyps2_e2e(timers)
+    # O mesmo teste no relógio real (tempo do host): a saída depende só da
+    # ordem dos eventos, então também precisa bater.
+    anyps2_e2e(timers NAME timers_real CLOCK real)
 endif()

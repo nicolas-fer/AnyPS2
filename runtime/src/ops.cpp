@@ -74,7 +74,7 @@ std::uint32_t readPerfCounter(Context*, unsigned reg, bool counter) {
 }
 
 void onInterruptsEnabled(Context* c) {
-    c->rt->iop().deliverPending(c->pc);
+    c->rt->kernel().serviceInterrupts(c->pc);
 }
 
 void ctc2(Context* c, unsigned id, u32 value, u32 pc) {

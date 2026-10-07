@@ -1,11 +1,12 @@
 #include "anyps2/runtime/hardware.h"
 
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/iop.h"
+#include "anyps2/runtime/kernel.h"
+#include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/runtime.h"
 
 namespace anyps2::rt {
@@ -59,13 +60,6 @@ int dmaChannelOf(std::uint32_t addr) {
     return -1;
 }
 
-std::uint64_t ticks(std::uint64_t hz) {
-    using namespace std::chrono;
-    static const auto t0 = steady_clock::now();
-    const auto ns = duration_cast<nanoseconds>(steady_clock::now() - t0).count();
-    return static_cast<std::uint64_t>(ns) * hz / 1000000000ull;
-}
-
 }  // namespace
 
 std::string Hardware::registerName(std::uint32_t addr) {
@@ -93,27 +87,19 @@ void Hardware::setGsCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32
     regs_[0x12000010] = (std::uint64_t{interlace} << 32) | (mode << 8) | field;
 }
 
-std::uint32_t Hardware::timerCount(unsigned timer) const {
-    // Relógio de barramento: 147,456 MHz; MODE.CLKS: 0=BUSCLK, 1=/16, 2=/256, 3=HBLANK (~15,7 kHz)
-    const auto it = regs_.find(0x10000010u + timer * 0x800u);
-    const std::uint32_t mode = it == regs_.end() ? 0 : static_cast<std::uint32_t>(it->second);
-    static constexpr std::uint64_t kHz[4] = {147456000ull, 9216000ull, 576000ull, 15734ull};
-    return static_cast<std::uint32_t>(ticks(kHz[mode & 3]) & 0xFFFF);
-}
-
 std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t pc) {
     const std::uint32_t reg = addr & ~0xFu;
     if (rt_.options().traceHardware) {
         std::fprintf(stderr, "[hw] leitura %u bits %08x %s\n", size * 8, addr, registerName(addr).c_str());
     }
     if (reg >= 0x1000F200u && reg <= 0x1000F260u) return rt_.iop().sifReadRegister(reg);
+    if (reg < 0x10002000u && (reg & 0x7CFu) == 0 && ((reg >> 4) & 0xF) < 4) {
+        return rt_.timing().readTimer((reg >> 11) & 3, (reg >> 4) & 3);
+    }
     switch (reg) {
-        case 0x10000000: return timerCount(0);
-        case 0x10000800: return timerCount(1);
-        case 0x10001000: return timerCount(2);
-        case 0x10001800: return timerCount(3);
-        case 0x1000F000: return intcStat_;
-        case 0x1000F010: return intcMask_;
+        case 0x12001000: return rt_.timing().readGsCsr();
+        case 0x1000F000: return rt_.kernel().intcStat();
+        case 0x1000F010: return rt_.kernel().intcMask();
         case 0x1000F110: return 0x60;  // SIO_LSR: transmissor vazio
         case 0x1000F590: case 0x1000F520: return regs_[0x1000F590];
         default: break;
@@ -135,9 +121,14 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         rt_.iop().sifWriteRegister(reg, static_cast<std::uint32_t>(value));
         return;
     }
+    if (reg < 0x10002000u && (reg & 0x7CFu) == 0 && ((reg >> 4) & 0xF) < 4) {
+        rt_.timing().writeTimer((reg >> 11) & 3, (reg >> 4) & 3, static_cast<std::uint32_t>(value));
+        return;
+    }
     switch (reg) {
-        case 0x1000F000: intcStat_ &= ~static_cast<std::uint32_t>(value); return;  // escreve 1 para limpar
-        case 0x1000F010: intcMask_ ^= static_cast<std::uint32_t>(value); return;   // escreve 1 para inverter
+        case 0x12001000: rt_.timing().writeGsCsr(value); return;
+        case 0x1000F000: rt_.kernel().clearIntcStat(static_cast<std::uint32_t>(value)); return;  // 1 limpa
+        case 0x1000F010: rt_.kernel().toggleIntcMask(static_cast<std::uint32_t>(value)); return;  // 1 inverte
         case 0x1000F180: {  // SIO_TXFIFO: saída de debug do kernel/EE
             const char ch = static_cast<char>(value & 0xFF);
             std::fputc(ch, stdout);

@@ -13,6 +13,7 @@
 #include "anyps2/runtime/hardware.h"
 #include "anyps2/runtime/iop.h"
 #include "anyps2/runtime/kernel.h"
+#include "anyps2/runtime/timing.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -30,6 +31,7 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
         o.traceHardware = s.find("hw") != std::string::npos || s == "all";
         o.traceIop = s.find("iop") != std::string::npos || s == "all";
     }
+    if (const char* clock = std::getenv("ANYPS2_CLOCK")) o.virtualClock = std::string(clock) == "virtual";
     return o;
 }
 
@@ -43,6 +45,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     ctx_->rt = this;
     hw_ = std::make_unique<Hardware>(*this);
     iop_ = std::make_unique<Iop>(*this);
+    timing_ = std::make_unique<Timing>(*this, options_.virtualClock ? Timing::Mode::Virtual : Timing::Mode::Real);
     kernel_ = std::make_unique<Kernel>(*this);
 }
 
@@ -138,6 +141,19 @@ void Runtime::syscall(Context* c, std::uint32_t pc) {
     kernel_->syscall(c, pc);
 }
 
+void Runtime::safepoint(Context* c, std::uint32_t pc, std::int64_t extraCycles) {
+    // Instruções executadas desde a última recarga ~ ciclos (1 IPC).
+    timing_->consume(static_cast<std::int64_t>(c->budgetReload) - c->budget + extraCycles);
+    c->budget = c->budgetReload = 0;
+    timing_->process(pc);
+    kernel_->serviceInterrupts(pc);
+    // Próximo safepoint: no máximo kChunk instruções, ou antes do próximo evento.
+    constexpr std::uint64_t kChunk = 20000;
+    const std::uint64_t untilEvent = timing_->cyclesUntilNextEvent();
+    const auto chunk = static_cast<std::int32_t>(std::clamp<std::uint64_t>(untilEvent, 64, kChunk));
+    c->budget = c->budgetReload = chunk;
+}
+
 int Runtime::run(const std::vector<std::string>& args, const std::string& imagePath) {
     loadImage(imagePath);
     Context* c = ctx_.get();
@@ -148,6 +164,7 @@ int Runtime::run(const std::vector<std::string>& args, const std::string& imageP
     c->cop0[cop0::Config] = 0x00000440u;
     c->cop0[cop0::Status] = 0x70030C13u; // CU0-2, EIE, modo kernel
     kernel_->setBootArguments(args);
+    c->budget = c->budgetReload = 20000;
     const int code = kernel_->runMain(program_.entry);
     std::fflush(stdout);
     return code;

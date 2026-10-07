@@ -5,7 +5,8 @@
 #
 # Variáveis: ANYPS2, ELF, NAME, WORK, ANYPS2_ROOT, GENERATOR, BUILD_TYPE,
 #            CXX_COMPILER (opcional), EXPECTED (arquivo) ou EXPECTED_COMMAND
-#            (executável cuja saída é o esperado), ARGS (lista), HOST_DIR.
+#            (executável cuja saída é o esperado), ARGS (lista), HOST_DIR,
+#            CLOCK (virtual|real; padrão virtual).
 
 string(REPLACE "|" ";" ARGS "${ARGS}")
 
@@ -49,6 +50,11 @@ endif()
 file(REMOVE_RECURSE ${HOST_DIR})
 file(MAKE_DIRECTORY ${HOST_DIR})
 set(ENV{ANYPS2_HOST_DIR} ${HOST_DIR})
+# Relógio virtual por padrão: execução determinística.
+if(NOT CLOCK)
+    set(CLOCK virtual)
+endif()
+set(ENV{ANYPS2_CLOCK} ${CLOCK})
 execute_process(COMMAND ${exe} ${ARGS} WORKING_DIRECTORY ${HOST_DIR}
                 RESULT_VARIABLE rc OUTPUT_VARIABLE actual ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)

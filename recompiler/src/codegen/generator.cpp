@@ -170,8 +170,16 @@ private:
     }
 
     // Desvio sem link para t: goto local ou "tail call" e retorno.
-    std::string jumpTo(std::uint32_t t) const {
-        if (f_.contains(t) && labels_.count(t)) return "goto " + label(t) + ";";
+    // Desvios para trás fecham laços: descontam o orçamento de instruções e,
+    // quando ele acaba, passam por um safepoint (relógio, timers, VBlank,
+    // interrupções e troca de thread).
+    std::string jumpTo(std::uint32_t t, std::uint32_t from) const {
+        if (f_.contains(t) && labels_.count(t)) {
+            if (t > from) return "goto " + label(t) + ";";
+            const std::uint32_t cost = (from - t) / 4 + 2;
+            return "{ if ((c->budget -= " + std::to_string(cost) + ") < 0) [[unlikely]] c->rt->safepoint(c, " +
+                   hex32(from) + "); goto " + label(t) + "; }";
+        }
         return "{ c->pc = " + hex32(t) + "; " + staticCall(t) + " return; }";
     }
 
@@ -225,9 +233,9 @@ private:
             const std::uint32_t t = i.branchTarget();
             std::string target;
             if (i.isLink()) {
-                target = (f_.contains(t) && t != f_.start) ? jumpTo(t) : callTo(t, ret);
+                target = (f_.contains(t) && t != f_.start) ? jumpTo(t, i.address) : callTo(t, ret);
             } else {
-                target = jumpTo(t);
+                target = jumpTo(t, i.address);
             }
             out_ << "    {\n";
             out_ << "        const bool taken = " << cond << ";\n";
@@ -243,7 +251,7 @@ private:
         }
         switch (i.op) {
             case Op::J:
-                out_ << "    {\n" << delaySlot(i) << "        " << jumpTo(i.jumpTarget()) << "\n    }\n";
+                out_ << "    {\n" << delaySlot(i) << "        " << jumpTo(i.jumpTarget(), i.address) << "\n    }\n";
                 return;
             case Op::JAL:
                 out_ << "    {\n        " << link(31, ret) << "\n" << delaySlot(i);

@@ -14,6 +14,7 @@ namespace anyps2::rt {
 class Kernel;
 class Hardware;
 class Iop;
+class Timing;
 
 using GuestFunction = void (*)(Context*);
 
@@ -44,6 +45,7 @@ struct RuntimeOptions {
     bool traceCalls = false;     // ANYPS2_TRACE contém "call"
     bool traceHardware = false;  // ANYPS2_TRACE contém "hw"
     bool traceIop = false;       // ANYPS2_TRACE contém "iop"
+    bool virtualClock = false;   // ANYPS2_CLOCK=virtual (determinístico)
     static RuntimeOptions fromEnvironment();
 };
 
@@ -64,6 +66,10 @@ public:
     void call(Context* c);
     // Executa uma syscall (v1 = número).
     void syscall(Context* c, std::uint32_t pc);
+    // Chamado pelo código gerado quando o orçamento de instruções acaba (e no
+    // fim das syscalls): avança o relógio, dispara eventos, entrega
+    // interrupções e pode trocar de thread.
+    void safepoint(Context* c, std::uint32_t pc, std::int64_t extraCycles = 0);
 
     // ---- Usado pelo HLE -----------------------------------------------------
     const FunctionEntry* lookup(std::uint32_t address) const;
@@ -77,6 +83,7 @@ public:
     Kernel& kernel() { return *kernel_; }
     Hardware& hardware() { return *hw_; }
     Iop& iop() { return *iop_; }
+    Timing& timing() { return *timing_; }
     const RuntimeOptions& options() const { return options_; }
     const ProgramInfo& program() const { return program_; }
 
@@ -95,6 +102,7 @@ private:
     std::unique_ptr<Context> ctx_;
     std::unique_ptr<Hardware> hw_;
     std::unique_ptr<Iop> iop_;
+    std::unique_ptr<Timing> timing_;
     std::unique_ptr<Kernel> kernel_;
 };
 

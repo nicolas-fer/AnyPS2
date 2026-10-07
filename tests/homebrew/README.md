@@ -10,6 +10,7 @@ Os ELFs gerados ficam versionados para que os testes não dependam do ps2dev.
 | `cputest/` | CPU: inteiros, fluxo, libc, float + asm do R5900 (MMI, FPU, delay slots) | o mesmo `main.c` compilado para o host |
 | `threads/` | escalonador: prioridades, semáforos, sleep/wakeup, terminate | `expected.txt` |
 | `fileio/` | `host:` com fopen/fgets/fseek | `expected.txt` |
+| `timers/` | DelayThread (Timer 2), SetAlarm, VBlank, laço sem syscall, preempção por interrupção | `expected.txt` |
 
 Regenerar (requer Docker; usa a imagem `ghcr.io/ps2dev/ps2dev`):
 

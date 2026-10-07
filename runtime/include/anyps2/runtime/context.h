@@ -37,6 +37,13 @@ struct alignas(16) Context {
     std::uint32_t sa = 0;  // shift amount do QFSRV (em bytes)
     std::uint32_t pc = 0;  // alvo corrente de despacho/retorno
 
+    // Orçamento de instruções até o próximo safepoint. O código gerado
+    // decrementa em cada desvio para trás (laços); ao ficar negativo chama o
+    // runtime, que avança o relógio, dispara timers/VBlank e entrega
+    // interrupções. Não pertence a uma thread: o kernel o preserva na troca.
+    std::int32_t budget = 0;
+    std::int32_t budgetReload = 0;
+
     // COP1 (FPU de precisão simples). Guardado como bits.
     std::uint32_t f[32];
     std::uint32_t acc = 0;

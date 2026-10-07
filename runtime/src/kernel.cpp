@@ -112,11 +112,9 @@ void Kernel::syscall(Context* c, std::uint32_t pc) {
                      arg(c, 3), static_cast<unsigned long long>(ret), rt_.describe(pc).c_str());
     }
     c->r[2].ud[0] = ret;
-    rt_.iop().deliverPending(pc);  // interrupções que estavam mascaradas
-    if (reschedulePending_ && interruptDepth_ == 0) {
-        // Preserva o v0 da syscall na troca de contexto.
-        reschedule(pc);
-    }
+    // Fim da syscall é um safepoint: avança o relógio, entrega interrupções
+    // pendentes e troca de thread se preciso (o v0 já está no contexto).
+    rt_.safepoint(c, pc, kSyscallCycles);
 }
 
 std::int32_t Kernel::setupThread(Context* c, std::uint32_t pc) {
@@ -164,9 +162,9 @@ std::int32_t Kernel::addHandler(std::vector<Handler>& list, unsigned cause, std:
 }
 
 void Kernel::runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, unsigned cause,
-                         std::uint32_t pc) {
+                         std::uint32_t pc, bool ignoreEie) {
     if (!(enabledMask & (1u << cause))) return;
-    if (!(rt_.context().cop0[cop0::Status] & ops::kStatusEIE)) return;  // DI ativo
+    if (!ignoreEie && !(rt_.context().cop0[cop0::Status] & ops::kStatusEIE)) return;  // DI ativo
     ++interruptDepth_;
     try {
         // Copia: o handler pode registrar/remover outros handlers.
@@ -202,8 +200,43 @@ bool Kernel::canDeliverDmac(unsigned channel) const {
     return false;
 }
 
-void Kernel::raiseIntcInterrupt(unsigned cause, std::uint32_t pc) {
-    runHandlers(intcHandlers_, intcMask_, cause, pc);
+void Kernel::queueAlarm(const Timing::Alarm& a) {
+    pendingAlarms_.push_back({a.id, a.lines, a.handler, a.arg, a.gp});
+}
+
+void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle) {
+    if (interruptDepth_ == 0 && (idle || (rt_.context().cop0[cop0::Status] & ops::kStatusEIE))) {
+        // Um handler pode gerar novas causas; limita as voltas por segurança.
+        for (int round = 0; round < 8; ++round) {
+            const std::uint32_t pending = intcStat_ & intcMask_;
+            if (!pending && pendingAlarms_.empty()) break;
+            for (unsigned cause = 0; cause < 32; ++cause) {
+                const std::uint32_t bit = 1u << cause;
+                if (!(pending & bit)) continue;
+                intcStat_ &= ~bit;  // o kernel limpa a causa após os handlers
+                runHandlers(intcHandlers_, intcMask_, cause, pc, idle);
+            }
+            // Alarmes: void handler(s32 id, u16 time, void* arg), em contexto de interrupção.
+            std::vector<PendingAlarm> alarms;
+            alarms.swap(pendingAlarms_);
+            for (const auto& a : alarms) {
+                ++interruptDepth_;
+                Context& c = rt_.context();
+                const std::uint32_t savedGp = c.r[28].uw[0];
+                c.r[28].sd[0] = static_cast<std::int32_t>(a.gp);
+                try {
+                    rt_.invokeGuest(a.handler, {static_cast<std::uint32_t>(a.id), a.lines, a.arg}, pc);
+                } catch (...) {
+                    --interruptDepth_;
+                    throw;
+                }
+                c.r[28].sd[0] = static_cast<std::int32_t>(savedGp);
+                --interruptDepth_;
+            }
+        }
+        rt_.iop().deliverPending(pc);
+    }
+    if (allowReschedule && reschedulePending_ && interruptDepth_ == 0) reschedule(pc);
 }
 
 std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc) {
@@ -482,7 +515,6 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
             const bool was = (intcMask_ & bit) != 0;
             if (number == 0x14 || number == -0x1A) intcMask_ |= bit;
             else intcMask_ &= ~bit;
-            rt_.hardware().setIntcMask(intcMask_);
             return was ? 0 : 1;
         }
         case 0x16: case -0x1C: case 0x17: case -0x1D: {  // _Enable/_DisableDmac
@@ -511,11 +543,17 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
         case 0x7A: return rt_.iop().sifGetReg(arg(c, 0));
         case 0x6B: return 0;  // sceSifStopDma
 
-        // ---- Fase 3 ------------------------------------------------------------
-        case 0x18: case 0x19: case -0x1E: case -0x1F: case 0xFC: case 0xFE: case -0xFD: case -0xFF:
-            notImplemented(number, pc, "alarmes chegam na Fase 3");
+        // ---- Alarmes (unidade: linhas HSYNC) e VSync -------------------------------
+        case 0x18: case -0x1E: case 0xFC: case -0xFD:  // SetAlarm(time, handler, arg)
+            return ret32(rt_.timing().setAlarm(static_cast<std::uint16_t>(arg(c, 0)), arg(c, 1), arg(c, 2),
+                                               c->r[28].uw[0]));
+        case 0x19: case -0x1F: case 0xFE: case -0xFF:  // ReleaseAlarm(id)
+            return ret32(rt_.timing().releaseAlarm(sarg(0)) ? sarg(0) : -1);
+        case 0x73:  // SetVSyncFlag(u32* flag, u64* csr)
+            rt_.timing().setVSyncFlag(arg(c, 0), arg(c, 1));
+            return 0;
         case 0x50: case 0x51: case 0x52: case 0x53:
-            notImplemented(number, pc, "event flags chegam na Fase 3");
+            notImplemented(number, pc, "o kernel do EE não implementa event flags de forma utilizável");
         case 0x06: case 0x07: case 0x7B: case 0x87:
             notImplemented(number, pc, "carregar outro executável não é suportado");
         default:

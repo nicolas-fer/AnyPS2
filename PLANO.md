@@ -136,26 +136,46 @@ três homebrews (CPU, threads, arquivos) rodam com saída idêntica à esperada.
   claro; a correção é `--function 0x...` (ou, no futuro, o TOML).
 - Desempenho ainda não foi trabalhado (estado sempre em memória).
 
-## Fase 3 — Kernel do EE: threads, semáforos, timers, interrupções (parcial)
+## Fase 3 — Kernel do EE: threads, semáforos, timers, interrupções ✅
 
-Threads e semáforos foram antecipados porque o próprio crt0 do ps2sdk cria
-uma thread (`KernelTopThread`) antes do `main`.
-
-- ✅ Threads do EE: Create/Delete/Start/Exit/ExitDelete/Terminate,
-  Sleep/Wakeup/CancelWakeup, Suspend/Resume, ChangeThreadPriority,
-  RotateThreadReadyQueue, ReleaseWait, ReferThreadStatus, GetThreadId e
-  variantes `i*`. Cada thread do EE roda numa thread do host com pilha de
-  64 MB, mas só uma executa por vez ("bastão"), com prioridade estrita e troca
-  só em syscalls, como no kernel real. Deadlock (todas bloqueadas) vira erro
-  listando as threads.
+- ✅ Threads do EE (antecipadas na Fase 2 porque o crt0 do ps2sdk já cria uma):
+  Create/Delete/Start/Exit/ExitDelete/Terminate, Sleep/Wakeup/CancelWakeup,
+  Suspend/Resume, ChangeThreadPriority, RotateThreadReadyQueue, ReleaseWait,
+  ReferThreadStatus e variantes `i*`. Cada thread do EE roda numa thread do
+  host com pilha de 64 MB, mas só uma executa por vez ("bastão"), com
+  prioridade estrita como no kernel real.
 - ✅ Semáforos (Create/Delete/Signal/Wait/Poll/ReferSemaStatus + `i*`).
-- ⬜ Alarmes (`SetAlarm`, `DelayThread`), timers T0–T3 com interrupção.
-- ⬜ VBlank (start/end) sintético a 50/60 Hz e INTC geral.
-- ⬜ Event flags.
+- ✅ Relógio do EE em ciclos, em dois modos: **real** (tempo do host; quando
+  todas as threads dormem, o runtime dorme até o próximo evento) e
+  **virtual** (`ANYPS2_CLOCK=virtual`: determinístico, o tempo avança com as
+  instruções executadas e salta para o próximo evento quando todas dormem).
+- ✅ Safepoints: o gerador desconta um orçamento de instruções em todo
+  desvio para trás; ao acabar, o runtime avança o relógio, dispara eventos,
+  entrega interrupções e pode trocar de thread. Laços de espera ativa sem
+  syscalls (flag escrita por handler, polling de `GS_CSR`) funcionam.
+- ✅ Timers T0–T3: contagem com prescaler (BUSCLK, /16, /256, HBLANK), COMP,
+  ZRET, overflow, flags EQUF/OVFF "escreve 1 para limpar", interrupções INTC
+  9–12. O sistema de timers do ps2sdk (base do `DelayThread`) roda em cima
+  do T2 sem nenhum stub.
+- ✅ VBlank sintético NTSC (~59,94 Hz): INTC VBLANK_S/VBLANK_E, `GS_CSR.VSINT`
+  e `FIELD`, `SetVSyncFlag`.
+- ✅ Alarmes do kernel (`SetAlarm`/`ReleaseAlarm`/`i*`, unidade HSYNC).
+- ✅ Entrega de interrupções: INTC_STAT/INTC_MASK, handlers em contexto de
+  interrupção (sem aninhamento), troca de thread ao fim da interrupção quando
+  um handler acorda uma thread de prioridade maior.
+- ✅ Deadlock: no relógio virtual, 60 s do EE sem nenhuma thread pronta vira
+  erro listando as threads (no relógio real o programa pode legitimamente
+  esperar para sempre, como no console).
+- ➖ Event flags: o kernel do EE não os implementa de forma utilizável (o
+  ps2sdk nem expõe a API); as syscalls lançam erro explícito.
+- ✅ Testes: unitários do `Timing` (7 casos) e o homebrew `timers` de ponta a
+  ponta nos dois relógios (DelayThread, alarmes, VBlank, laço sem syscall,
+  preempção por interrupção).
 
-Riscos: jogos que dependem de temporização exata entre threads/interrupções.
-Começamos com um relógio virtual determinístico (útil para testes) e
-avançamos para tempo real.
+Limitações: o tempo virtual conta ~1 ciclo por instrução (o EE real tem
+stalls de cache/memória); temporização fina de jogos pode exigir calibração
+por jogo na Fase 7. VBlank só em NTSC por enquanto (PAL quando houver
+SetGsCrt com modo PAL relevante).
 
 ## Fase 4 — Gráficos: GIF/VIF/DMA + Graphics Synthesizer ⬜
 

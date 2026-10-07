@@ -104,9 +104,20 @@ void Kernel::blockCurrent(std::uint32_t waitType, std::int32_t waitId, std::uint
     current_->status = THS_WAIT | (current_->suspended ? THS_SUSPEND : 0);
     current_->waitType = waitType;
     current_->waitId = waitId;
-    Thread* next = bestReady();
-    if (!next) deadlock(pc);
-    switchTo(next, pc);
+    switchTo(waitForReady(pc), pc);
+}
+
+Kernel::Thread* Kernel::waitForReady(std::uint32_t pc) {
+    Timing& timing = rt_.timing();
+    const std::uint64_t start = timing.now();
+    for (;;) {
+        if (Thread* next = bestReady()) return next;
+        // No relógio virtual, 60 s do EE sem nenhuma thread pronta é deadlock
+        // (no modo real o programa pode estar esperando entrada para sempre).
+        if (timing.mode() == Timing::Mode::Virtual && timing.now() - start > 60 * Timing::kEeHz) deadlock(pc);
+        if (!timing.advanceToNextEvent(pc)) deadlock(pc);
+        serviceInterrupts(pc, false, true);
+    }
 }
 
 void Kernel::switchTo(Thread* next, std::uint32_t pc) {
@@ -137,8 +148,11 @@ void Kernel::switchTo(Thread* next, std::uint32_t pc) {
         self->cv.wait(lk, [&] { return self->go || shutdown_; });
         if (shutdown_) throw ShutdownSignal{};
     }
-    // Recebemos o bastão de volta.
+    // Recebemos o bastão de volta. O orçamento de safepoint é global, não da thread.
+    const std::int32_t budget = ctx.budget, reload = ctx.budgetReload;
     ctx = self->saved;
+    ctx.budget = budget;
+    ctx.budgetReload = reload;
     if (self->unwind) {
         self->unwind = false;
         throw ThreadRestartSignal{};
@@ -177,9 +191,7 @@ void Kernel::hostThreadMain(Thread* t) {
         // A thread terminou (retorno da função de entrada ou ExitThread).
         t->status = THS_DORMANT;
         try {
-            Thread* next = bestReady();
-            if (!next) deadlock(ctx.pc);
-            switchTo(next, ctx.pc);
+            switchTo(waitForReady(ctx.pc), ctx.pc);
             // Fomos reiniciados por StartThread: o laço carrega o contexto novo.
         } catch (const ThreadRestartSignal&) {
             continue;
@@ -247,8 +259,8 @@ std::string Kernel::describeThreads() const {
 }
 
 void Kernel::deadlock(std::uint32_t pc) {
-    throw GuestError("deadlock: todas as threads do EE estão bloqueadas e nenhuma interrupção "
-                     "pendente pode acordá-las (timers/alarmes chegam na Fase 3):" + describeThreads(),
+    throw GuestError("deadlock: todas as threads do EE estão bloqueadas e nenhum evento (timer, "
+                     "alarme, VBlank) as acordou:" + describeThreads(),
                      pc);
 }
 

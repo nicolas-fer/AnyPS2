@@ -25,7 +25,6 @@ public:
     void write(std::uint32_t addr, const void* in, unsigned size, std::uint32_t pc) override;
 
     void setGsCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field);
-    void setIntcMask(std::uint32_t mask) { intcMask_ = mask; }
 
     // Nome do registrador (para mensagens), ou "" se desconhecido.
     static std::string registerName(std::uint32_t addr);
@@ -33,12 +32,9 @@ public:
 private:
     std::uint64_t read64(std::uint32_t addr, unsigned size, std::uint32_t pc);
     void write64(std::uint32_t addr, std::uint64_t value, unsigned size, std::uint32_t pc);
-    std::uint32_t timerCount(unsigned timer) const;
 
     Runtime& rt_;
     std::map<std::uint32_t, std::uint64_t> regs_;
-    std::uint32_t intcStat_ = 0;
-    std::uint32_t intcMask_ = 0;
     std::string sioLine_;
 };
 

@@ -1,0 +1,13 @@
+1. DelayThread
+ordem: 10 20 30
+DelayThread(50 ms) durou >= 50 ms: sim
+2. SetAlarm
+alarmes criados: sim
+alarme 1 disparou, alarme 2 cancelado: sim
+3. VBlank
+handler de VBlank chamado 3 vezes durante o laço
+espera em GS_CSR: 3 VBlanks, com espera
+5. preempção por interrupção
+alta: rodou, a principal estava no laço
+principal: saiu do laço depois da alta
+fim
