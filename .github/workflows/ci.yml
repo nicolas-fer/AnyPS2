@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependências
+        run: sudo apt-get update && sudo apt-get install -y ninja-build binutils-mipsel-linux-gnu
+      - name: Configurar
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then export CXX=clang++; else export CXX=g++; fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DANYPS2_WARNINGS_AS_ERRORS=ON
+      - name: Compilar
+        run: cmake --build build
+      - name: Testes
+        run: ctest --test-dir build --output-on-failure
+      - name: Oráculo diferencial (GNU objdump, ~1,6 milhão de palavras)
+        run: python3 tests/scripts/objdump_oracle.py check --tests build/tests/anyps2_tests --per-slot 300 --random 1000000 --seed ${{ github.run_number }}
+      - name: Arquivos gerados estão em dia
+        run: |
+          python3 tests/scripts/objdump_oracle.py golden
+          python3 tests/scripts/gen_instruction_table.py
+          git diff --exit-code -- tests/data tests/unit/instruction_table.inc
+
+  sanitizers:
+    name: Linux (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DANYPS2_WARNINGS_AS_ERRORS=ON
+      - name: Compilar
+        run: cmake --build build --config Release
+      - name: Testes
+        run: ctest --test-dir build -C Release --output-on-failure
