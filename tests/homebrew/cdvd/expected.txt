@@ -1,0 +1,23 @@
+sceCdInit: 1
+sceCdMmode: 1
+tipo do disco: 0x12
+diskReady: 2
+searchFile(\DATA\HELLO.TXT;1): 1 lsn 27 tamanho 23 nome HELLO.TXT;1 data 17/05/2024
+sceCdRead: 1 sync 0 erro 0: Ola do setor do disco!
+searchFile(\DATA\BIG.BIN;1): 1 tamanho 5000
+soma dos 3 setores: e409dc
+searchFile(\NADA.BIN;1): 0
+relógio: 2000-01-01 00:00
+fopen cdrom0: ok
+  > Disco de teste do AnyPS2.
+  > Lido via cdrom0: pelo fileio.
+lseek fim: 5000
+read no 3º setor: 8 bytes, primeiro 86
+open para escrita: recusado
+stat DATA: 0 diretório: sim
+stat README: 0 tamanho 56
+opendir raiz: ok
+  DATA
+  README.TXT;1
+  SYSTEM.CNF;1
+fim

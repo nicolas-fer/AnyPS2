@@ -9,7 +9,7 @@
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/hardware.h"
-#include "anyps2/runtime/iop.h"
+#include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/ops.h"
 #include "anyps2/runtime/runtime.h"
 #include "kernel_internal.h"

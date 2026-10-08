@@ -14,13 +14,15 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
                          memória, GS, VU, IOP, SPU2, pad, CDVD...)
 ```
 
-> **Status: Fases 1 a 5 concluídas.** Homebrews do ps2dev — de console
+> **Status: Fases 1 a 6 concluídas.** Homebrews do ps2dev — de console
 > (printf, threads, timers, arquivos), gráficos 2D/3D (libgraph/libdraw e
-> gsKit) e com os Vector Units (libmath3d no VU0, microprogramas do VU1) —
-> são recompilados e rodam nativos, com o Graphics Synthesizer emulado em
-> software e janela SDL2. O microcódigo dos VUs também é recompilado
-> estaticamente. Ainda não há som, controle nem jogos. Veja o
-> [PLANO.md](PLANO.md) para o roteiro completo.
+> gsKit), com os Vector Units (libmath3d no VU0, microprogramas do VU1) e
+> agora com controle, memory card, disco (ISO) e som — são recompilados e
+> rodam nativos, com o Graphics Synthesizer e o SPU2 emulados em software e
+> janela/áudio/controles via SDL2. Ainda não roda jogos comerciais: eles
+> costumam trazer drivers próprios para o IOP, que ainda não executa código
+> (ver [O que falta](#o-que-falta)). Veja o [PLANO.md](PLANO.md) para o
+> roteiro completo.
 
 | `gfx2d` (libgraph + libdraw) | `cube3d` (Z-buffer, textura em perspectiva) | `gskit` |
 |---|---|---|
@@ -58,7 +60,49 @@ cmake -S /tmp/cube3d -B /tmp/cube3d/build && cmake --build /tmp/cube3d/build
 ANYPS2_VIDEO=none ANYPS2_SCREENSHOT=cubo.png /tmp/cube3d/build/cube3d
 ```
 
+Controles, memory card, disco e som (Fase 6):
+
+```sh
+# teclado: setas, Z=✕ X=○ A=□ S=△, Q/W=L1/R1, 1/2=L2/R2, Enter=START,
+# Backspace=SELECT; ou um controle (SDL_GameController)
+ANYPS2_ISO=meu_dump.iso ./jogo          # disco: cdrom0: e libcdvd
+ANYPS2_MC_DIR=~/cartoes ./jogo          # memory cards em ~/cartoes/mc0, mc1
+ANYPS2_AUDIO_WAV=som.wav ./jogo         # grava o som (além dos alto-falantes)
+ANYPS2_PAD_SCRIPT=roteiro.txt ./jogo    # entrada determinística (testes)
+```
+
 ## O que funciona hoje
+
+### Fase 6 — IOP em HLE: módulos, controle, memory card, disco e som
+
+O IOP não executa código: os módulos são reimplementados por protocolo RPC
+(a partir do ps2sdk, sem nada da Sony) e "carregar" um IRX registra os
+servidores da implementação HLE.
+
+- **Módulos**: `SifLoadModule` (`rom0:`, `host:`, `cdrom0:`),
+  `SifExecModuleBuffer` (IRX embutido), `SifSearchModuleByName`. O IRX é
+  identificado pelo nome gravado nele; **sem implementação HLE é erro claro**
+  com nome, versão e origem (ex.: `módulo IRX "USB_driver" v2.4 ... não tem
+  implementação HLE`).
+- **Controles** (`padman`, protocolos do XPADMAN e do PADMAN da ROM):
+  DualShock 2 com modos digital/analógico/pressão, pelo teclado ou
+  controle (SDL), ou por roteiro (`ANYPS2_PAD_SCRIPT`).
+- **Memory card** (`mcserv`, libmc): pastas do host (`ANYPS2_MC_DIR`),
+  arquivos, pastas, listagem com curinga, renomear, apagar, espaço livre.
+- **Disco** (`cdvdfsv`, libcdvd): ISO própria em `ANYPS2_ISO` (2048 ou
+  2352 bytes/setor), ISO 9660 nosso, `sceCdSearchFile`/`sceCdRead`/relógio e
+  `cdrom0:` no fopen/open/stat/opendir.
+- **Som**: SPU2 em software (48 vozes ADPCM, ADSR, pitch, mixagem a
+  48 kHz) e `audsrv` (PCM com conversão de taxa e espera bloqueante,
+  samples ADPCM). O mixer roda no tempo emulado — no relógio virtual o WAV
+  sai idêntico sempre. Saída: SDL (`ANYPS2_AUDIO=sdl|none`) e/ou WAV
+  (`ANYPS2_AUDIO_WAV`).
+
+Limitações: drivers IRX próprios de jogos, `sdrdrv`/libsdr, reverb, CD-DA,
+multitap e o callback `audsrv_on_fillbuf` não existem (erro claro);
+interpolação de amostras cúbica em vez da tabela gaussiana do chip;
+leituras de disco instantâneas; `mc0:` só pelo libmc. Detalhes no
+[PLANO.md](PLANO.md#fase-6--iop-em-hle-).
 
 ### Fase 5 — Vector Units (VU0/VU1)
 
@@ -214,7 +258,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 Opções: `-DANYPS2_WARNINGS_AS_ERRORS=ON` (usado no CI),
 `-DANYPS2_BUILD_TESTS=OFF`, `-DANYPS2_E2E_TESTS=OFF` (pula os testes de ponta
-a ponta, que recompilam e compilam 16 homebrews, alguns minutos com
+a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 `ctest -j8`).
 
 ### Testes
@@ -233,6 +277,9 @@ a ponta, que recompilam e compilam 16 homebrews, alguns minutos com
 | `vu` | 12 casos do núcleo do VU com valores calculados à mão (truncamento, flags, latências, stalls, Q/P, upper/lower em paralelo, bit E, desvios, EFU, XGKICK, MSCAL com double buffering) |
 | `vu_diff` | **diferencial** interpretador × microcódigo recompilado: 16 microprogramas aleatórios × 48 estados; também realocado para outra base e com um par alterado na micro memória |
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
+| `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release) |
+| `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
+| `e2e_pad`, `e2e_pad_rom`, `e2e_memcard`, `e2e_cdvd`, `e2e_cdvd_noiso`, `e2e_audio` | controles por roteiro (dois protocolos, mesma saída), memory card, disco a partir de `disc.iso` (e o erro sem ISO), som via `audsrv.irx` com o **WAV comparado byte a byte** |
 
 O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
 (inteiros de 32/64 bits, jump tables, ponteiros de função, recursão,
@@ -284,8 +331,10 @@ vu/           conjunto de instruções dos VUs: decodificador, disassembler e
 recompiler/   biblioteca: ELF, decodificador/disassembler R5900, análise de
               funções (analysis/) e gerador de C++ (codegen/)
 runtime/      biblioteca linkada pelo código gerado: contexto, memória,
-              semântica das instruções (ops.h), kernel do EE, hardware, IOP/SIF,
-              DMAC, GIF, VIF, VUs (vu/), GS em software (gs/) e vídeo (SDL2)
+              semântica das instruções (ops.h), kernel do EE, hardware, IOP em
+              HLE (iop/: SIF, loadfile, padman, mcserv, cdvdfsv + ISO 9660,
+              SPU2, audsrv), DMAC, GIF, VIF, VUs (vu/), GS em software (gs/),
+              vídeo, áudio e controles (SDL2)
 cmake/        AnyPS2Runtime.cmake (incluído pelos projetos gerados)
 tools/        CLI anyps2
 tests/        framework mínimo, testes unitários, golden do objdump, fixtures,
@@ -309,8 +358,10 @@ O golden do microcódigo dos VUs usa o `dvp-objdump` do ps2dev (Docker):
 
 ## O que falta
 
-- Fase 6: módulos do IOP (pad, memory card, CDVD, SPU2/áudio, carregar IRX).
-- Fase 7: jogos comerciais.
+- Fase 7: jogos comerciais. O maior risco conhecido é o IOP: a maioria dos
+  jogos carrega drivers IRX próprios (som, streaming), que só rodariam
+  emulando ou recompilando o próprio IOP (R3000A) — trabalho do porte da
+  Fase 2. Só um dump real vai dizer quanto disso cada jogo exige.
 
 Limitações atuais (detalhes no [PLANO.md](PLANO.md)): não há suporte a
 código do EE carregado em tempo de execução (overlays), o GS em software é
@@ -318,7 +369,8 @@ mono-thread (~19 Mpixels/s com textura bilinear — suficiente para homebrews,
 não para jogos comerciais; é ele, não o VU, que domina o tempo nos samples
 3D), DMA termina instantaneamente (só o FINISH do GS tem latência), os VUs
 rodam síncronos com o EE, o EFU usa a libm do host (último bit pode
-diferir) e só há vídeo NTSC.
+diferir), só há vídeo NTSC e os limites do IOP em HLE listados na
+[Fase 6](#fase-6--iop-em-hle-módulos-controle-memory-card-disco-e-som).
 
 ## Aspectos legais
 

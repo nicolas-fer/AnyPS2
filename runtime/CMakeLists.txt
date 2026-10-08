@@ -17,7 +17,17 @@ add_library(anyps2_runtime STATIC
     src/kernel_threads.cpp
     src/host_thread.cpp
     src/hardware.cpp
-    src/iop.cpp
+    src/iop/iop.cpp
+    src/iop/irx.cpp
+    src/iop/loadfile.cpp
+    src/iop/pad.cpp
+    src/iop/mcserv.cpp
+    src/iop/cdvd.cpp
+    src/iop/iso9660.cpp
+    src/iop/spu2.cpp
+    src/iop/audsrv.cpp
+    src/audio.cpp
+    src/input.cpp
     src/timing.cpp
     src/dmac.cpp
     src/gif.cpp
@@ -69,7 +79,7 @@ if(ANYPS2_WITH_SDL)
         endif()
     endif()
     set_property(GLOBAL PROPERTY ANYPS2_SDL_ORIGIN ${_anyps2_sdl_origin})
-    target_sources(anyps2_runtime PRIVATE src/video_sdl.cpp)
+    target_sources(anyps2_runtime PRIVATE src/video_sdl.cpp src/audio_sdl.cpp)
     if(TARGET SDL2::SDL2-static)
         target_link_libraries(anyps2_runtime PRIVATE SDL2::SDL2-static)
     else()
@@ -77,5 +87,5 @@ if(ANYPS2_WITH_SDL)
     endif()
 else()
     set_property(GLOBAL PROPERTY ANYPS2_SDL_ORIGIN none)
-    target_sources(anyps2_runtime PRIVATE src/video_nosdl.cpp)
+    target_sources(anyps2_runtime PRIVATE src/video_nosdl.cpp src/audio_nosdl.cpp)
 endif()

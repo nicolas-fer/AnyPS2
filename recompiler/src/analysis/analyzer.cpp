@@ -115,6 +115,7 @@ ProgramModel analyze(const elf::ElfFile& elf, const AnalysisOptions& options) {
     for (std::size_t i = 0; i < startList.size(); ++i) {
         const std::uint32_t s = startList[i];
         const CodeRegion* region = regionOf(model.regions, s);
+        if (!region) continue;  // addStart só aceita endereços dentro de código
         std::uint32_t end = region->end;
         if (i + 1 < startList.size() && startList[i + 1] < end) end = startList[i + 1];
         const auto& [name, size] = starts[s];

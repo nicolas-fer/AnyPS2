@@ -1,0 +1,16 @@
+freesd.irx: carregado
+audsrv.irx: carregado
+audsrv_init: 0
+formato 96 kHz: -3
+formato 22050 Hz mono: 0
+volume: 0
+livre no início: 4700
+PCM enviado: 6615 amostras, na fila: sim
+fila vazia depois de ~6 quadros
+adpcm_init: 0
+load_adpcm: 0 pitch 0x800 canais 1 loop 0
+tocando no canal 1
+volume/pan: 0
+tocando? 1
+sample terminou depois de ~2 quadros
+fim

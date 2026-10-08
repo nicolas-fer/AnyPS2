@@ -7,7 +7,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
-#include "anyps2/runtime/iop.h"
+#include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"

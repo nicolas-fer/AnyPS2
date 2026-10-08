@@ -9,7 +9,10 @@
 #            (executável cuja saída é o esperado), ARGS (lista), HOST_DIR,
 #            CLOCK (virtual|real; padrão virtual), EXPECTED_FRAME (PNG que a
 #            última imagem exibida deve reproduzir byte a byte), ENV (lista
-#            de VAR=valor para o executável, ex.: ANYPS2_FRAMES=8).
+#            de VAR=valor para o executável, ex.: ANYPS2_FRAMES=8),
+#            EXPECTED_WAV (WAV que o som gerado deve reproduzir byte a byte),
+#            EXPECT_FAIL (regex: o programa deve terminar com erro e o stderr
+#            conter esta expressão; o stdout ainda é comparado).
 
 string(REPLACE "|" ";" ARGS "${ARGS}")
 string(REPLACE "|" ";" ENV "${ENV}")
@@ -70,6 +73,7 @@ if(NOT CLOCK)
 endif()
 set(ENV{ANYPS2_CLOCK} ${CLOCK})
 set(ENV{ANYPS2_VIDEO} none)
+set(ENV{ANYPS2_AUDIO} none)
 foreach(kv ${ENV})
     string(FIND "${kv}" "=" eq)
     string(SUBSTRING "${kv}" 0 ${eq} key)
@@ -81,9 +85,21 @@ if(EXPECTED_FRAME)
     file(REMOVE ${WORK}/frame.png)
     set(ENV{ANYPS2_SCREENSHOT} ${WORK}/frame.png)
 endif()
+if(EXPECTED_WAV)
+    file(REMOVE ${WORK}/audio.wav)
+    set(ENV{ANYPS2_AUDIO_WAV} ${WORK}/audio.wav)
+endif()
 execute_process(COMMAND ${exe} ${ARGS} WORKING_DIRECTORY ${HOST_DIR}
                 RESULT_VARIABLE rc OUTPUT_VARIABLE actual ERROR_VARIABLE err)
-if(NOT rc EQUAL 0)
+if(EXPECT_FAIL)
+    if(rc EQUAL 0)
+        message(FATAL_ERROR "${NAME} deveria falhar (\"${EXPECT_FAIL}\"), mas terminou com sucesso\n${actual}")
+    endif()
+    if(NOT err MATCHES "${EXPECT_FAIL}")
+        message(FATAL_ERROR "${NAME}: o erro não é o esperado (\"${EXPECT_FAIL}\")\n--- stderr ---\n${err}")
+    endif()
+    message(STATUS "${NAME}: falhou como esperado: ${err}")
+elseif(NOT rc EQUAL 0)
     message(FATAL_ERROR "${NAME} terminou com código ${rc}\n--- stdout ---\n${actual}\n--- stderr ---\n${err}")
 endif()
 
@@ -115,4 +131,17 @@ if(EXPECTED_FRAME)
                             "  obtida:   ${WORK}/frame.png\n  esperada: ${EXPECTED_FRAME}")
     endif()
     message(STATUS "${NAME}: imagem idêntica à referência")
+endif()
+
+if(EXPECTED_WAV)
+    if(NOT EXISTS ${WORK}/audio.wav)
+        message(FATAL_ERROR "${NAME}: nenhum WAV gerado (esperava ${EXPECTED_WAV})")
+    endif()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E compare_files ${WORK}/audio.wav ${EXPECTED_WAV}
+                    RESULT_VARIABLE differ)
+    if(differ)
+        message(FATAL_ERROR "${NAME}: o som gerado difere da referência\n"
+                            "  obtido:   ${WORK}/audio.wav\n  esperado: ${EXPECTED_WAV}")
+    endif()
+    message(STATUS "${NAME}: som idêntico à referência")
 endif()

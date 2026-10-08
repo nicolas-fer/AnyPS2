@@ -8,13 +8,15 @@
 #include <iostream>
 
 #include "anyps2/common/bytes.h"
+#include "anyps2/runtime/audio.h"
 #include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/generated.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/hardware.h"
-#include "anyps2/runtime/iop.h"
+#include "anyps2/runtime/input.h"
+#include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/video.h"
@@ -44,6 +46,10 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
     if (const char* v = std::getenv("ANYPS2_VU")) o.vuMode = v;
     if (const char* d = std::getenv("ANYPS2_VU_DUMP")) o.vuDumpDir = d;
     if (const char* n = std::getenv("ANYPS2_FRAMES")) o.frames = std::strtoull(n, nullptr, 10);
+    if (const char* v = std::getenv("ANYPS2_ISO")) o.iso = v;
+    if (const char* v = std::getenv("ANYPS2_PAD_SCRIPT")) o.padScript = v;
+    if (const char* v = std::getenv("ANYPS2_AUDIO")) o.audio = v;
+    if (const char* v = std::getenv("ANYPS2_AUDIO_WAV")) o.audioWav = v;
     return o;
 }
 
@@ -55,6 +61,8 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     std::memset(static_cast<void*>(ctx_.get()), 0, sizeof(Context));
     ctx_->mem = mem_.get();
     ctx_->rt = this;
+    input_ = std::make_unique<Input>();
+    if (!options_.padScript.empty()) input_->loadScript(options_.padScript);
     hw_ = std::make_unique<Hardware>(*this);
     iop_ = std::make_unique<Iop>(*this);
     timing_ = std::make_unique<Timing>(*this, options_.virtualClock ? Timing::Mode::Virtual : Timing::Mode::Real);
@@ -90,8 +98,9 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
 
 Runtime::~Runtime() = default;
 
-void Runtime::onVblank() {
+void Runtime::onVblank(std::uint32_t pc) {
     ++vblanks_;
+    iop_->vblank(pc);
     if (options_.frames && vblanks_ >= options_.frames) throw ProgramExit{0};
     if (!video_) return;
     if (gs_->displayEnabled()) video_->present(gs_->display());
@@ -222,11 +231,14 @@ int Runtime::run(const std::vector<std::string>& args, const std::string& imageP
     c->cop0[cop0::Status] = 0x70030C13u; // CU0-2, EIE, modo kernel
     kernel_->setBootArguments(args);
     c->budget = c->budgetReload = 20000;
-    video_ = createVideo(options_, program_.name);
+    audio_ = std::make_unique<Audio>(options_);
+    video_ = createVideo(options_, program_.name, input_.get());
     const int code = kernel_->runMain(program_.entry);
     std::fflush(stdout);
+    iop_->flushAudio(0);
     saveScreenshot();
     video_.reset();
+    audio_.reset();
     return code;
 }
 

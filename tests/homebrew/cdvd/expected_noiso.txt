@@ -1,0 +1,4 @@
+sceCdInit: 1
+sceCdMmode: 1
+tipo do disco: 0x00
+diskReady: 6

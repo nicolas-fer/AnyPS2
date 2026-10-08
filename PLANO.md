@@ -371,21 +371,98 @@ Limitações (honestas):
 - Microcódigo que não está no ELF nem nos dumps roda no interpretador
   (correto, só mais lento).
 
-## Fase 6 — IOP em HLE ⬜
+## Fase 6 — IOP em HLE ✅
 
-- ⬜ SIF (DMA EE↔IOP, `sceSifCallRpc`, `sceSifBindRpc`, `SifLoadModule`).
-- ⬜ Módulos em HLE por interface RPC: `sio2man`/`padman`/`xpadman` (pad via
-  SDL GameController), `mcman`/`mcserv` (memory card em arquivo), `cdvdman`/
-  `cdvdfsv` (leitura de ISO própria, ISO9660), `libsd`/`sdrdrv` (SPU2),
-  `ioman`/`fileio`.
-- ⬜ SPU2: 48 vozes ADPCM, envelopes ADSR, reverb, saída via SDL audio.
-- ⬜ Módulo IRX desconhecido → erro com nome do módulo e versão.
+O IOP não executa código: cada comando SIF que o EE manda é interpretado na
+hora e os módulos (IRX) são reimplementados em C++ por protocolo RPC
+(`runtime/src/iop/`). Tudo escrito a partir dos protocolos públicos do
+ps2sdk; nenhum código ou firmware da Sony.
 
-Riscos (médio/alto): cada jogo usa versões diferentes dos módulos e alguns
-carregam drivers IRX próprios (áudio, streaming). Para esses, HLE por nome
-não basta e será preciso emular/recompilar o próprio IOP (R3000A) — o
-parser de ELF já reconhece IRX, mas isso é um subprojeto de porte similar à
-Fase 2.
+- ✅ **Carregamento de módulos** (servidor `loadfile`): `SifLoadModule`
+  (`rom0:`/`host:`/`cdrom0:`), `SifExecModuleBuffer` (IRX embutido no ELF e
+  copiado por DMA para a RAM do IOP), `SifSearchModuleByName`,
+  `SifIopGetVal/SifIopSetVal`. O módulo é identificado pelo nome gravado
+  no IRX (`.iopmod`, ou a `ModuleInfo` dos IRX do ps2sdk) ou pelo nome do
+  arquivo em `rom0:`, e "carregar" registra os servidores RPC da
+  implementação HLE.
+  Módulo sem HLE (ex.: `usbd.irx`, um driver próprio do jogo,
+  `rom0:FOOBAR`) é erro explícito com nome, versão e origem. `SifIopReset`
+  descarrega o que o programa carregou. `cdvdman/cdvdfsv`, `fileio`,
+  `iopheap` e `loadfile` existem desde o boot, como no console.
+- ✅ **Controles** (`padman`, os dois protocolos do libpad: XPADMAN/
+  padman.irx `0x80000100` e PADMAN da ROM `0x8000010F`): DualShock 2
+  emulado — modos digital (0x41), analógico (0x73) e com pressão (0x79),
+  `padSetMainMode`, `padInfoMode`, `padEnterPressMode`, atuadores aceitos
+  (sem vibração no host). A cada VBlank a estrutura de estado é escrita na
+  área do EE (buffer duplo, como o módulo real). Entrada: teclado e
+  controles (SDL_GameController) pela thread da janela, ou um **roteiro
+  determinístico** (`ANYPS2_PAD_SCRIPT`) para testes. Sem multitap.
+- ✅ **Memory card** (`mcman/mcserv`, libmc nas numerações nova e antiga):
+  cada cartão é uma pasta do host (`$ANYPS2_MC_DIR/mc0`, `mc1`; padrão
+  `$ANYPS2_HOST_DIR/memcard`). getInfo (com "cartão trocado" na primeira
+  vez), open/close/read/write/seek/flush, mkdir, chdir, getDir com curinga,
+  rename (setFileInfo), delete, format/unformat. O espaço livre segue o
+  cartão de 8 MB (clusters de 1 KB). O FAT do cartão não é emulado em nível
+  de bloco: não é possível usar um `.ps2` de outro emulador (nem
+  `mcReadPage/mcWritePage`, que dão erro).
+- ✅ **Disco** (`cdvdman/cdvdfsv`): imagem ISO própria em `ANYPS2_ISO`
+  (2048 bytes/setor ou bruta 2352, modo 1/modo 2), ISO 9660 implementado do
+  zero (volume primário, diretórios multi-setor). `sceCdInit`,
+  `sceCdSearchFile`, `sceCdRead` (no EE e na RAM do IOP), `sceCdSync`,
+  `sceCdDiskReady`, `sceCdGetDiskType` (CD/DVD pelo tamanho),
+  `sceCdReadClock` (no relógio virtual, data fixa + tempo emulado), status,
+  bandeja, seek/pause/stop; `cdrom0:` no fileio (open/read/lseek/getstat/
+  dopen/dread; escrita recusada). Leituras são instantâneas.
+- ✅ **SPU2 em software**: 2 MB de RAM, 48 vozes ADPCM (blocos com flags de
+  loop), envelope ADSR (ataque/decay/sustain/release lineares e
+  exponenciais), pitch, volume por voz, mixagem estéreo a 48 kHz.
+  O mixer roda **no tempo emulado** (a cada VBlank gera as amostras do
+  intervalo): com o relógio virtual, o som é idêntico em toda execução.
+- ✅ **audsrv** (ps2sdk): PCM 8/16 bits mono/estéreo de 11025 a 48000 Hz no
+  buffer circular do tamanho do original, convertido para 48 kHz como o
+  módulo real; `audsrv_wait_audio` bloqueia o EE (resposta RPC adiada até
+  haver espaço); volume; samples ADPCM (load/play/volume e pan/is_playing).
+  `freesd`/`libsd` são aceitos (a API deles é para outros módulos do IOP).
+- ✅ **Saída de som**: SDL2 (`ANYPS2_AUDIO=sdl`, ou automático se houver
+  dispositivo) e/ou WAV (`ANYPS2_AUDIO_WAV=arquivo.wav`).
+- ✅ Correções do SIF achadas aqui: resposta de RPC `NOWAIT` sem callback
+  (`rmode` 0) agora também zera o pacote do cliente no EE, como o
+  `sceSifExecRequest` do IOP — sem isso `sceSifCheckStatRpc` nunca dizia
+  "terminado" (libmc travava); `dopen` e `mkdir` do fileio liam o nome no
+  offset errado (bug da Fase 2, nunca exercitado).
+- ✅ Build: o GCC 13 em Release (`-O3`) acusava falsos "null dereference"
+  dentro da libstdc++ com `-Werror` — o job GCC do CI não compilava.
+  `-Wnull-dereference` agora fica só no Clang (o `analyze()` ganhou também
+  uma guarda defensiva para início de função fora de código).
+- ✅ Testes:
+  - unitários (`iop`): cabeçalho de IRX (nome no `.iopmod` e na
+    `ModuleInfo`, rejeição de lixo), roteiro do pad (sintaxe, erros, troca
+    por VBlank, desconexão), ISO 9660 (busca, leitura que cruza setores,
+    listagem, imagem inválida), decodificação ADPCM (filtros, saturação),
+    voz do SPU2 (fim do sample, loop, key off com release, volume por canal);
+  - ponta a ponta: `modules` (rom0: + `padman.irx` embutido; `usbd.irx` e
+    `rom0:FOOBAR` têm de parar com o erro claro), `pad` e `pad_rom` (mesmo
+    roteiro, mesma saída nos dois protocolos do padman), `memcard`, `cdvd`
+    (com `disc.iso` gerado por `make_iso.py`) e `cdvd_noiso` (erro claro),
+    `audio` (audsrv.irx e freesd.irx do ps2sdk embutidos; o WAV gerado é
+    comparado byte a byte — conferido à parte: 441 Hz por 0,3 s, depois a
+    quadrada ADPCM de 428,6 Hz por 46,7 ms com o pan esperado).
+
+Limitações (honestas):
+- **Drivers IRX próprios** (a maioria dos jogos comerciais traz o seu driver
+  de som e às vezes de streaming/controle) não rodam: o IOP não executa
+  código. Para eles será preciso emular ou recompilar o próprio IOP (R3000A)
+  — subprojeto de porte parecido com a Fase 2. Esse é o principal risco da
+  Fase 7, e só um dump real vai dizer o quanto ele pesa.
+- Sem `sdrdrv`/libsdr (acesso remoto ao libsd pelo EE): o bind falha com
+  erro claro. Sem reverb, volumes em modo "sweep", ruído, entrada de
+  disco/PCM no núcleo, CD-DA e o callback `audsrv_on_fillbuf` (exigiria o
+  IOP chamar um servidor RPC do EE). A interpolação entre amostras é cúbica
+  (Catmull-Rom), não a tabela gaussiana do chip.
+- Leituras de disco instantâneas, sem tempo de busca; jogos que dependem
+  do tempo de leitura para sincronizar podem se comportar diferente.
+- `mc0:` pelo fileio (fopen) não é suportado — só pelo libmc.
+- Multitap, mouse/teclado USB, rede e HDD não existem (erro claro no bind).
 
 ## Fase 7 — Primeiro jogo comercial ⬜
 

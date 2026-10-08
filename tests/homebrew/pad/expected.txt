@@ -1,0 +1,21 @@
+pad: módulos X (XSIO2MAN/XPADMAN)
+padInit: 1
+portas: 2, slots: 1
+porta 0: padPortOpen = 1
+porta 0: estado 6
+porta 1: padPortOpen = 1
+porta 1: estado 6
+modos: 2 ( 0x4 0x7 ), atual id 0x4
+padSetMainMode(analógico): 1
+modo atual: 0x7 (ext 0x7)
+pressão: info 1, enter 1
+atuadores: 2
+quadro  84 porta 0: modo 0x79 botões 0x0008 eixos 128 128 128 128 pressão ✕=0 ○=0
+quadro  94 porta 0: modo 0x79 botões 0x0000 eixos 128 128 128 128 pressão ✕=0 ○=0
+quadro 104 porta 0: modo 0x79 botões 0x4020 eixos 128 128 128 128 pressão ✕=255 ○=0
+quadro 114 porta 0: modo 0x79 botões 0x2000 eixos   0 255 128 128 pressão ✕=0 ○=255
+quadro 124 porta 0: modo 0x79 botões 0x0000 eixos 128 128 128 128 pressão ✕=0 ○=0
+quadro 124 porta 1: modo 0x41 botões 0x1400 eixos 128 128 128 128
+quadro 134 porta 1: desconectado (estado 0)
+quadro 144 porta 1: modo 0x41 botões 0x0001 eixos 128 128 128 128
+fim

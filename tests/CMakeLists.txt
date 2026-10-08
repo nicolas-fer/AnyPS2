@@ -10,19 +10,21 @@ add_executable(anyps2_tests
     unit/test_gs.cpp
     unit/test_vu_isa.cpp
     unit/test_vu.cpp
+    unit/test_iop.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
 target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu)
 target_compile_definitions(anyps2_tests PRIVATE
     ANYPS2_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
-    ANYPS2_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+    ANYPS2_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    ANYPS2_TEST_HOMEBREW_DIR="${CMAKE_CURRENT_SOURCE_DIR}/homebrew")
 anyps2_set_warnings(anyps2_tests)
 if(MSVC)
     target_compile_definitions(anyps2_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs vu_isa vu)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs vu_isa vu iop)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
@@ -92,7 +94,7 @@ if(ANYPS2_E2E_TESTS)
     endif()
 
     function(anyps2_e2e name)
-        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK" "ARGS;ENV" ${ARGN})
+        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK;EXPECT_FAIL" "ARGS;ENV" ${ARGN})
         if(NOT E_NAME)
             set(E_NAME ${name})
         endif()
@@ -119,11 +121,19 @@ if(ANYPS2_E2E_TESTS)
             "-DENV=${env}")
         if(E_EXPECTED_COMMAND)
             list(APPEND cmd -DEXPECTED_COMMAND=${E_EXPECTED_COMMAND})
+        elseif(E_EXPECTED)
+            list(APPEND cmd -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/${E_EXPECTED})
         else()
             list(APPEND cmd -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.txt)
         endif()
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.png)
             list(APPEND cmd -DEXPECTED_FRAME=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.png)
+        endif()
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.wav)
+            list(APPEND cmd -DEXPECTED_WAV=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.wav)
+        endif()
+        if(E_EXPECT_FAIL)
+            list(APPEND cmd "-DEXPECT_FAIL=${E_EXPECT_FAIL}")
         endif()
         list(APPEND cmd -P ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_homebrew.cmake)
         add_test(NAME e2e_${E_NAME} COMMAND ${cmd})
@@ -138,6 +148,10 @@ if(ANYPS2_E2E_TESTS)
     # O mesmo teste no relógio real (tempo do host): a saída depende só da
     # ordem dos eventos, então também precisa bater.
     anyps2_e2e(timers NAME timers_real CLOCK real)
+    # No relógio real o tempo emulado anda com o do host: com outros testes
+    # compilando em paralelo, a troca entre threads do guest pode levar mais
+    # que as margens de 10 ms do teste. Roda sozinho.
+    set_tests_properties(e2e_timers_real PROPERTIES RUN_SERIAL TRUE)
     # Fase 4: gráficos (saída de texto + imagem final comparada byte a byte)
     anyps2_e2e(gfx2d)
     anyps2_e2e(cube3d)
@@ -154,4 +168,20 @@ if(ANYPS2_E2E_TESTS)
     anyps2_e2e(sdk_teapot ENV ANYPS2_FRAMES=8)
     anyps2_e2e(sdk_texture ENV ANYPS2_FRAMES=8)
     anyps2_e2e(sdk_vu1 ENV ANYPS2_FRAMES=8 ANYPS2_VU=compiled)
+    # Fase 6: IOP em HLE. Módulos (rom0: e IRX embutido; sem HLE = erro
+    # claro), controles com roteiro determinístico nos dois protocolos do
+    # padman, memory card em pasta do host, disco a partir de uma ISO (e o
+    # erro sem ISO) e som (WAV comparado byte a byte).
+    anyps2_e2e(modules)
+    anyps2_e2e(modules NAME modules_unknown ARGS unknown EXPECTED expected_unknown.txt
+               EXPECT_FAIL "módulo IRX .USB_driver. v2.4 .* não tem implementação HLE")
+    anyps2_e2e(modules NAME modules_rom ARGS rom EXPECTED expected_rom.txt
+               EXPECT_FAIL "rom0:FOOBAR .ROM do console. não tem implementação HLE")
+    anyps2_e2e(pad ENV ANYPS2_PAD_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/pad/script.txt)
+    anyps2_e2e(pad NAME pad_rom ARGS rom EXPECTED expected_rom.txt
+               ENV ANYPS2_PAD_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/pad/script.txt)
+    anyps2_e2e(memcard)
+    anyps2_e2e(cdvd ENV ANYPS2_ISO=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/cdvd/disc.iso)
+    anyps2_e2e(cdvd NAME cdvd_noiso EXPECTED expected_noiso.txt EXPECT_FAIL "nenhuma imagem foi informada")
+    anyps2_e2e(audio)
 endif()

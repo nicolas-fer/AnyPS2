@@ -1,0 +1,8 @@
+rom0:XSIO2MAN: ok
+padman já carregado? não
+SifExecModuleBuffer(padman.irx): ok
+SifExecModuleBuffer(padman.irx de novo): ok
+padman carregado? sim
+padInit: 1
+rom0:XSIO2MAN de novo: ok
+fim

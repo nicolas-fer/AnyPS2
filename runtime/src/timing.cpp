@@ -187,7 +187,7 @@ void Timing::raise(unsigned cause) {
     rt_.kernel().raiseIntc(cause);
 }
 
-void Timing::process(std::uint32_t) {
+void Timing::process(std::uint32_t pc) {
     const std::uint64_t t = now();
     // Se o host ficou parado muito tempo (modo real), não recupera centenas
     // de quadros: pula para perto do presente.
@@ -206,7 +206,7 @@ void Timing::process(std::uint32_t) {
                 if (vsyncCsr_) m.write<std::uint64_t>(vsyncCsr_, rt_.gs().csr(), 0);
             }
             raise(kCauseVblankStart);
-            rt_.onVblank();
+            rt_.onVblank(pc);
             nextVblankStart_ += kCyclesPerField;
         } else {
             raise(kCauseVblankEnd);

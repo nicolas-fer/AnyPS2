@@ -1,0 +1,35 @@
+mcInit: 0
+mc0: getInfo -1 tipo 2 livre 8135 formatado 1
+mc0: getInfo 0 tipo 2 livre 8135 formatado 1
+mc1: getInfo -10 tipo 0 livre 0 formatado 0
+mkdir: 0
+mkdir de novo: -4
+open(escrita): ok
+write: 3000
+close: 0
+write nota: 18
+getDir(AP2TEST/*): 4
+  .                0 bytes attr 0x8427
+  ..               0 bytes attr 0x8427
+  NOTE.TXT        18 bytes attr 0x8497
+  SAVE.DAT      3000 bytes attr 0x8497
+getDir(/*): 1
+  AP2TEST          0 bytes attr 0x8427
+mc0: getInfo 0 tipo 2 livre 8130 formatado 1
+seek: 2990
+read após seek: 10 "ABCDEFGHIJ"
+chdir: 0
+read relativo: 18 salvo pelo AnyPS2
+rename: 0
+open do nome antigo: -4
+getDir(AP2TEST/*): 4
+  .                0 bytes attr 0x8427
+  ..               0 bytes attr 0x8427
+  README.TXT      18 bytes attr 0x8497
+  SAVE.DAT      3000 bytes attr 0x8497
+delete: 0
+delete pasta não vazia: -6
+delete pasta vazia: 0
+getDir(/*): 0
+mc0: getInfo 0 tipo 2 livre 8135 formatado 1
+fim

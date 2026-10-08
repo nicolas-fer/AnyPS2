@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.elf binary
 *.bin binary
+*.iso binary
+*.wav binary
+*.png binary

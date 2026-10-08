@@ -20,6 +20,8 @@ class Gif;
 class Vif;
 struct VuMemory;
 class Video;
+class Input;
+class Audio;
 class Vu;
 struct VuProgramEntry;
 namespace gs {
@@ -72,6 +74,14 @@ struct RuntimeOptions {
     // ANYPS2_FRAMES=N: encerra o programa (código 0) no N-ésimo VBlank. Para
     // testar programas que desenham em laço infinito.
     std::uint64_t frames = 0;
+    // ANYPS2_ISO: imagem do disco (dump próprio) lida pelo cdvdfsv/cdrom0:.
+    std::string iso;
+    // ANYPS2_PAD_SCRIPT: roteiro determinístico dos controles (ver input.h).
+    std::string padScript;
+    // ANYPS2_AUDIO: "sdl", "none" ou "" (automático). ANYPS2_AUDIO_WAV:
+    // grava o som num WAV.
+    std::string audio;
+    std::string audioWav;
     static RuntimeOptions fromEnvironment();
 };
 
@@ -118,8 +128,12 @@ public:
     VuMemory& vu() { return *vu_; }
     Vu& vu0() { return *vu0_; }
     Vu& vu1() { return *vu1_; }
-    // Início do VBlank: apresenta o quadro e processa eventos da janela.
-    void onVblank();
+    Input& input() { return *input_; }
+    // Saída de som; nullptr fora de run().
+    Audio* audio() { return audio_.get(); }
+    // Início do VBlank: módulos periódicos do IOP (pad, áudio), apresenta o
+    // quadro e processa eventos da janela.
+    void onVblank(std::uint32_t pc);
     const RuntimeOptions& options() const { return options_; }
     const ProgramInfo& program() const { return program_; }
 
@@ -154,6 +168,8 @@ private:
     std::unique_ptr<Vu1Regs> vu1Regs_;
     std::unique_ptr<Vu> vu0_, vu1_;
     std::unique_ptr<Video> video_;
+    std::unique_ptr<Input> input_;
+    std::unique_ptr<Audio> audio_;
     std::uint64_t vblanks_ = 0;
 };
 

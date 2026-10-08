@@ -1,0 +1,11 @@
+# Roteiro do teste pad: vblank porta botões [lx ly rx ry]
+# Cada linha vale a partir daquele VBlank (contado desde o início do
+# programa); "-" solta tudo, "unplug" desconecta a porta.
+90  0 START
+100 0 -
+110 0 CROSS+RIGHT
+120 0 CIRCLE 0 255 128 128
+130 0 -
+130 1 TRIANGLE+L1
+140 1 unplug
+150 1 SELECT
