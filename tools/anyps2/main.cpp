@@ -36,7 +36,7 @@ using anyps2::hex;
 namespace elf = anyps2::elf;
 namespace r5900 = anyps2::r5900;
 
-constexpr const char* kVersion = "0.2.0 (Fase 2)";
+constexpr const char* kVersion = "0.4.0 (Fase 4)";
 
 void printUsage() {
     std::cout <<

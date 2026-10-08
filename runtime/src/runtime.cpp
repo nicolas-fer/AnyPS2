@@ -8,12 +8,17 @@
 #include <iostream>
 
 #include "anyps2/common/bytes.h"
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/generated.h"
+#include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/hardware.h"
 #include "anyps2/runtime/iop.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
+#include "anyps2/runtime/video.h"
+#include "anyps2/runtime/vif.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -30,8 +35,11 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
         o.traceCalls = s.find("call") != std::string::npos || s == "all";
         o.traceHardware = s.find("hw") != std::string::npos || s == "all";
         o.traceIop = s.find("iop") != std::string::npos || s == "all";
+        o.traceGs = s.find("gs") != std::string::npos || s == "all";
     }
     if (const char* clock = std::getenv("ANYPS2_CLOCK")) o.virtualClock = std::string(clock) == "virtual";
+    if (const char* v = std::getenv("ANYPS2_VIDEO")) o.video = v;
+    if (const char* shot = std::getenv("ANYPS2_SCREENSHOT")) o.screenshot = shot;
     return o;
 }
 
@@ -47,9 +55,37 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     iop_ = std::make_unique<Iop>(*this);
     timing_ = std::make_unique<Timing>(*this, options_.virtualClock ? Timing::Mode::Virtual : Timing::Mode::Real);
     kernel_ = std::make_unique<Kernel>(*this);
+    vu_ = std::make_unique<VuMemory>();
+    mem_->mapRam(0x11000000u, vu_->micro0.get(), VuMemory::kVu0Size);
+    mem_->mapRam(0x11004000u, vu_->data0.get(), VuMemory::kVu0Size);
+    mem_->mapRam(0x11008000u, vu_->micro1.get(), VuMemory::kVu1Size);
+    mem_->mapRam(0x1100C000u, vu_->data1.get(), VuMemory::kVu1Size);
+    gs_ = std::make_unique<gs::Gs>(this);
+    gs_->setHsyncSource([](void* t) { return static_cast<Timing*>(t)->now(); }, timing_.get(),
+                        Timing::kCyclesPerLine);
+    gif_ = std::make_unique<Gif>(this, *gs_);
+    vif0_ = std::make_unique<Vif>(this, 0, *vu_, gif_.get());
+    vif1_ = std::make_unique<Vif>(this, 1, *vu_, gif_.get());
+    dmac_ = std::make_unique<Dmac>(*this);
 }
 
 Runtime::~Runtime() = default;
+
+void Runtime::onVblank() {
+    if (!video_) return;
+    if (gs_->displayEnabled()) video_->present(gs_->display());
+    if (!video_->pollEvents()) throw ProgramExit{0};  // janela fechada
+}
+
+void Runtime::saveScreenshot() {
+    if (options_.screenshot.empty()) return;
+    const gs::Frame f = gs_->display();
+    if (f.width == 0 || f.height == 0) {
+        std::cerr << "anyps2: aviso: nenhuma imagem exibida (PMODE desligado); screenshot não gravado\n";
+        return;
+    }
+    writePng(options_.screenshot, f);
+}
 
 void Runtime::loadImage(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -165,8 +201,11 @@ int Runtime::run(const std::vector<std::string>& args, const std::string& imageP
     c->cop0[cop0::Status] = 0x70030C13u; // CU0-2, EIE, modo kernel
     kernel_->setBootArguments(args);
     c->budget = c->budgetReload = 20000;
+    video_ = createVideo(options_, program_.name);
     const int code = kernel_->runMain(program_.entry);
     std::fflush(stdout);
+    saveScreenshot();
+    video_.reset();
     return code;
 }
 

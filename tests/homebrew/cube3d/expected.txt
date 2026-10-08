@@ -1,0 +1,1 @@
+cube3d: 4 quadros, 11 faces desenhadas

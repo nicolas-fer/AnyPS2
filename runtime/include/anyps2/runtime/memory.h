@@ -43,6 +43,9 @@ public:
 
     // Registra um dispositivo para [base, base+size). Faixas não podem se sobrepor.
     void mapDevice(std::uint32_t base, std::uint32_t size, MmioDevice* device);
+    // Mapeia memória comum do host (ex.: memórias dos VUs) em [vbase, vbase+size)
+    // e no espelho uncached (vbase | 0xA000_0000 quando aplicável).
+    void mapRam(std::uint32_t vbase, std::uint8_t* host, std::uint32_t size);
 
     std::uint8_t* ram() { return ram_.get(); }
     std::uint8_t* scratchpad() { return spr_.get(); }

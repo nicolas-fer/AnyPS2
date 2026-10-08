@@ -7,6 +7,7 @@ add_executable(anyps2_tests
     unit/test_runtime_ops.cpp
     unit/test_codegen.cpp
     unit/test_timing.cpp
+    unit/test_gs.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
 target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime)
@@ -19,7 +20,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
@@ -49,6 +50,14 @@ if(ANYPS2_E2E_TESTS)
     else()
         set(e2e_build_type ${CMAKE_BUILD_TYPE})
     endif()
+    # Os testes rodam sem janela; os projetos gerados só usam o SDL se ele
+    # vier do sistema (compilar um SDL baixado em cada projeto seria lento).
+    get_property(e2e_sdl_origin GLOBAL PROPERTY ANYPS2_SDL_ORIGIN)
+    if(e2e_sdl_origin STREQUAL "system")
+        set(e2e_with_sdl ON)
+    else()
+        set(e2e_with_sdl OFF)
+    endif()
 
     function(anyps2_e2e name)
         cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK" "ARGS" ${ARGN})
@@ -70,11 +79,17 @@ if(ANYPS2_E2E_TESTS)
             -DBUILD_TYPE=${e2e_build_type}
             -DCLOCK=${E_CLOCK}
             -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+            "-DCXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DLINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
+            -DWITH_SDL=${e2e_with_sdl}
             "-DARGS=${args}")
         if(E_EXPECTED_COMMAND)
             list(APPEND cmd -DEXPECTED_COMMAND=${E_EXPECTED_COMMAND})
         else()
             list(APPEND cmd -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.txt)
+        endif()
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.png)
+            list(APPEND cmd -DEXPECTED_FRAME=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/expected.png)
         endif()
         list(APPEND cmd -P ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_homebrew.cmake)
         add_test(NAME e2e_${E_NAME} COMMAND ${cmd})
@@ -89,4 +104,8 @@ if(ANYPS2_E2E_TESTS)
     # O mesmo teste no relógio real (tempo do host): a saída depende só da
     # ordem dos eventos, então também precisa bater.
     anyps2_e2e(timers NAME timers_real CLOCK real)
+    # Fase 4: gráficos (saída de texto + imagem final comparada byte a byte)
+    anyps2_e2e(gfx2d)
+    anyps2_e2e(cube3d)
+    anyps2_e2e(gskit)
 endif()

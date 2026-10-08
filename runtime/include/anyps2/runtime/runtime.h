@@ -15,6 +15,14 @@ class Kernel;
 class Hardware;
 class Iop;
 class Timing;
+class Dmac;
+class Gif;
+class Vif;
+struct VuMemory;
+class Video;
+namespace gs {
+class Gs;
+}
 
 using GuestFunction = void (*)(Context*);
 
@@ -45,7 +53,13 @@ struct RuntimeOptions {
     bool traceCalls = false;     // ANYPS2_TRACE contém "call"
     bool traceHardware = false;  // ANYPS2_TRACE contém "hw"
     bool traceIop = false;       // ANYPS2_TRACE contém "iop"
+    bool traceGs = false;        // ANYPS2_TRACE contém "gs" (DMA, GIF, VIF)
     bool virtualClock = false;   // ANYPS2_CLOCK=virtual (determinístico)
+    // ANYPS2_VIDEO: "sdl" (janela), "none" (sem janela) ou "" (automático:
+    // janela se o runtime foi compilado com SDL e há display).
+    std::string video;
+    // ANYPS2_SCREENSHOT: grava a última imagem exibida (PNG) ao terminar.
+    std::string screenshot;
     static RuntimeOptions fromEnvironment();
 };
 
@@ -84,6 +98,14 @@ public:
     Hardware& hardware() { return *hw_; }
     Iop& iop() { return *iop_; }
     Timing& timing() { return *timing_; }
+    gs::Gs& gs() { return *gs_; }
+    Gif& gif() { return *gif_; }
+    Vif& vif0() { return *vif0_; }
+    Vif& vif1() { return *vif1_; }
+    Dmac& dmac() { return *dmac_; }
+    VuMemory& vu() { return *vu_; }
+    // Início do VBlank: apresenta o quadro e processa eventos da janela.
+    void onVblank();
     const RuntimeOptions& options() const { return options_; }
     const ProgramInfo& program() const { return program_; }
 
@@ -95,6 +117,7 @@ public:
 
 private:
     void loadImage(const std::string& path);
+    void saveScreenshot();
 
     ProgramInfo program_;
     RuntimeOptions options_;
@@ -104,6 +127,12 @@ private:
     std::unique_ptr<Iop> iop_;
     std::unique_ptr<Timing> timing_;
     std::unique_ptr<Kernel> kernel_;
+    std::unique_ptr<VuMemory> vu_;
+    std::unique_ptr<gs::Gs> gs_;
+    std::unique_ptr<Gif> gif_;
+    std::unique_ptr<Vif> vif0_, vif1_;
+    std::unique_ptr<Dmac> dmac_;
+    std::unique_ptr<Video> video_;
 };
 
 // Ponto de entrada usado pelo main() gerado.

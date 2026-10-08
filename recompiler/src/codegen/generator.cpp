@@ -217,6 +217,8 @@ private:
             case Op::BGEZ: case Op::BGEZL: case Op::BGEZAL: case Op::BGEZALL: return rs + ".sd[0] >= 0";
             case Op::BC1F: case Op::BC1FL: return "!fpuCondition(c)";
             case Op::BC1T: case Op::BC1TL: return "fpuCondition(c)";
+            case Op::BC0F: case Op::BC0FL: return "!cop0Condition(c)";
+            case Op::BC0T: case Op::BC0TL: return "cop0Condition(c)";
             default: return "";
         }
     }
@@ -226,8 +228,8 @@ private:
         out_ << "    " << disasmComment(i) << "\n";
         if (i.isBranch()) {
             const std::string cond = condition(i);
-            if (cond.empty()) {  // BC0x / BC2x: dependem de hardware ainda não emulado
-                out_ << "    " << unsupportedCall(i, "condição de coprocessador ainda não emulada") << "\n";
+            if (cond.empty()) {  // BC2x: condição do VU0 (Fase 5)
+                out_ << "    " << unsupportedCall(i, "condição do VU0 (BC2x) ainda não emulada — Fase 5") << "\n";
                 return;
             }
             const std::uint32_t t = i.branchTarget();

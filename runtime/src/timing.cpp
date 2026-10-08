@@ -4,6 +4,7 @@
 #include <limits>
 #include <thread>
 
+#include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/memory.h"
 #include "anyps2/runtime/runtime.h"
@@ -19,8 +20,6 @@ constexpr std::uint32_t kModeClks = 0x3, kModeZret = 1u << 6, kModeCue = 1u << 7
                         kModeOvff = 1u << 11;
 // INTC
 constexpr unsigned kCauseVblankStart = 2, kCauseVblankEnd = 3, kCauseTimer0 = 9;
-// GS_CSR
-constexpr std::uint64_t kCsrVsint = 1u << 3, kCsrField = 1u << 13;
 }  // namespace
 
 Timing::Timing(Runtime& rt, Mode mode) : rt_(rt), mode_(mode), start_(std::chrono::steady_clock::now()) {}
@@ -156,12 +155,11 @@ void Timing::writeTimer(unsigned n, unsigned reg, std::uint32_t value) {
 
 std::uint64_t Timing::readGsCsr() {
     process(0);
-    return csr_ | 0x551B0000ull;  // ID/revisão do GS nos bits altos
+    return rt_.gs().csr();
 }
 
 void Timing::writeGsCsr(std::uint64_t value) {
-    // Bits de evento (SIGNAL, FINISH, HSINT, VSINT, EDWINT): escrever 1 limpa.
-    csr_ &= ~(value & 0x1F);
+    rt_.gs().writePrivileged(0x12001000u, value, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,14 +199,14 @@ void Timing::process(std::uint32_t) {
     while (nextVblankStart_ <= t || nextVblankEnd_ <= t) {
         if (nextVblankStart_ <= nextVblankEnd_) {
             ++vblanks_;
-            csr_ |= kCsrVsint;
-            csr_ ^= kCsrField;
+            rt_.gs().vblankStart();
             if (vsyncFlag_) {
                 Memory& m = rt_.memory();
                 m.write<std::uint32_t>(vsyncFlag_, 1, 0);
-                if (vsyncCsr_) m.write<std::uint64_t>(vsyncCsr_, csr_, 0);
+                if (vsyncCsr_) m.write<std::uint64_t>(vsyncCsr_, rt_.gs().csr(), 0);
             }
             raise(kCauseVblankStart);
+            rt_.onVblank();
             nextVblankStart_ += kCyclesPerField;
         } else {
             raise(kCauseVblankEnd);

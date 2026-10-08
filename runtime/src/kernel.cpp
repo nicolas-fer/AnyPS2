@@ -3,7 +3,11 @@
 #include <cstdio>
 #include <cstring>
 
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
+#include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/hardware.h"
 #include "anyps2/runtime/iop.h"
 #include "anyps2/runtime/ops.h"
@@ -188,11 +192,11 @@ void Kernel::runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, 
 }
 
 void Kernel::raiseDmacInterrupt(unsigned channel, std::uint32_t pc) {
-    runHandlers(dmacHandlers_, dmacMask_, channel, pc);
+    runHandlers(dmacHandlers_, rt_.dmac().stat() >> 16, channel, pc);
 }
 
 bool Kernel::canDeliverDmac(unsigned channel) const {
-    if (!(dmacMask_ & (1u << channel))) return false;
+    if (rt_.dmac().channelMasked(channel)) return false;
     if (!(rt_.context().cop0[cop0::Status] & ops::kStatusEIE)) return false;
     for (const auto& h : dmacHandlers_) {
         if (h.cause == channel && h.enabled) return true;
@@ -208,6 +212,17 @@ void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle
     if (interruptDepth_ == 0 && (idle || (rt_.context().cop0[cop0::Status] & ops::kStatusEIE))) {
         // Um handler pode gerar novas causas; limita as voltas por segurança.
         for (int round = 0; round < 8; ++round) {
+            // INTC_DMAC (1) pertence ao kernel: despacha para os handlers de
+            // cada canal com CIS & CIM e limpa o CIS.
+            if (intcStat_ & (1u << kIntcDmac)) {
+                intcStat_ &= ~(1u << kIntcDmac);
+                std::uint32_t chans = rt_.dmac().pendingChannels();
+                for (unsigned ch = 0; chans; ++ch, chans >>= 1) {
+                    if (!(chans & 1)) continue;
+                    rt_.dmac().clearChannel(ch);
+                    runHandlers(dmacHandlers_, rt_.dmac().stat() >> 16, ch, pc, idle);
+                }
+            }
             const std::uint32_t pending = intcStat_ & intcMask_;
             if (!pending && pendingAlarms_.empty()) break;
             for (unsigned cause = 0; cause < 32; ++cause) {
@@ -245,8 +260,15 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
     auto sarg = [c](unsigned i) { return static_cast<std::int32_t>(arg(c, i)); };
     switch (number) {
         // ---- Sistema -----------------------------------------------------
-        case 0x01: return 0;  // ResetEE
-        case 0x02: rt_.hardware().setGsCrt(arg(c, 0), arg(c, 1), arg(c, 2)); return 0;
+        case 0x01: {  // ResetEE(init): 1 DMAC, 2 VU1, 4 VIF1, 8 GIF, 0x10 VU0, 0x20 VIF0, 0x40 IPU
+            const std::uint32_t init = arg(c, 0);
+            if (init & 0x01) rt_.dmac().reset();
+            if (init & 0x04) rt_.vif1().reset();
+            if (init & 0x08) rt_.gif().reset();
+            if (init & 0x20) rt_.vif0().reset();
+            return 0;
+        }
+        case 0x02: rt_.gs().setCrt(arg(c, 0), arg(c, 1), arg(c, 2)); return 0;
         case 0x04: throw ProgramExit{sarg(0)};  // Exit
         case 0x3C: return ret32(setupThread(c, pc));
         case 0x3D: {  // SetupHeap(start, size)
@@ -292,8 +314,8 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
         }
 
         // ---- GS ----------------------------------------------------------
-        case 0x70: case -0x70: return gsImr_;                     // GsGetIMR
-        case 0x71: case -0x71: gsImr_ = c->r[4].ud[0]; return 0;  // GsPutIMR
+        case 0x70: case -0x70: return rt_.gs().imr();                      // GsGetIMR
+        case 0x71: case -0x71: rt_.gs().setImr(c->r[4].ud[0]); return 0;  // GsPutIMR
 
         // ---- Threads ----------------------------------------------------------
         case 0x20: return ret32(createThread(arg(c, 0), pc));  // CreateThread
@@ -518,10 +540,9 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
             return was ? 0 : 1;
         }
         case 0x16: case -0x1C: case 0x17: case -0x1D: {  // _Enable/_DisableDmac
-            const std::uint32_t bit = 1u << (arg(c, 0) & 31);
-            const bool was = (dmacMask_ & bit) != 0;
-            if (number == 0x16 || number == -0x1C) dmacMask_ |= bit;
-            else dmacMask_ &= ~bit;
+            const unsigned ch = arg(c, 0);
+            if (ch >= Dmac::kChannels) return ret32(-1);
+            const bool was = rt_.dmac().setChannelEnabled(ch, number == 0x16 || number == -0x1C);
             return was ? 0 : 1;
         }
         case 0x5C: case -0x5C: case 0x5D: case -0x5D: case 0x5E: case -0x5E: case 0x5F: case -0x5F: {

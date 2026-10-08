@@ -38,6 +38,11 @@ void Memory::mapPages(std::uint32_t vbase, std::uint8_t* host, std::uint32_t siz
     }
 }
 
+void Memory::mapRam(std::uint32_t vbase, std::uint8_t* host, std::uint32_t size) {
+    mapPages(vbase, host, size);
+    if (vbase < 0x20000000u) mapPages(vbase | 0xA0000000u, host, size);
+}
+
 void Memory::mapDevice(std::uint32_t base, std::uint32_t size, MmioDevice* device) {
     for (const auto& d : devices_) {
         if (base < d.base + d.size && d.base < base + size) {

@@ -354,7 +354,7 @@ void Iop::registerIopHeap() {
                 if (path == "rom:ROMVER" || path == "rom0:ROMVER") {
                     // Identificador de versão sintético (não é conteúdo de ROM):
                     // versão 2.30, região E, console CEX, data 2008-02-20.
-                    static const char kRomver[16] = "0230EC20080220";
+                    static const char kRomver[16] = "0230AC20080220";  // 2.30, EUA (NTSC), console
                     std::memcpy(iopPointer(addr, 16, pc), kRomver, 16);
                     return result32(0);
                 }

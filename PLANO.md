@@ -177,27 +177,87 @@ stalls de cache/memória); temporização fina de jogos pode exigir calibração
 por jogo na Fase 7. VBlank só em NTSC por enquanto (PAL quando houver
 SetGsCrt com modo PAL relevante).
 
-## Fase 4 — Gráficos: GIF/VIF/DMA + Graphics Synthesizer ⬜
+## Fase 4 — Gráficos: GIF/VIF/DMA + Graphics Synthesizer ✅
 
-- ⬜ DMAC (canais VIF0, VIF1, GIF, fromIPU/toIPU, SIF0–2, SPR): modos normal,
-  chain (tags `cnt/next/ref/refs/call/ret/end`) e interleave.
-- ⬜ GIF: PATH1/2/3, GIFtag (PACKED/REGLIST/IMAGE), registradores A+D.
-- ⬜ VIF0/VIF1: desempacotamento (`UNPACK` V1–V4, 8/16/32 bits, máscaras),
-  `MSCAL/MSCNT`, `DIRECT/DIRECTHL`, `STCYCL`, `STMOD`...
-- ⬜ GS: registradores privilegiados (PMODE, DISPFB, DISPLAY, CSR/IMR),
-  primitivas (pontos, linhas, triângulos, strips, fans, sprites), texturas
-  (PSMCT32/24/16, PSMT8/4 com CLUT), alpha blending, Z-test, scissor,
-  transferências HOST↔LOCAL e LOCAL↔LOCAL, swizzle da VRAM de 4 MB.
-- ⬜ Backend: renderizador por hardware (Vulkan **ou** OpenGL 4.x — decisão
-  no início da fase) + renderizador de referência por software para testes.
-  Janela e apresentação via SDL.
-- ⬜ Testes: dumps de GS (formato nosso) com imagem esperada; homebrew 2D
-  (sprites, texto), depois 3D (cubo com Z-buffer e textura).
+- ✅ DMAC: registradores dos 10 canais e globais (D_CTRL, D_STAT com CIS/CIM,
+  D_PCR, D_ENABLER/W com suspensão). Modo normal e chain de origem (tags
+  `refe/cnt/next/ref/refs/call/ret/end`, pilha ASR0/ASR1, IRQ+TIE, TTE nos
+  VIFs) para VIF0, VIF1, GIF e toSPR; modo normal no fromSPR. A transferência
+  roda inteira quando `CHCR.STR` é ligado; a interrupção do DMAC chega no
+  próximo safepoint, despachada pelo kernel aos handlers de cada canal.
+  `BC0T/BC0F` (CPCOND0 = canais de D_PCR terminados) — usado pelo
+  `dma_wait_fast` do ps2sdk.
+- ✅ GIF: PATH2 (VIF1) e PATH3 (DMA e GIF_FIFO), GIFtag com PRE/PRIM,
+  PACKED (todos os descritores, Q do ST, ADC do XYZ), REGLIST (inclusive
+  NREG×NLOOP ímpar), IMAGE, A+D. PATH1 chega com o VU1 (Fase 5).
+- ✅ VIF0/VIF1: NOP, STCYCL, OFFSET, BASE, ITOP, STMOD, MSKPATH3, MARK,
+  FLUSH*, STMASK, STROW, STCOL, MPG, DIRECT/DIRECTHL, UNPACK (S/V2/V3/V4 de
+  32/16/8 bits, V4-5, sinal/USN, TOPS, máscara, modos offset/difference,
+  escrita com salto CL ≥ WL). Memórias dos VUs mapeadas no EE
+  (0x1100_0000). `MSCAL/MSCALF/MSCNT` → erro "Fase 5" com o endereço.
+- ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
+  formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
+  validado contra as tabelas publicadas), registradores privilegiados
+  (PMODE, SMODE, DISPFB/DISPLAY 1/2, BGCOLOR, CSR com SIGNAL/FINISH/HSINT/
+  VSINT/FIELD, IMR, SIGLBLID) e gerais, fila de vértices (kick com XYZ2/F2,
+  XYZ3/F3 sem desenho), pontos, linhas, line strips, triângulos (regra
+  top-left em 12.4), strips, fans, sprites; Gouraud/flat; texturas com
+  CLUT (CSM1/CSM2, CSA, CLD 0–5), TEXA, REPEAT/CLAMP/REGION, nearest/
+  bilinear, mipmaps com LOD (MTBA → erro), STQ com perspectiva e UV;
+  TFX (modulate/decal/highlight/highlight2), fog, teste de alfa com AFAIL,
+  teste de alfa de destino, Z (32/24/16 bits), blending (A−B)·C/128+D com
+  PABE/FBA/COLCLAMP, dither (DIMX), FBMSK, SCANMSK, scissor, XYOFFSET,
+  PRMODECONT/PRMODE; transferências HOST→LOCAL (inclusive 24 e 4 bits) e
+  LOCAL→LOCAL. Saída de vídeo: os dois circuitos de leitura com MAGH/MAGV,
+  DBX/DBY, mistura por ALP ou alfa do pixel, fundo BGCOLOR.
+- ✅ Apresentação: janela SDL2 (thread própria, renderer do SDL — OpenGL/
+  Direct3D conforme a plataforma), proporção 4:3. Modo sem janela
+  (`ANYPS2_VIDEO=none`) e screenshot PNG ao terminar (`ANYPS2_SCREENSHOT`),
+  com compressão determinística (mesmos bytes em qualquer compilador).
+- ✅ Testes: 21 testes unitários do GS/GIF/VIF/DMAC com valores calculados à
+  mão (layout da VRAM, cobertura sem pixels duplicados em arestas
+  compartilhadas, Gouraud, Z, blending, alfa, CLUT com índice trocado,
+  bilinear, perspectiva, GIF em todos os modos, VIF, DMA chain/normal/SPR)
+  — conferidos com testes de mutação; 3 homebrews de ponta a ponta com a
+  imagem final comparada byte a byte: `gfx2d` (libgraph/libdraw/libdma:
+  sprites, Gouraud, leque, linhas, pontos, translúcido, textura PSMT8+CLUT
+  via DMA chain), `cube3d` (cubo 3D com Z-buffer, textura em perspectiva,
+  bilinear, iluminação, double buffering) e `gskit` (a biblioteca gráfica
+  mais usada em homebrews). As imagens são idênticas entre GCC e Clang.
+- ✅ Corrigido nesta fase: corrida na criação da thread principal do guest
+  (uma troca de thread muito rápida podia criar duas threads do host para a
+  mesma thread do EE). Achado com ThreadSanitizer, que agora roda no CI
+  junto com ASan/UBSan — inclusive sobre o código recompilado.
 
-Riscos (alto): o GS é o componente mais difícil de emular com precisão.
-Efeitos que leem o framebuffer como textura, formatos de VRAM entrelaçados e
-precisão de blending exigem muito trabalho; o PCSX2 levou anos. A meta da
-fase é homebrew, não jogos.
+Decisão de backend: **a referência é o rasterizador em software**; a janela
+usa o renderer do SDL (que por baixo usa OpenGL/Direct3D) só para apresentar
+a imagem. Um renderizador do GS por hardware (OpenGL 4.x/Vulkan) **não foi
+feito**: o GS tem semântica que não mapeia direto em GPU (VRAM com swizzle
+compartilhada entre formatos, texturas lidas do próprio framebuffer,
+blending além do fixo das APIs, CLUT), e fazê-lo certo é um projeto do
+tamanho desta fase inteira. Ficou para quando o desempenho exigir.
+
+Limitações e riscos:
+- **Desempenho (risco alto para a Fase 7):** o rasterizador é escalar e
+  mono-thread: ~63 Mpixels/s sem textura e ~19 Mpixels/s com textura
+  bilinear + blending (≈15 ms por tela 640×448). Sobra para homebrews, mas
+  jogos comerciais desenham várias camadas por quadro (o GS real passa de
+  1 Gpixel/s). Antes da Fase 7 será preciso paralelizar/vetorizar o
+  rasterizador (como o renderer em software do PCSX2) ou fazer o backend por
+  hardware.
+- Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
+  sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
+  interleave, IPU, escrita de preenchimento do VIF (CL < WL), interrupção/
+  parada por bit `i` dos VIFcodes, espera de PATH3 mascarado, `TEX1.MTBA`.
+- O DMA termina instantaneamente: programas que medem a duração de uma
+  transferência ou dependem de PATH3 intercalado com PATH2 podem se
+  comportar diferente.
+- V3 no UNPACK preserva o W da memória (no hardware é "indeterminado");
+  V2 replica x,y em z,w (como o PCSX2).
+- Saída de vídeo: entrelaçado é mostrado como quadro completo (sem
+  emulação de campo/deinterlace); HSINT é calculado sob demanda e não gera
+  interrupção; só NTSC (o ROMVER sintético agora diz EUA/NTSC — antes dizia
+  Europa, e a libgraph escolhia PAL).
 
 ## Fase 5 — VU0/VU1 e recompilação de microcódigo ⬜
 

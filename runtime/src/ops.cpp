@@ -5,6 +5,8 @@
 #include "anyps2/runtime/iop.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/ops.h"
+
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/runtime.h"
 
 namespace anyps2::rt::ops {
@@ -66,6 +68,10 @@ void writeCop0(Context* c, unsigned reg, u32 value, u32 pc) {
         default:
             throw Unimplemented("escrita no registrador " + std::to_string(reg) + " do COP0", pc);
     }
+}
+
+bool cop0Condition(Context* c) {
+    return c->rt->dmac().cpcond0();
 }
 
 std::uint32_t readPerfCounter(Context*, unsigned reg, bool counter) {

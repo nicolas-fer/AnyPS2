@@ -3,8 +3,12 @@
 #include <cstdio>
 #include <cstring>
 
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
+#include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/iop.h"
+#include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/runtime.h"
@@ -25,7 +29,10 @@ constexpr RegName kNames[] = {
     {0x10001800, "T3_COUNT"}, {0x10001810, "T3_MODE"}, {0x10001820, "T3_COMP"},
     {0x10002000, "IPU_CMD"}, {0x10002010, "IPU_CTRL"}, {0x10002020, "IPU_BP"}, {0x10002030, "IPU_TOP"},
     {0x10003000, "GIF_CTRL"}, {0x10003010, "GIF_MODE"}, {0x10003020, "GIF_STAT"},
-    {0x10003800, "VIF0_STAT"}, {0x10003C00, "VIF1_STAT"},
+    {0x10003040, "GIF_TAG0"}, {0x10003050, "GIF_TAG1"}, {0x10003060, "GIF_TAG2"}, {0x10003070, "GIF_TAG3"},
+    {0x10003080, "GIF_CNT"}, {0x10003090, "GIF_P3CNT"}, {0x100030A0, "GIF_P3TAG"},
+    {0x10003800, "VIF0_STAT"}, {0x10003810, "VIF0_FBRST"}, {0x10003820, "VIF0_ERR"}, {0x10003830, "VIF0_MARK"},
+    {0x10003C00, "VIF1_STAT"}, {0x10003C10, "VIF1_FBRST"}, {0x10003C20, "VIF1_ERR"}, {0x10003C30, "VIF1_MARK"},
     {0x10004000, "VIF0_FIFO"}, {0x10005000, "VIF1_FIFO"}, {0x10006000, "GIF_FIFO"},
     {0x10007000, "IPU_out_FIFO"}, {0x10007010, "IPU_in_FIFO"},
     {0x1000E000, "D_CTRL"}, {0x1000E010, "D_STAT"}, {0x1000E020, "D_PCR"}, {0x1000E030, "D_SQWC"},
@@ -79,12 +86,6 @@ std::string Hardware::registerName(std::uint32_t addr) {
 Hardware::Hardware(Runtime& rt) : rt_(rt) {
     rt.memory().mapDevice(0x10000000u, 0x10000u, this);
     rt.memory().mapDevice(0x12000000u, 0x2000u, this);
-    regs_[0x12001000] = 0;  // GS_CSR
-    regs_[0x12001010] = 0x7F00;
-}
-
-void Hardware::setGsCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field) {
-    regs_[0x12000010] = (std::uint64_t{interlace} << 32) | (mode << 8) | field;
 }
 
 std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t pc) {
@@ -96,12 +97,23 @@ std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t 
     if (reg < 0x10002000u && (reg & 0x7CFu) == 0 && ((reg >> 4) & 0xF) < 4) {
         return rt_.timing().readTimer((reg >> 11) & 3, (reg >> 4) & 3);
     }
+    if (reg >= 0x12000000u) {
+        if (reg == 0x12001000u) rt_.timing().process(pc);  // VSINT/FIELD em dia
+        return rt_.gs().readPrivileged(reg, pc);
+    }
+    if (Dmac::handles(reg)) return rt_.dmac().read(reg, pc);
+    if (reg >= 0x10003000u && reg < 0x10003800u) return rt_.gif().readRegister(reg, pc);
+    if (reg >= 0x10003800u && reg < 0x10003C00u) return rt_.vif0().readRegister(reg, pc);
+    if (reg >= 0x10003C00u && reg < 0x10004000u) return rt_.vif1().readRegister(reg, pc);
+    if (reg >= 0x10004000u && reg < 0x10008000u) {
+        throw Unimplemented("leitura de FIFO " + registerName(addr) + " (download do GS/IPU) ainda não suportada; em " +
+                                rt_.describe(pc),
+                            pc);
+    }
     switch (reg) {
-        case 0x12001000: return rt_.timing().readGsCsr();
         case 0x1000F000: return rt_.kernel().intcStat();
         case 0x1000F010: return rt_.kernel().intcMask();
         case 0x1000F110: return 0x60;  // SIO_LSR: transmissor vazio
-        case 0x1000F590: case 0x1000F520: return regs_[0x1000F590];
         default: break;
     }
     if (!registerName(addr).empty()) return regs_[reg];
@@ -125,8 +137,23 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         rt_.timing().writeTimer((reg >> 11) & 3, (reg >> 4) & 3, static_cast<std::uint32_t>(value));
         return;
     }
+    if (reg >= 0x12000000u) {
+        rt_.gs().writePrivileged(reg, value, pc);
+        return;
+    }
+    if (Dmac::handles(reg)) {
+        rt_.dmac().write(reg, static_cast<std::uint32_t>(value), pc);
+        return;
+    }
+    if (reg >= 0x10003000u && reg < 0x10003800u) {
+        rt_.gif().writeRegister(reg, static_cast<std::uint32_t>(value), pc);
+        return;
+    }
+    if (reg >= 0x10003800u && reg < 0x10004000u) {
+        (reg < 0x10003C00u ? rt_.vif0() : rt_.vif1()).writeRegister(reg, static_cast<std::uint32_t>(value), pc);
+        return;
+    }
     switch (reg) {
-        case 0x12001000: rt_.timing().writeGsCsr(value); return;
         case 0x1000F000: rt_.kernel().clearIntcStat(static_cast<std::uint32_t>(value)); return;  // 1 limpa
         case 0x1000F010: rt_.kernel().toggleIntcMask(static_cast<std::uint32_t>(value)); return;  // 1 inverte
         case 0x1000F180: {  // SIO_TXFIFO: saída de debug do kernel/EE
@@ -135,17 +162,12 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
             if (ch == '\n') std::fflush(stdout);
             return;
         }
-        case 0x1000F520: case 0x1000F590: regs_[0x1000F590] = value; return;
         default: break;
     }
-    const int ch = dmaChannelOf(addr);
-    if (ch >= 0 && (addr - kDmaBase[ch]) == 0 && (value & 0x100)) {
-        throw Unimplemented(std::string("início de transferência DMA no canal ") + dmaChannelName(static_cast<unsigned>(ch)) +
-                                " (CHCR.STR) — DMAC/GIF/VIF chegam na Fase 4; em " + rt_.describe(pc),
-                            pc);
-    }
     if (reg >= 0x10004000u && reg < 0x10008000u) {
-        throw Unimplemented("escrita em FIFO " + registerName(addr) + " — Fase 4; em " + rt_.describe(pc), pc);
+        throw Unimplemented("escrita de " + std::to_string(size * 8) + " bits no FIFO " + registerName(addr) +
+                                " (o hardware só aceita 128 bits); em " + rt_.describe(pc),
+                            pc);
     }
     if (!registerName(addr).empty()) {
         regs_[reg] = value;
@@ -168,6 +190,23 @@ void Hardware::read(std::uint32_t addr, void* out, unsigned size, std::uint32_t 
 }
 
 void Hardware::write(std::uint32_t addr, const void* in, unsigned size, std::uint32_t pc) {
+    if (size == 16 && addr >= 0x10004000u && addr < 0x10008000u) {
+        const auto* data = static_cast<const std::uint8_t*>(in);
+        if (rt_.options().traceHardware) {
+            std::fprintf(stderr, "[hw] escrita 128 bits %08x %s\n", addr, registerName(addr).c_str());
+        }
+        switch (addr & ~0xFFFu) {
+            case 0x10004000: rt_.vif0().transfer(data, 16, pc); return;
+            case 0x10005000: rt_.vif1().transfer(data, 16, pc); return;
+            case 0x10006000:
+                rt_.gif().transfer(3, data, 1, pc);
+                return;
+            default:
+                throw Unimplemented("escrita no FIFO do IPU (" + anyps2::hex(addr) + ") — IPU/MPEG ainda não suportado; em " +
+                                        rt_.describe(pc),
+                                    pc);
+        }
+    }
     std::uint64_t v = 0;
     std::memcpy(&v, in, size > 8 ? 8 : size);
     write64(addr, v, size > 8 ? 8 : size, pc);

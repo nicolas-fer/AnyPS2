@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependências
-        run: sudo apt-get update && sudo apt-get install -y ninja-build binutils-mipsel-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y ninja-build binutils-mipsel-linux-gnu libsdl2-dev
       - name: Configurar
         run: |
           if [ "${{ matrix.compiler }}" = clang ]; then export CXX=clang++; else export CXX=g++; fi
@@ -33,16 +33,26 @@ jobs:
           git diff --exit-code -- tests/data tests/unit/instruction_table.inc
 
   sanitizers:
-    name: Linux (ASan + UBSan)
+    # Os testes de ponta a ponta herdam as flags: o código recompilado e o
+    # runtime rodam instrumentados.
+    name: Linux (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+          - name: TSan
+            flags: -fsanitize=thread
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libsdl2-dev
       - run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
       - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --output-on-failure -j4
 
   windows:
     name: Windows (MSVC)
@@ -51,6 +61,8 @@ jobs:
       - uses: actions/checkout@v4
       # Avisos do MSVC ainda não são tratados como erro: este job foi escrito sem
       # acesso local a um MSVC; os builds do Linux (GCC/Clang) usam -Werror.
+      # O SDL2 é baixado e compilado estaticamente (ANYPS2_FETCH_SDL, padrão no
+      # Windows).
       - name: Configurar
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
       - name: Compilar

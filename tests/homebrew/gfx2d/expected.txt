@@ -1,0 +1,2 @@
+gfx2d: framebuffer em 0, regiao NTSC
+gfx2d: 2 quadros, ok

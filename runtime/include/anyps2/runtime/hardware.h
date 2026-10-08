@@ -13,18 +13,16 @@ class Runtime;
 // Registradores de hardware do EE (0x1000_0000–0x1000_FFFF) e registradores
 // privilegiados do GS (0x1200_0000–0x1200_1FFF).
 //
-// Fase 2: registradores conhecidos são armazenados (timers com contagem
-// derivada do relógio do host, INTC, DMAC, GS, SIO para saída de debug);
-// iniciar uma transferência de DMA ou acessar um registrador desconhecido
-// lança erro com o endereço e o nome. GIF/VIF/DMA de verdade: Fase 4.
+// Encaminha cada faixa para o seu dispositivo: timers/VBlank (Timing), INTC
+// (Kernel), DMAC, GIF, VIF0/VIF1 e seus FIFOs, SIF (Iop), GS. Registradores
+// conhecidos sem efeito emulado são apenas armazenados; acessar um
+// registrador desconhecido lança erro com o endereço e o PC.
 class Hardware : public MmioDevice {
 public:
     explicit Hardware(Runtime& rt);
 
     void read(std::uint32_t addr, void* out, unsigned size, std::uint32_t pc) override;
     void write(std::uint32_t addr, const void* in, unsigned size, std::uint32_t pc) override;
-
-    void setGsCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field);
 
     // Nome do registrador (para mensagens), ou "" se desconhecido.
     static std::string registerName(std::uint32_t addr);

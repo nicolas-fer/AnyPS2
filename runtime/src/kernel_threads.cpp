@@ -226,9 +226,19 @@ int Kernel::runMain(std::uint32_t entry) {
     Thread* m = main.get();
     current_ = m;
     threads_[m->id] = std::move(main);
-    m->host = std::make_unique<HostThread>([this, m] { hostThreadMain(m); }, kGuestThreadStack);
+    HostThread* mainHost = nullptr;
+    {
+        // A thread do guest só começa depois de pegar o bastão (este mutex):
+        // assim m->host já está atribuído quando outra thread do guest o
+        // consultar em switchTo (sem isso, uma troca rápida via
+        // ChangeThreadPriority/SleepThread criava uma segunda thread do host
+        // para a mesma thread do guest).
+        std::lock_guard lk(batonMutex_);
+        m->host = std::make_unique<HostThread>([this, m] { hostThreadMain(m); }, kGuestThreadStack);
+        mainHost = m->host.get();
+    }
     // Espera o fim do programa (Exit ou erro em qualquer thread).
-    m->host->join();
+    mainHost->join();
     // A thread principal terminou; se outra pediu o fim, o estado já está pronto.
     {
         std::lock_guard lk(batonMutex_);

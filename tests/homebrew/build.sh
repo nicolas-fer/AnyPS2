@@ -24,14 +24,18 @@ for dir in "$here"/*/; do
     name=$(basename "$dir")
     [ -f "$dir/main.c" ] || continue
     objs=""
+    # CFLAGS/LIBS opcionais por homebrew (podem usar $PS2DEV/$PS2SDK).
+    extra=""
+    [ -f "$dir/CFLAGS" ] && extra=$(eval echo "$(cat "$dir/CFLAGS")")
     for src in "$dir"/*.c "$dir"/*.S; do
         [ -f "$src" ] || continue
         obj="/tmp/$name-$(basename "$src").o"
-        $CC $CFLAGS -c "$src" -o "$obj"
+        # shellcheck disable=SC2086
+        $CC $CFLAGS $extra -c "$src" -o "$obj"
         objs="$objs $obj"
     done
     libs=""
-    [ -f "$dir/LIBS" ] && libs=$(cat "$dir/LIBS")
+    [ -f "$dir/LIBS" ] && libs=$(eval echo "$(cat "$dir/LIBS")")
     # shellcheck disable=SC2086
     $CC $LDFLAGS -o "$dir/$name.elf" $objs $libs
     # Mantém os símbolos (úteis para a análise), remove só a informação de debug.

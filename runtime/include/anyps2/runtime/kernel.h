@@ -62,6 +62,7 @@ public:
     void serviceInterrupts(std::uint32_t pc, bool allowReschedule = true, bool idle = false);
     // Custo (ciclos) contabilizado por syscall no relógio virtual.
     static constexpr std::int64_t kSyscallCycles = 200;
+    static constexpr unsigned kIntcDmac = 1;
 
     // Registradores INTC_STAT/INTC_MASK (acessados pelo hardware).
     std::uint32_t intcStat() const { return intcStat_; }
@@ -160,10 +161,8 @@ private:
         std::uint32_t handler, arg, gp;
     };
     std::vector<PendingAlarm> pendingAlarms_;
-    std::uint32_t dmacMask_ = 0;
     std::uint32_t osdConfig_ = 0;
     std::uint32_t osdConfig2_[2] = {0, 0};
-    std::uint64_t gsImr_ = 0x7F00;
     std::map<std::int32_t, std::uint32_t> userSyscalls_;  // SetSyscall
     unsigned interruptDepth_ = 0;
 };

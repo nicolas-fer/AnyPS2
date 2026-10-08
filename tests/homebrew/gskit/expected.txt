@@ -1,0 +1,2 @@
+gskit: tela 640x448, modo 2, entrelaçado 1
+gskit: 3 quadros, ok

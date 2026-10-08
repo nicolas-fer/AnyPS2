@@ -978,6 +978,9 @@ inline void C_EQ_S(Context* c, unsigned fs, unsigned ft) { setC(c, F(c, fs) == F
 inline void C_LT_S(Context* c, unsigned fs, unsigned ft) { setC(c, F(c, fs) < F(c, ft)); }
 inline void C_LE_S(Context* c, unsigned fs, unsigned ft) { setC(c, F(c, fs) <= F(c, ft)); }
 inline bool fpuCondition(Context* c) { return (c->fcr31 & fcr::C) != 0; }
+// CPCOND0 (BC0T/BC0F): no EE é ligado ao DMAC — verdadeiro quando todos os
+// canais marcados em D_PCR.CPC terminaram (D_STAT.CIS).
+bool cop0Condition(Context* c);
 
 // ---------------------------------------------------------------------------
 // COP0

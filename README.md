@@ -14,10 +14,18 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
                          memória, GS, VU, IOP, SPU2, pad, CDVD...)
 ```
 
-> **Status: Fases 1, 2 e 3 concluídas.** Homebrews de console compilados com
-> o ps2dev (printf, threads, timers, VBlank, arquivos, MMI, FPU) são
-> recompilados e rodam nativos. Ainda não há gráficos, som, VU nem jogos.
-> Veja o [PLANO.md](PLANO.md) para o roteiro completo.
+> **Status: Fases 1 a 4 concluídas.** Homebrews do ps2dev — de console
+> (printf, threads, timers, arquivos) e gráficos 2D/3D (libgraph/libdraw e
+> gsKit) — são recompilados e rodam nativos, com o Graphics Synthesizer
+> emulado em software e janela SDL2. Ainda não há VU (microprogramas), som,
+> controle nem jogos. Veja o [PLANO.md](PLANO.md) para o roteiro completo.
+
+| `gfx2d` (libgraph + libdraw) | `cube3d` (Z-buffer, textura em perspectiva) | `gskit` |
+|---|---|---|
+| ![gfx2d](tests/homebrew/gfx2d/expected.png) | ![cube3d](tests/homebrew/cube3d/expected.png) | ![gskit](tests/homebrew/gskit/expected.png) |
+
+Essas imagens são a saída real dos homebrews recompilados (e as
+referências que os testes comparam byte a byte).
 
 ## Experimente
 
@@ -34,7 +42,39 @@ executável nativo, o `printf` percorre o mesmo caminho que no console: newlib
 → libcglue → `fioWrite` → SIF RPC → servidor fileio do IOP (aqui em HLE) →
 stdout.
 
+Com gráficos (abre uma janela; feche-a para sair):
+
+```sh
+build/tools/anyps2 recomp tests/homebrew/cube3d/cube3d.elf -o /tmp/cube3d
+cmake -S /tmp/cube3d -B /tmp/cube3d/build && cmake --build /tmp/cube3d/build
+/tmp/cube3d/build/cube3d
+# ou sem janela, gravando a imagem final:
+ANYPS2_VIDEO=none ANYPS2_SCREENSHOT=cubo.png /tmp/cube3d/build/cube3d
+```
+
 ## O que funciona hoje
+
+### Fase 4 — gráficos
+
+- **DMAC**: canais VIF0/VIF1/GIF/SPR em modo normal e chain (todos os tags,
+  `call/ret` com pilha, IRQ, TTE), D_STAT/D_PCR/D_ENABLE, interrupções por
+  canal entregues aos handlers do programa, `BC0T/BC0F` ligados ao DMAC.
+- **GIF**: PATH2/PATH3 (DMA e FIFO), GIFtag PACKED/REGLIST/IMAGE, A+D.
+- **VIF0/VIF1**: todos os VIFcodes exceto execução de microprograma
+  (`MSCAL`/`MSCNT`, Fase 5): `UNPACK` em todos os formatos com máscara,
+  modos e escrita com salto, `MPG`, `DIRECT/DIRECTHL`, `STROW/STCOL`...
+- **Graphics Synthesizer em software**: VRAM de 4 MB com o swizzle real de
+  todos os formatos, todas as primitivas, Gouraud, texturas (32/24/16 bits,
+  8/4 bits com CLUT, TEXA, wrap/clamp/região, bilinear, mipmaps, perspectiva),
+  fog, testes de alfa/destino/Z, blending do GS, dither, máscaras, scissor,
+  transferências HOST→LOCAL e LOCAL→LOCAL, SIGNAL/FINISH/LABEL e saída de
+  vídeo com os dois circuitos (PMODE, DISPFB, DISPLAY, BGCOLOR).
+- **Janela SDL2** (thread própria; o renderer do SDL usa OpenGL/Direct3D para
+  apresentar), modo sem janela e screenshot em PNG.
+
+O GS é emulado **em software**, como referência exata. Não há (ainda) um
+renderizador do GS por GPU: ver a decisão e os números de desempenho no
+[PLANO.md](PLANO.md#fase-4--gráficos-gifvifdma--graphics-synthesizer-).
 
 ### Fase 2 — recompilação e runtime
 
@@ -66,8 +106,10 @@ Variáveis de ambiente do executável gerado:
 
 | Variável | Efeito |
 |---|---|
-| `ANYPS2_TRACE=syscall,iop,hw,call` | imprime syscalls/trocas de thread, comandos SIF, acessos a hardware e chamadas |
+| `ANYPS2_TRACE=syscall,iop,hw,gs,call` | imprime syscalls/trocas de thread, comandos SIF, acessos a hardware, DMA/GIF/VIF e chamadas |
 | `ANYPS2_CLOCK=virtual` | relógio determinístico (padrão: `real`) |
+| `ANYPS2_VIDEO=sdl\|none` | janela ou sem janela (padrão: janela se houver display) |
+| `ANYPS2_SCREENSHOT=arquivo.png` | grava a última imagem exibida ao terminar |
 | `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
 
@@ -123,9 +165,11 @@ As divergências em relação ao binutils são intencionais e documentadas em
 
 ## Compilando
 
-Requisitos: CMake ≥ 3.20 e um compilador C/C++20 (MSVC 2022, GCC ≥ 11 ou
-Clang ≥ 14). Sem dependências externas por enquanto (o SDL entra na Fase 4).
-O build do Windows/MSVC está no CI mas não foi validado localmente.
+Requisitos: CMake ≥ 3.20, um compilador C/C++20 (MSVC 2022, GCC ≥ 11 ou
+Clang ≥ 14) e **SDL2** (Linux: `libsdl2-dev`; no Windows o CMake baixa e
+compila o SDL2 automaticamente — `-DANYPS2_FETCH_SDL=ON`, padrão lá). Sem SDL:
+`-DANYPS2_WITH_SDL=OFF` (só modo sem janela). O build do Windows/MSVC está no
+CI mas não foi validado localmente.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -135,7 +179,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 Opções: `-DANYPS2_WARNINGS_AS_ERRORS=ON` (usado no CI),
 `-DANYPS2_BUILD_TESTS=OFF`, `-DANYPS2_E2E_TESTS=OFF` (pula os testes de ponta
-a ponta, que recompilam e compilam 5 homebrews, ~20 s com `ctest -j6`).
+a ponta, que recompilam e compilam 8 homebrews, ~1 min com `ctest -j8`).
 
 ### Testes
 
@@ -146,7 +190,9 @@ a ponta, que recompilam e compilam 5 homebrews, ~20 s com `ctest -j6`).
 | `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
 | `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
 | `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes |
+| `gs` | 21 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR) |
 | `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio`, `e2e_timers`, `e2e_timers_real` | homebrews do ps2dev recompilados, compilados e executados; saída comparada (relógio virtual, e `timers` também no real) |
+| `e2e_gfx2d`, `e2e_cube3d`, `e2e_gskit` | homebrews gráficos; saída de texto **e imagem final** (PNG) comparadas byte a byte com `expected.png` |
 
 O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
 (inteiros de 32/64 bits, jump tables, ponteiros de função, recursão,
@@ -193,7 +239,8 @@ common/       utilitários compartilhados (erros, leitura little-endian)
 recompiler/   biblioteca: ELF, decodificador/disassembler R5900, análise de
               funções (analysis/) e gerador de C++ (codegen/)
 runtime/      biblioteca linkada pelo código gerado: contexto, memória,
-              semântica das instruções (ops.h), kernel do EE, hardware, IOP/SIF
+              semântica das instruções (ops.h), kernel do EE, hardware, IOP/SIF,
+              DMAC, GIF, VIF, GS em software (gs/) e vídeo (SDL2)
 cmake/        AnyPS2Runtime.cmake (incluído pelos projetos gerados)
 tools/        CLI anyps2
 tests/        framework mínimo, testes unitários, golden do objdump, fixtures,
@@ -214,14 +261,17 @@ python3 tests/scripts/objdump_oracle.py check --tests build/tests/anyps2_tests
 
 ## O que falta
 
-- Fase 4: DMAC, GIF, VIF, Graphics Synthesizer, janela SDL.
-- Fase 5: VU0/VU1 (as macroinstruções do VU0 hoje lançam erro).
+- Fase 5: VU0/VU1 (macroinstruções do VU0 e microprogramas via `MSCAL`
+  hoje lançam erro; por isso a `libmath3d` e as amostras com VU1 ainda não
+  rodam).
 - Fase 6: módulos do IOP (pad, memory card, CDVD, SPU2/áudio, carregar IRX).
 - Fase 7: jogos comerciais.
 
 Limitações atuais (detalhes no [PLANO.md](PLANO.md)): a FPU usa o
 arredondamento do host (o PS2 trunca), não há suporte a código carregado em
-tempo de execução (overlays) e o desempenho ainda não foi otimizado.
+tempo de execução (overlays), o GS em software é mono-thread (~19 Mpixels/s
+com textura bilinear — suficiente para homebrews, não para jogos
+comerciais), DMA termina instantaneamente, e só há vídeo NTSC.
 
 ## Aspectos legais
 

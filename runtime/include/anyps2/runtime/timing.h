@@ -90,7 +90,6 @@ private:
     std::uint64_t nextVblankStart_ = kCyclesPerField;
     std::uint64_t nextVblankEnd_ = kCyclesPerField + kVblankLines * kCyclesPerLine;
     std::uint64_t vblanks_ = 0;
-    std::uint64_t csr_ = 0;
     std::uint32_t vsyncFlag_ = 0, vsyncCsr_ = 0;
     std::vector<Alarm> alarms_;
     std::int32_t nextAlarmId_ = 1;

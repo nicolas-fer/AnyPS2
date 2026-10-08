@@ -4,9 +4,11 @@
 #   3. executa e compara a saída com o esperado
 #
 # Variáveis: ANYPS2, ELF, NAME, WORK, ANYPS2_ROOT, GENERATOR, BUILD_TYPE,
-#            CXX_COMPILER (opcional), EXPECTED (arquivo) ou EXPECTED_COMMAND
+#            CXX_COMPILER, CXX_FLAGS, LINKER_FLAGS, WITH_SDL (opcionais),
+#            EXPECTED (arquivo) ou EXPECTED_COMMAND
 #            (executável cuja saída é o esperado), ARGS (lista), HOST_DIR,
-#            CLOCK (virtual|real; padrão virtual).
+#            CLOCK (virtual|real; padrão virtual), EXPECTED_FRAME (PNG que a
+#            última imagem exibida deve reproduzir byte a byte).
 
 string(REPLACE "|" ";" ARGS "${ARGS}")
 
@@ -26,6 +28,16 @@ if(BUILD_TYPE)
 endif()
 if(CXX_COMPILER)
     list(APPEND configure_args -DCMAKE_CXX_COMPILER=${CXX_COMPILER})
+endif()
+# Mesmas flags do build principal (ex.: sanitizers também no código gerado).
+if(CXX_FLAGS)
+    list(APPEND configure_args "-DCMAKE_CXX_FLAGS=${CXX_FLAGS}")
+endif()
+if(LINKER_FLAGS)
+    list(APPEND configure_args "-DCMAKE_EXE_LINKER_FLAGS=${LINKER_FLAGS}")
+endif()
+if(DEFINED WITH_SDL)
+    list(APPEND configure_args -DANYPS2_WITH_SDL=${WITH_SDL})
 endif()
 run_step(${CMAKE_COMMAND} ${configure_args})
 run_step(${CMAKE_COMMAND} --build ${WORK}/build --config ${BUILD_TYPE})
@@ -55,6 +67,11 @@ if(NOT CLOCK)
     set(CLOCK virtual)
 endif()
 set(ENV{ANYPS2_CLOCK} ${CLOCK})
+set(ENV{ANYPS2_VIDEO} none)
+if(EXPECTED_FRAME)
+    file(REMOVE ${WORK}/frame.png)
+    set(ENV{ANYPS2_SCREENSHOT} ${WORK}/frame.png)
+endif()
 execute_process(COMMAND ${exe} ${ARGS} WORKING_DIRECTORY ${HOST_DIR}
                 RESULT_VARIABLE rc OUTPUT_VARIABLE actual ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
@@ -77,3 +94,16 @@ if(NOT actual STREQUAL expected)
     message(FATAL_ERROR "saída de ${NAME} difere do esperado\n--- obtido ---\n${actual}\n--- esperado ---\n${expected}\n(arquivos em ${WORK})")
 endif()
 message(STATUS "${NAME}: saída idêntica ao esperado")
+
+if(EXPECTED_FRAME)
+    if(NOT EXISTS ${WORK}/frame.png)
+        message(FATAL_ERROR "${NAME}: nenhuma imagem foi exibida (esperava ${EXPECTED_FRAME})")
+    endif()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E compare_files ${WORK}/frame.png ${EXPECTED_FRAME}
+                    RESULT_VARIABLE differ)
+    if(differ)
+        message(FATAL_ERROR "${NAME}: a imagem exibida difere da referência\n"
+                            "  obtida:   ${WORK}/frame.png\n  esperada: ${EXPECTED_FRAME}")
+    endif()
+    message(STATUS "${NAME}: imagem idêntica à referência")
+endif()
