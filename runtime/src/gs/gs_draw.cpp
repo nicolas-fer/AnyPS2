@@ -318,6 +318,7 @@ std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) c
 void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
     if (x < e.scax0 || x > e.scax1 || y < e.scay0 || y > e.scay1) return;
     if ((e.scanmsk == 2 && (y & 1)) || (e.scanmsk == 3 && !(y & 1))) return;
+    ++pixels_;
     int r = f.r, g = f.g, b = f.b, a = f.a;
 
     if (e.tme) {

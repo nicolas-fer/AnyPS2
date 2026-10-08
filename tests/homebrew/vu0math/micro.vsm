@@ -1,0 +1,20 @@
+; Microprograma do VU0 chamado pelo EE com VCALLMS.
+; vf3 = vf1 + vf2 ; vi2 = 3 + 2 + 1 ; vf4 = vf3 * vf3 ; Q = 1 / vf3.x
+        .vu
+        .align 4
+        .global vu0_micro_start
+        .global vu0_micro_end
+vu0_micro_start:
+        add.xyzw vf3, vf1, vf2      iaddiu vi1, vi0, 3
+        nop                         iaddiu vi2, vi0, 0
+loop:
+        nop                         iadd vi2, vi2, vi1
+        nop                         isubiu vi1, vi1, 1
+        nop                         ibne vi1, vi0, loop
+        nop                         nop
+        mul.xyzw vf4, vf3, vf3      div Q, vf0w, vf3x
+        nop                         waitq
+        mulq.xyzw vf5, vf0, Q       nop
+        nop[E]                      nop
+        nop                         nop
+vu0_micro_end:

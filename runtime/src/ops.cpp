@@ -7,6 +7,7 @@
 #include "anyps2/runtime/ops.h"
 
 #include "anyps2/runtime/dmac.h"
+#include "anyps2/runtime/vu/vu.h"
 #include "anyps2/runtime/runtime.h"
 
 namespace anyps2::rt::ops {
@@ -84,18 +85,51 @@ void onInterruptsEnabled(Context* c) {
 }
 
 void ctc2(Context* c, unsigned id, u32 value, u32 pc) {
+    using namespace vucore::reg;
     if (id == 0) return;  // vi0 é sempre zero
     if (id < 16) {
         c->vi[id] = value & 0xFFFF;
         return;
     }
-    // Registradores de controle do VU0 (status, MAC, clip, R, I, Q, TPC,
-    // CMSAR0, FBRST, VPU-STAT, CMSAR1...). Guardamos o valor; os efeitos
-    // (iniciar microprogramas, reset) chegam na Fase 5.
-    if (id == 31) {  // CMSAR1: inicia o VU1
-        throw Unimplemented("CTC2 em CMSAR1 (iniciar microprograma do VU1) — Fase 5", pc);
+    switch (id) {
+        case Status: c->vi[Status] = (c->vi[Status] & 0x3Fu) | (value & 0xFC0u); return;  // só os sticky
+        case Mac: case TPC: case VPUSTAT: return;                                        // somente leitura
+        case Clip: c->vi[Clip] = value & 0xFFFFFFu; return;
+        case R: c->vi[R] = (value & 0x007FFFFFu) | 0x3F800000u; return;
+        case I: case Q: c->vi[id] = value; return;
+        case CMSAR0: c->vi[CMSAR0] = value & 0xFFFF; return;
+        case FBRST:
+            if (value & 0x002) c->rt->vu0().reset();
+            if (value & 0x200) c->rt->vu1().reset();
+            return;
+        case CMSAR1:  // escrever CMSAR1 inicia o microprograma do VU1
+            c->vi[CMSAR1] = value & 0xFFFF;
+            c->rt->vu1().start((value & 0xFFFF) * 8, pc);
+            return;
+        default:
+            c->vi[id] = value;
+            return;
     }
-    c->vi[id] = value;
+}
+
+u32 cfc2(Context* c, unsigned id) {
+    using namespace vucore::reg;
+    if (id < 16) return c->vi[id] & 0xFFFF;
+    switch (id) {
+        case FBRST: case VPUSTAT: return 0;  // VUs nunca ocupados
+        case Status: return c->vi[Status] & 0xFFF;
+        case Mac: return c->vi[Mac] & 0xFFFF;
+        case Clip: return c->vi[Clip] & 0xFFFFFF;
+        default: return c->vi[id];
+    }
+}
+
+void vu0Macro(Context* c, u32 lowerWord, u32 upperWord, u32 pc) {
+    c->rt->vu0().macro(vu::decode(lowerWord, upperWord), pc);
+}
+
+void vu0Call(Context* c, u32 addr, u32 pc) {
+    c->rt->vu0().start(addr, pc);
 }
 
 }  // namespace anyps2::rt::ops

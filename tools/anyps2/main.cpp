@@ -3,6 +3,7 @@
 // Fase 1: inspeção de ELF e desmontagem do código R5900.
 // Fase 2+: "anyps2 recomp" gera o projeto C++/CMake a partir do ELF.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
@@ -18,11 +19,14 @@
 
 #include "anyps2/analysis/analyzer.h"
 #include "anyps2/codegen/generator.h"
+#include "anyps2/codegen/vu_generator.h"
 #include "anyps2/common/bytes.h"
 #include "anyps2/common/error.h"
 #include "anyps2/elf/elf_file.h"
 #include "anyps2/r5900/decoder.h"
 #include "anyps2/r5900/disassembler.h"
+#include "anyps2/vu/isa.h"
+#include "anyps2/vu/scan.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -36,7 +40,7 @@ using anyps2::hex;
 namespace elf = anyps2::elf;
 namespace r5900 = anyps2::r5900;
 
-constexpr const char* kVersion = "0.4.0 (Fase 4)";
+constexpr const char* kVersion = "0.5.0 (Fase 5)";
 
 void printUsage() {
     std::cout <<
@@ -59,11 +63,22 @@ Uso:
       Desmonta um binário cru de palavras little-endian.
 
   anyps2 recomp <arquivo.elf> -o <diretório> [--name NOME] [--root RAIZ]
-               [--function 0xENDERECO ...]
+               [--function 0xENDERECO ...] [--vu-dumps DIR] [--no-vu]
       Gera um projeto CMake com o código C++ recompilado. Compile com
       "cmake -S <diretório> -B <diretório>/build && cmake --build ...".
       --root aponta para a raiz do AnyPS2 (padrão: a usada neste build).
       --function adiciona inícios de função que a análise não achou.
+      O microcódigo dos VUs achado no ELF também é recompilado; --vu-dumps
+      acrescenta os dumps gravados com ANYPS2_VU_DUMP=DIR (microcódigo que
+      só existe em tempo de execução); --no-vu deixa tudo para o
+      interpretador.
+
+  anyps2 vu <arquivo.elf | dump.bin> [--disasm]
+      Lista (e desmonta) o microcódigo de VU encontrado: pacotes VIF MPG,
+      blocos crus nos dados ou um dump da micro memória.
+
+  anyps2 vu-gen <arquivo.elf | dump.bin> -o <diretório> [--table NOME]
+      Gera só o C++ do microcódigo (vu_NNN.cpp + vu_programs.cpp).
 
   anyps2 --version | --help
 )";
@@ -337,8 +352,84 @@ std::string sanitizeName(std::string s) {
     return s;
 }
 
+// Dumps .bin gravados com ANYPS2_VU_DUMP (ordem estável).
+std::vector<std::filesystem::path> listDumps(const std::string& dir) {
+    std::vector<std::filesystem::path> files;
+    if (!std::filesystem::is_directory(dir)) throw Error("--vu-dumps: " + dir + " não é um diretório");
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        if (e.is_regular_file() && e.path().extension() == ".bin") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+// Microcódigo de um ELF ou de um dump .bin.
+std::vector<anyps2::vu::MicroBlob> loadMicrocode(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    char magic[4] = {};
+    f.read(magic, 4);
+    if (f && magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+        return anyps2::codegen::findElfMicrocode(elf::ElfFile::loadFromFile(path));
+    }
+    return anyps2::codegen::findDumpMicrocode(path);
+}
+
+int cmdVu(const std::vector<std::string_view>& args) {
+    std::optional<std::string> path;
+    bool disasm = false;
+    for (const auto a : args) {
+        if (a == "--disasm") disasm = true;
+        else if (!path) path = std::string(a);
+        else throw Error("argumento inesperado: " + std::string(a));
+    }
+    if (!path) throw Error("uso: anyps2 vu <arquivo.elf | dump.bin> [--disasm]");
+    const auto blobs = loadMicrocode(*path);
+    std::cout << blobs.size() << " bloco(s) de microcódigo\n";
+    for (std::size_t i = 0; i < blobs.size(); ++i) {
+        const auto& b = blobs[i];
+        std::cout << "\nbloco " << i << ": " << anyps2::codegen::describeBlob(b) << ", " << b.words.size() / 2
+                  << " pares\n";
+        if (!disasm) continue;
+        const std::uint32_t base = b.loadAddress == anyps2::vu::kUnknownLoad ? 0 : b.loadAddress;
+        for (std::size_t w = 0; w + 1 < b.words.size(); w += 2) {
+            const auto pc = static_cast<std::uint32_t>(base + w * 4);
+            const auto in = anyps2::vu::decode(b.words[w], b.words[w + 1]);
+            char head[40];
+            std::snprintf(head, sizeof(head), "  %04x: %08x %08x  ", pc, b.words[w], b.words[w + 1]);
+            std::cout << head << anyps2::vu::disassemble(in, pc) << "\n";
+        }
+    }
+    return 0;
+}
+
+int cmdVuGen(const std::vector<std::string_view>& args) {
+    std::optional<std::string> path, out;
+    std::string table = "kVuPrograms";
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const auto a = args[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= args.size()) throw Error("faltou valor para " + std::string(a));
+            return std::string(args[++i]);
+        };
+        if (a == "-o" || a == "--output") out = next();
+        else if (a == "--table") table = next();
+        else if (!path) path = std::string(a);
+        else throw Error("argumento inesperado: " + std::string(a));
+    }
+    if (!path || !out) throw Error("uso: anyps2 vu-gen <arquivo.elf | dump.bin> -o <diretório> [--table NOME]");
+    const auto blobs = loadMicrocode(*path);
+    std::filesystem::create_directories(*out);
+    for (const auto& f : anyps2::codegen::generateVuSources(blobs, table)) {
+        std::ofstream o(std::filesystem::path(*out) / f.name, std::ios::binary);
+        if (!o) throw Error("não foi possível criar " + (std::filesystem::path(*out) / f.name).string());
+        o << f.text;
+    }
+    return 0;
+}
+
 int cmdRecomp(const std::vector<std::string_view>& args) {
-    std::optional<std::string> path, out, name;
+    std::optional<std::string> path, out, name, vuDumps;
+    bool noVu = false;
     std::string root = ANYPS2_SOURCE_DIR;
     anyps2::analysis::AnalysisOptions aopt;
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -351,6 +442,8 @@ int cmdRecomp(const std::vector<std::string_view>& args) {
         else if (a == "--name") name = next();
         else if (a == "--root") root = next();
         else if (a == "--function") aopt.extraFunctions.push_back(parseNumber(next()));
+        else if (a == "--vu-dumps") vuDumps = next();
+        else if (a == "--no-vu") noVu = true;
         else if (!path) path = std::string(a);
         else throw Error("argumento inesperado: " + std::string(a));
     }
@@ -364,12 +457,15 @@ int cmdRecomp(const std::vector<std::string_view>& args) {
     gopt.outputDir = *out;
     gopt.anyps2Root = root;
     gopt.projectName = sanitizeName(name ? *name : std::filesystem::path(*path).stem().string());
+    gopt.recompileVu = !noVu;
+    if (vuDumps) gopt.vuDumps = listDumps(*vuDumps);
     const auto report = anyps2::codegen::generateProject(f, model, gopt);
 
     std::cout << "Projeto gerado em " << *out << " (alvo '" << gopt.projectName << "')\n";
     std::cout << "  funções:     " << report.functions << "\n";
     std::cout << "  instruções:  " << report.instructions << "\n";
     std::cout << "  arquivos C++:" << " " << report.sourceFiles << "\n";
+    std::cout << "  microcódigo de VU: " << report.vuBlocks << " bloco(s), " << report.vuPairs << " pares\n";
     if (report.invalidWords) {
         std::cout << "  palavras inválidas dentro de funções: " << report.invalidWords
                   << " (lançam erro se executadas)\n";
@@ -408,6 +504,8 @@ int run(int argc, char** argv) {
     if (cmd == "disasm") return cmdDisasm(args);
     if (cmd == "disasm-bin") return cmdDisasmBin(args);
     if (cmd == "recomp") return cmdRecomp(args);
+    if (cmd == "vu") return cmdVu(args);
+    if (cmd == "vu-gen") return cmdVuGen(args);
     throw Error("comando desconhecido '" + std::string(cmd) + "' (use --help)");
 }
 

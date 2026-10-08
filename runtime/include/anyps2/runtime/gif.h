@@ -23,6 +23,9 @@ public:
 
     // Processa `qwords` quadwords (16 bytes cada) no caminho `path` (1–3).
     void transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, std::uint32_t pc);
+    // XGKICK: envia pelo PATH1 os pacotes a partir de addr (bytes) na memória
+    // de dados do VU1 até terminar um pacote com EOP.
+    void kick(const std::uint8_t* mem, std::uint32_t size, std::uint32_t addr, std::uint32_t pc);
 
     std::uint32_t readRegister(std::uint32_t addr, std::uint32_t pc);
     void writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc);

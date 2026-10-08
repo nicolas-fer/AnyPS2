@@ -26,8 +26,8 @@ struct VuMemory {
 // Implementado: NOP, STCYCL, OFFSET, BASE, ITOP, STMOD, MSKPATH3, MARK,
 // FLUSH/FLUSHE/FLUSHA, STMASK, STROW, STCOL, MPG, DIRECT/DIRECTHL (PATH2) e
 // UNPACK (todos os formatos, com máscara, modos offset/difference e
-// escrita com salto). Execução de microprogramas (MSCAL/MSCALF/MSCNT)
-// chega na Fase 5 e hoje lança erro dizendo o endereço do microprograma.
+// escrita com salto) e MSCAL/MSCALF/MSCNT, que executam o microprograma do
+// VU correspondente na hora (com o double buffering TOPS/BASE/OFST do VIF1).
 class Vif {
 public:
     Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif);
@@ -41,6 +41,8 @@ public:
     void writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc);
     void reset();
     bool idle() const { return state_ == State::Idle; }
+    std::uint32_t top() const { return top_; }
+    std::uint32_t itop() const { return itop_; }
 
 private:
     enum class State { Idle, Mask, Row, Col, Mpg, Direct, Unpack };

@@ -93,6 +93,26 @@ void Gs::raiseEvent(unsigned bit) {
     if (!(imr_ & (1ull << (bit + 8))) && rt_) rt_->kernel().raiseIntc(0);  // INTC_GS
 }
 
+// Custo (ciclos do EE, 294 MHz) usado para atrasar o FINISH: o GIF entrega
+// ~1 registrador por ciclo do barramento (147 MHz) e o GS preenche ~8 pixels
+// por ciclo do GS. É uma estimativa: só precisa ser da ordem do hardware para
+// que padrões como "envia DMA → limpa VSINT/FINISH → espera FINISH" funcionem.
+constexpr std::uint64_t kCyclesPerRegister = 2;
+constexpr std::uint64_t kPixelsPerCycle = 4;
+constexpr std::uint64_t kNoEvent = ~std::uint64_t{0};
+
+std::uint64_t Gs::nextEventTime() const {
+    return finishDue_.empty() ? kNoEvent : finishDue_.front();
+}
+
+void Gs::processEvents(std::uint64_t now) {
+    std::size_t n = 0;
+    while (n < finishDue_.size() && finishDue_[n] <= now) ++n;
+    if (n == 0) return;
+    finishDue_.erase(finishDue_.begin(), finishDue_.begin() + static_cast<std::ptrdiff_t>(n));
+    raiseEvent(kFinish);
+}
+
 std::uint64_t Gs::csr() {
     if (hsyncNow_ && cyclesPerLine_ && !(csr_ & (1ull << kHsint))) {
         const std::uint64_t t = hsyncNow_(hsyncCtx_);
@@ -137,6 +157,9 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 xfer_ = {};
                 queued_ = 0;
                 csr_ &= kCsrField;
+                finishDue_.clear();
+                work_ = 0;
+                pixels_ = 0;
                 return;
             }
             // SIGNAL/FINISH/HSINT/VSINT/EDWINT: escrever 1 limpa.
@@ -168,8 +191,16 @@ void Gs::vblankEnd() {}
 // Registradores gerais
 // ---------------------------------------------------------------------------
 
+void Gs::addWork(std::uint64_t cycles) {
+    // O GS começa um lote de trabalho quando os dados chegam: o FINISH
+    // depende do trabalho desde então, não de tudo o que veio antes.
+    if (work_ == 0 && pixels_ == 0 && hsyncNow_) workStart_ = hsyncNow_(hsyncCtx_);
+    work_ += cycles;
+}
+
 void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
     regs_[reg] = v;
+    addWork(kCyclesPerRegister);
     switch (reg) {
         case PRIM:
             queued_ = 0;
@@ -242,9 +273,19 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             raiseEvent(kSignal);
             return;
         }
-        case FINISH:
-            raiseEvent(kFinish);
+        case FINISH: {
+            if (!hsyncNow_) {
+                raiseEvent(kFinish);
+                return;
+            }
+            const std::uint64_t now = hsyncNow_(hsyncCtx_);
+            const std::uint64_t start = std::max(busyUntil_, workStart_);
+            busyUntil_ = std::max(start + work_ + pixels_ / kPixelsPerCycle, now + kCyclesPerRegister);
+            work_ = 0;
+            pixels_ = 0;
+            finishDue_.push_back(busyUntil_);
             return;
+        }
         case LABEL: {
             const std::uint64_t mask = (v >> 32) << 32;
             siglblid_ = (siglblid_ & ~mask) | ((v << 32) & mask);
@@ -386,6 +427,7 @@ void Gs::startTransfer(std::uint32_t pc) {
 }
 
 void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
+    addWork(1);  // 64 bits: meio ciclo do barramento
     if (!xfer_.active) {
         // Dados de preenchimento depois do fim de uma transferência são
         // descartados pelo hardware.

@@ -8,6 +8,7 @@
 
 #include "anyps2/analysis/analyzer.h"
 #include "anyps2/codegen/generator.h"
+#include "anyps2/codegen/vu_generator.h"
 #include "anyps2/common/bytes.h"
 #include "anyps2/r5900/decoder.h"
 #include "anyps2/elf/elf_file.h"
@@ -87,10 +88,11 @@ TEST_CASE(codegen, function_body) {
     CHECK(contains(mainCode, "LQ(c, 9, 8, 0, "));
     CHECK(contains(mainCode, "PEXTLW(c, 10, 9, 9);"));
     CHECK(contains(mainCode, "ADD_S(c, 2, 1, 1);"));
-    // A macroinstrução do VU0 ainda não é suportada: vira erro em execução.
-    CHECK(contains(mainCode, "unsupported(c, "));
-    CHECK(contains(mainCode, "Fase 5"));
-    CHECK_EQ(report.unsupported["vadd"], 1u);
+    // Macroinstrução do VU0 (vadd.xyzw vf2, vf1, vf1 = 0x4BE108A8): vai para o
+    // núcleo do VU como palavra upper do microcódigo.
+    CHECK(contains(mainCode, "vu0Macro(c, 0x8000033C"));
+    CHECK(contains(mainCode, "0x01E108A8"));
+    CHECK_EQ(report.unsupported.count("vadd"), 0u);
     // Reentrada no meio da função pelo switch de entrada.
     CHECK(contains(mainCode, "switch (c->pc)"));
     CHECK(contains(mainCode, "badEntry(c, " + hexU(model.functions[1].start) + ");"));
@@ -143,4 +145,34 @@ TEST_CASE(codegen, gaps_without_symbols_become_functions) {
     CHECK(model.functionContaining(0x00100020) != nullptr);    // alvo do jal
     CHECK_EQ(model.functionContaining(0x00100020)->start, 0x00100020u);
     CHECK_EQ(model.functions[0].name, std::string("sub_00100000"));
+}
+
+// Microcódigo de VU: um bloco vira trechos com um rótulo por par, conferência
+// do par na micro memória e o núcleo especializado pelas operações; a tabela
+// leva o endereço de carga (se conhecido) e as palavras para o casamento.
+TEST_CASE(codegen, vu_microcode) {
+    anyps2::vu::MicroBlob b;
+    b.address = 0x00123450;
+    b.loadAddress = 0x80;
+    b.fromMpg = true;
+    // iaddiu vi1,vi0,3 / add.xyzw vf3,vf1,vf2 ; ibne vi1,vi0,-2 / nop ; nop[e] ; nop
+    b.words = {0x10010003u, 0x01E208E8u, 0x520107FEu, 0x000002FFu, 0x8000033Cu, 0x400002FFu,
+               0x8000033Cu, 0x000002FFu};
+    const auto files = anyps2::codegen::generateVuSources({b}, "kT");
+    CHECK_EQ(files.size(), 2u);
+    if (files.size() != 2) return;
+    const std::string& code = files[0].text;
+    CHECK_EQ(files[0].name, std::string("vu_000.cpp"));
+    CHECK(code.find("vu.pairIs(base + 0x0008u, 0x520107FEu, 0x000002FFu)") != std::string::npos);
+    CHECK(code.find("vu.step<static_cast<U>(0), static_cast<L>(4)>") != std::string::npos);  // ADD + IADDIU
+    CHECK(code.find("case 0x0018u: goto p_0018;") != std::string::npos);
+    CHECK(code.find("void kT_block_0(") != std::string::npos);
+    const std::string& table = files[1].text;
+    CHECK_EQ(files[1].name, std::string("vu_programs.cpp"));
+    CHECK(table.find("{0x00000080u, kT_words_0, 8u, &kT_block_0") != std::string::npos);
+    CHECK(table.find("extern const std::size_t kTCount = 1;") != std::string::npos);
+    // Sem microcódigo: tabela com entrada nula e Count = 0.
+    const auto none = anyps2::codegen::generateVuSources({}, "kT");
+    CHECK_EQ(none.size(), 1u);
+    CHECK(none[0].text.find("kTCount = 0;") != std::string::npos);
 }

@@ -9,6 +9,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu/vu.h"
 
 namespace anyps2::rt {
 
@@ -153,11 +154,20 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
         case 0x10: case 0x11: case 0x13:
             if (!vif1 && (cmd & 0x7F) != 0x10) break;
             return;  // VU e caminhos do GIF sempre ociosos (execução síncrona)
-        case 0x14: case 0x15: case 0x17:
-            throw Unimplemented(unitName + ": " + cmdName(cmd) + " — execução de microprograma do VU" +
-                                    std::to_string(unit_) + " em " + anyps2::hex((imm & 0xFFFF) * 8, 4) +
-                                    " (microcódigo dos VUs chega na Fase 5)",
-                                pc);
+        case 0x14: case 0x15: case 0x17: {  // MSCAL, MSCALF, MSCNT
+            if (!rt_) throw Unimplemented(unitName + ": " + cmdName(cmd) + " sem runtime", pc);
+            itop_ = itops_;
+            if (vif1) {
+                // Double buffering: o VU1 lê TOP; o próximo UNPACK com FLG vai para o outro buffer.
+                top_ = tops_;
+                tops_ = (stat_ & kStatDbf) ? base_ : base_ + ofst_;
+                stat_ ^= kStatDbf;
+            }
+            Vu& vu = vif1 ? rt_->vu1() : rt_->vu0();
+            const std::uint32_t start = (cmd & 0x7F) == 0x17 ? vu.regs().vi[vucore::reg::TPC] * 8 : imm * 8;
+            vu.start(start, pc);
+            return;
+        }
         case 0x20: state_ = State::Mask; return;
         case 0x30: state_ = State::Row; index_ = 0; return;
         case 0x31: state_ = State::Col; index_ = 0; return;

@@ -21,6 +21,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
 add_subdirectory(common)
+add_subdirectory(vu)
 add_subdirectory(recompiler)
 add_subdirectory(runtime)
 add_subdirectory(tools)

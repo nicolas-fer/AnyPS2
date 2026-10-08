@@ -127,9 +127,10 @@ três homebrews (CPU, threads, arquivos) rodam com saída idêntica à esperada.
 - ✅ Código gerado + runtime limpos sob ASan/UBSan.
 
 ### Limitações conhecidas da Fase 2
-- FPU: o PS2 arredonda em direção a zero; usamos o arredondamento do host
-  (para o mais próximo). Resultados podem diferir no último bit. Valores com
-  expoente 255 (que no PS2 são números normais) são aproximados por ±Fmax.
+- FPU: ~~o PS2 arredonda em direção a zero; usamos o arredondamento do host~~
+  corrigido na Fase 5 — a FPU e os VUs truncam como o hardware (ver
+  `ps2float.h`). Valores com expoente 255 (que no PS2 são números normais)
+  continuam aproximados por ±Fmax.
 - Código automodificável ou carregado em tempo de execução (overlays) não é
   suportado: só o que está no ELF é recompilado.
 - Salto para um endereço que a análise não marcou como entrada gera erro
@@ -189,12 +190,12 @@ SetGsCrt com modo PAL relevante).
   `dma_wait_fast` do ps2sdk.
 - ✅ GIF: PATH2 (VIF1) e PATH3 (DMA e GIF_FIFO), GIFtag com PRE/PRIM,
   PACKED (todos os descritores, Q do ST, ADC do XYZ), REGLIST (inclusive
-  NREG×NLOOP ímpar), IMAGE, A+D. PATH1 chega com o VU1 (Fase 5).
+  NREG×NLOOP ímpar), IMAGE, A+D. PATH1 (XGKICK) chegou com o VU1 na Fase 5.
 - ✅ VIF0/VIF1: NOP, STCYCL, OFFSET, BASE, ITOP, STMOD, MSKPATH3, MARK,
   FLUSH*, STMASK, STROW, STCOL, MPG, DIRECT/DIRECTHL, UNPACK (S/V2/V3/V4 de
   32/16/8 bits, V4-5, sinal/USN, TOPS, máscara, modos offset/difference,
   escrita com salto CL ≥ WL). Memórias dos VUs mapeadas no EE
-  (0x1100_0000). `MSCAL/MSCALF/MSCNT` → erro "Fase 5" com o endereço.
+  (0x1100_0000). `MSCAL/MSCALF/MSCNT` chegaram na Fase 5.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -259,20 +260,116 @@ Limitações e riscos:
   interrupção; só NTSC (o ROMVER sintético agora diz EUA/NTSC — antes dizia
   Europa, e a libgraph escolhia PAL).
 
-## Fase 5 — VU0/VU1 e recompilação de microcódigo ⬜
+## Fase 5 — VU0/VU1 e recompilação de microcódigo ✅
 
-- ⬜ Decodificador do microcódigo (pares upper/lower de 64 bits, bits I/E/M/D/T).
-- ⬜ Interpretador de referência (com pipeline: Q/P, stalls, flags MAC/status/clip
-  atrasados) para validar.
-- ⬜ Recompilação: microprogramas encontrados em tempo de geração (dados do
-  ELF enviados por VIF `MPG`) e cache por hash para os enviados em tempo de
-  execução (recompilação AOT a partir de dumps + fallback interpretado).
-- ⬜ XGKICK (PATH1) para o GIF, VU0 em modo micro (`VCALLMS`).
-- ⬜ Testes: vetores por instrução do VU + microprogramas de homebrew.
+- ✅ Biblioteca `vu/`: decodificador e disassembler do microcódigo (pares
+  upper/lower, bits I/E/M/D/T, todas as instruções do VU0/VU1 com EFU),
+  validados contra o `dvp-objdump` do ps2dev em 12 mil pares aleatórios
+  (`tests/data/vu_golden.txt`, mesma saída byte a byte, inclusive quais
+  codificações o objdump rejeita).
+- ✅ Aritmética do PS2 (`ps2float.h`), compartilhada pela FPU do EE e pelos
+  VUs: sem NaN/Inf/denormais, saturação em ±Fmax com flags O/U e
+  **arredondamento em direção a zero calculado exatamente** (TwoSum e
+  produtos exatos em double — sem trocar o modo de arredondamento do host),
+  conferido contra `fesetround(FE_TOWARDZERO)` em 200 mil operações.
+- ✅ Núcleo do VU com modelo de pipeline: VF escrito fica pronto em 4 ciclos
+  (ler antes trava), flags MAC/status/clip visíveis 4 ciclos depois da
+  instrução, Q (DIV/SQRT 7, RSQRT 13) e P (EFU 11–54 ciclos) com WAITQ/WAITP,
+  upper e lower em paralelo (o lower lê os valores antigos; o upper vence se
+  ambos escrevem o mesmo registrador), LOI, bit E com delay slot, desvios
+  com delay slot, BAL/JR/JALR, TPC.
+- ✅ VU0 em modo macro: o recompilador do EE emite cada COP2 (`vadd`,
+  `vmula`, `vdiv`, `vsqi`, `viadd`, `vclip`...) como chamada ao mesmo núcleo;
+  `CFC2/CTC2` com a semântica dos registradores de controle (FBRST, CMSAR0/1,
+  status só com bits fixos graváveis...), `VCALLMS/VCALLMSR` (VU0 em modo
+  micro), `BC2x` (VU0 nunca ocupado: execução síncrona).
+- ✅ VU1: `MSCAL/MSCALF/MSCNT` pelo VIF1 com double buffering (TOPS/TOP,
+  BASE/OFFSET, ITOP), `CTC2 CMSAR1`, `XTOP/XITOP`, `XGKICK` (PATH1 para o
+  GIF), VU0 lendo os registradores do VU1 em 0x4000.
+- ✅ **Recompilação estática do microcódigo** (`anyps2 recomp`): o
+  microcódigo é localizado no ELF — pacotes VIF `MPG` montados em tempo de
+  compilação (endereço de carga conhecido) e blocos "crus" que o programa
+  envia com um MPG montado em tempo de execução (como o ps2sdk faz) — e cada
+  bloco vira C++: trechos de até 64 pares com um rótulo por par e
+  fall-through entre pares consecutivos; cada par chama o núcleo do VU com
+  as operações como parâmetros de template (`if constexpr`), então sobra só
+  o código daquela operação. Os blocos não dependem do endereço de carga: o runtime casa
+  o conteúdo da micro memória com os blocos (índice pelo par no pc), e cada
+  par confere que a micro memória ainda contém a instrução compilada; se
+  não contém (outro programa por cima, upload parcial), o interpretador
+  continua dali — inclusive no meio de um delay slot — e o código
+  recompilado é retomado no próximo desvio.
+  Microcódigo que só existe em tempo de execução (lido do disco, gerado):
+  `ANYPS2_VU_DUMP=dir` grava a micro memória dos programas interpretados e
+  `anyps2 recomp --vu-dumps dir` os inclui na próxima geração.
+  `ANYPS2_VU=interp` força o interpretador; `ANYPS2_VU=compiled` faz de
+  qualquer par interpretado um erro (usado nos testes).
+- ✅ CLI: `anyps2 vu <elf|dump> [--disasm]` lista/desmonta o microcódigo
+  encontrado; `anyps2 vu-gen` gera só o C++ dele.
+- ✅ GS: o evento FINISH agora chega depois do tempo estimado de trabalho do
+  GS (registradores pelo GIF + pixels), no relógio do runtime. Antes ele era
+  instantâneo e o sample `draw/teapot` do ps2sdk travava: `graph_wait_vsync`
+  faz `CSR |= CSR & 8`, o que limpava um FINISH já presente, e
+  `draw_wait_finish` esperava para sempre. No hardware o GS ainda está
+  desenhando nesse momento.
+- ✅ Testes:
+  - `vu_isa`: golden do dvp-objdump; `vu`: 12 casos com valores calculados à
+    mão (truncamento, flags e sticky, MAC/clip atrasados, stalls, latência de
+    Q, upper/lower em paralelo, LOI, bit E, BAL/JR, memória, EFU, erros
+    explícitos, XGKICK e double buffering do VIF1), conferidos com testes de
+    mutação;
+  - `vu_diff`: **teste diferencial** interpretador × código recompilado com
+    16 microprogramas aleatórios (pares do golden + desvios para a frente,
+    laços contados, JR absoluto, LOI) × 48 estados iniciais aleatórios
+    (inclusive floats com expoente 0/255): registradores, flags, ACC, Q/P/I/R,
+    memória, ciclos e TPC idênticos; também com o bloco carregado em outra
+    base e com um par alterado na micro memória (volta ao interpretador e
+    retoma). Conferido com mutação no gerador (desvios ignorados → 792
+    diferenças). No build com sanitizers, o C++ gerado deste teste é
+    compilado sem UBSan (com UBSan levava mais de 10 min; o mesmo núcleo
+    continua sob UBSan pelo interpretador);
+  - ponta a ponta com imagem comparada byte a byte: `vu0math` (libmath3d +
+    VU0 macro em assembly + microprograma via VCALLMS), `vu1draw` (cubo
+    transformado por um microprograma do VU1, com XGKICK; roda também com
+    `ANYPS2_VU=interp` e `ANYPS2_VU=compiled`, mesma imagem) e quatro samples
+    do ps2sdk sem modificação: `draw/cube`, `draw/teapot`, `draw/texture` e
+    `vu1/` (`ANYPS2_FRAMES=N` encerra no N-ésimo VBlank).
 
-Riscos (alto): microcódigo é carregado dinamicamente pelo jogo; parte dele
-só é conhecida em tempo de execução, então um interpretador sempre será
-necessário como rede de segurança.
+Desempenho medido (Release, GCC 13, 4 núcleos) — **o ganho da recompilação
+do microcódigo é pequeno, e isso foi medido, não suposto**:
+- interpretador ~35 Mpares/s, código recompilado ~37 Mpares/s (**~1,1x**);
+- o custo por par está na semântica, igual nos dois caminhos: truncamento
+  exato, flags MAC/status/clip (toda instrução FMAC produz flags que ficam
+  prontas 4 ciclos depois) e o modelo de pipeline — não na decodificação,
+  que o interpretador já guarda em cache;
+- variantes testadas: tudo inline numa função por bloco deu 1,9x, mas levou
+  5m44s para compilar 2 mil pares (crescimento não linear no GCC); uma função
+  por par com o pipeline inline, 1,1x e 3 min. A versão final (trechos de 64
+  pares, pipeline fora de linha, `-O1`) compila ~18 ms por par, linear e em
+  paralelo por arquivo (um microprograma de 16 KB ≈ 40 s de CPU), com o
+  mesmo desempenho de `-O3`;
+- nos samples o efeito total é nulo: no `vu1/`, o VU inteiro é ~3% do tempo
+  e o GS em software desenhando o que o XGKICK manda é ~22%.
+
+O caminho para ganho real fica registrado para antes da Fase 7 (o VU1 de um
+jogo pode precisar de 50–100 Mpares/s): análise estática no recompilador —
+calcular os stalls e a latência das flags em tempo de compilação dentro de
+cada bloco e eliminar flags que nunca são lidas (o sticky do status complica
+isso: ele depende de todo resultado) — e avaliar as flags de forma
+preguiçosa no runtime.
+
+Limitações (honestas):
+- O VU roda **síncrono**: o microprograma executa inteiro no MSCAL/VCALLMS e
+  o EE não gasta tempo esperando; jogos que fazem trabalho no EE em paralelo
+  ao VU1 e medem/esperam por isso de formas exóticas podem divergir.
+- EFU (ESIN, EATAN, EEXP, ERSQRT...) usa a libm do host: o último bit pode
+  diferir do hardware (os algoritmos exatos do EFU não são públicos).
+- Pipeline: modelados os stalls de VF e de Q/P e a latência das flags;
+  não modelados: stall de VI após load inteiro, a peculiaridade de desvio
+  condicional logo após uma escrita de VI ("branch delay" do VI), escritas
+  simultâneas de flags por FMAC e FDIV no mesmo ciclo, e bits D/T (erro).
+- Microcódigo que não está no ELF nem nos dumps roda no interpretador
+  (correto, só mais lento).
 
 ## Fase 6 — IOP em HLE ⬜
 

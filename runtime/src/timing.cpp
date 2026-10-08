@@ -213,6 +213,7 @@ void Timing::process(std::uint32_t) {
             nextVblankEnd_ += kCyclesPerField;
         }
     }
+    rt_.gs().processEvents(t);
     for (unsigned n = 0; n < 4; ++n) advanceTimer(n, t);
     if (!alarms_.empty()) {
         std::vector<Alarm> due;
@@ -230,6 +231,7 @@ std::uint64_t Timing::nextEventTime() const {
     std::uint64_t next = std::min(nextVblankStart_, nextVblankEnd_);
     for (unsigned n = 0; n < 4; ++n) next = std::min(next, timerNextEvent(n, t));
     for (const auto& a : alarms_) next = std::min(next, a.due);
+    next = std::min(next, rt_.gs().nextEventTime());
     return next;
 }
 

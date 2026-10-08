@@ -52,9 +52,12 @@ struct alignas(16) Context {
     // COP0
     std::uint32_t cop0[32];
 
-    // COP2 / VU0 (registradores usados por QMFC2/QMTC2/LQC2/SQC2/CFC2/CTC2).
+    // COP2 / VU0: os mesmos registradores no modo macro (EE) e micro.
+    // vi[0..15] inteiros de 16 bits; vi[16..31] controle (status, MAC,
+    // clip, R, I, Q, TPC, CMSAR0, FBRST, VPU-STAT, CMSAR1).
     Reg128 vf[32];
     std::uint32_t vi[32];
+    Reg128 vacc;
 
     Memory* mem = nullptr;
     Runtime* rt = nullptr;

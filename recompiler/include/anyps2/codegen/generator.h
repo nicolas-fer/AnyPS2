@@ -17,6 +17,10 @@ struct GeneratorOptions {
     std::filesystem::path outputDir;
     std::filesystem::path anyps2Root;     // raiz do repositório AnyPS2 (runtime)
     std::size_t instructionsPerFile = 12000;  // divide o código para compilar em paralelo
+    // Dumps da micro memória (ANYPS2_VU_DUMP) com microcódigo que não está
+    // no ELF (carregado de arquivos do disco, gerado em tempo de execução).
+    std::vector<std::filesystem::path> vuDumps;
+    bool recompileVu = true;  // false: só o interpretador de VU
 };
 
 struct GenerationReport {
@@ -30,11 +34,15 @@ struct GenerationReport {
     // código que nunca executa) — também lançam erro se executadas.
     std::size_t invalidWords = 0;
     std::vector<analysis::Diagnostic> warnings;
+    // Microcódigo de VU recompilado.
+    std::size_t vuBlocks = 0;
+    std::size_t vuPairs = 0;
 };
 
 // Gera um projeto CMake completo:
 //   <out>/CMakeLists.txt, <out>/<nome>.image (segmentos do ELF),
-//   <out>/src/functions_NNN.cpp, <out>/src/program.cpp, <out>/src/functions.h
+//   <out>/src/functions_NNN.cpp, <out>/src/program.cpp, <out>/src/functions.h,
+//   <out>/src/vu_NNN.cpp e <out>/src/vu_programs.cpp (microcódigo dos VUs)
 GenerationReport generateProject(const elf::ElfFile& elf, const analysis::ProgramModel& model,
                                  const GeneratorOptions& options);
 

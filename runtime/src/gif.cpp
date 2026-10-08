@@ -142,6 +142,16 @@ void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, 
     }
 }
 
+void Gif::kick(const std::uint8_t* mem, std::uint32_t size, std::uint32_t addr, std::uint32_t pc) {
+    const Path& p = paths_[0];
+    for (std::uint32_t n = 0; n <= size / 16; ++n) {
+        transfer(1, mem + (addr & (size - 16)), 1, pc);
+        addr += 16;
+        if (!p.active && p.eop) return;
+    }
+    throw GuestError("XGKICK: a memória do VU1 inteira foi enviada sem um GIFtag com EOP", pc);
+}
+
 std::uint32_t Gif::readRegister(std::uint32_t addr, std::uint32_t pc) {
     switch (addr) {
         case 0x10003000: return ctrl_;

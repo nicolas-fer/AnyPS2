@@ -26,10 +26,11 @@ add_library(anyps2_runtime STATIC
     src/gs/gs.cpp
     src/gs/gs_draw.cpp
     src/video.cpp
+    src/vu/vu.cpp
 )
 add_library(anyps2::runtime ALIAS anyps2_runtime)
 target_include_directories(anyps2_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(anyps2_runtime PUBLIC anyps2::common)
+target_link_libraries(anyps2_runtime PUBLIC anyps2::common anyps2::vu)
 target_compile_features(anyps2_runtime PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(anyps2_runtime PUBLIC Threads::Threads)

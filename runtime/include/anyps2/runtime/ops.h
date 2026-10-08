@@ -26,6 +26,7 @@
 #include <type_traits>
 
 #include "anyps2/runtime/context.h"
+#include "anyps2/runtime/ps2float.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/memory.h"
 
@@ -841,7 +842,8 @@ inline void PHMSBH(Context* c, unsigned rd, unsigned rs, unsigned rt) { phmH(c, 
 // ---------------------------------------------------------------------------
 // COP1 (FPU). O PS2 não segue IEEE 754: não há NaN/Inf nem denormais;
 // expoente 255 é um número normal e resultados que estourariam saturam em
-// ±FLT_MAX ("Fmax"), com flags O/U/I/D no FCR31.
+// ±FLT_MAX ("Fmax"), com flags O/U/I/D no FCR31. O arredondamento é em
+// direção a zero (ps2float.h).
 // ---------------------------------------------------------------------------
 
 namespace fcr {
@@ -904,9 +906,9 @@ inline void SWC1(Context* c, unsigned ft, unsigned base, s32 off, u32 pc) {
     c->mem->write<u32>(addr(c, base, off), c->f[ft], pc);
 }
 
-inline void ADD_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, F(c, fs) + F(c, ft)); }
-inline void SUB_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, F(c, fs) - F(c, ft)); }
-inline void MUL_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, F(c, fs) * F(c, ft)); }
+inline void ADD_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2f::add(F(c, fs), F(c, ft))); }
+inline void SUB_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2f::sub(F(c, fs), F(c, ft))); }
+inline void MUL_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2f::mul(F(c, fs), F(c, ft))); }
 inline void DIV_S(Context* c, unsigned fd, unsigned fs, unsigned ft) {
     c->fcr31 &= ~(fcr::I | fcr::D);
     const u32 a = c->f[fs], b = c->f[ft];
@@ -915,7 +917,7 @@ inline void DIV_S(Context* c, unsigned fd, unsigned fs, unsigned ft) {
         c->f[fd] = ((a ^ b) & 0x80000000u) | kPosFmax;
         return;
     }
-    setF(c, fd, F(c, fs) / F(c, ft));
+    setF(c, fd, ps2f::div(F(c, fs), F(c, ft)));
 }
 inline void SQRT_S(Context* c, unsigned fd, unsigned ft) {
     c->fcr31 &= ~(fcr::I | fcr::D);
@@ -925,7 +927,7 @@ inline void SQRT_S(Context* c, unsigned fd, unsigned ft) {
         return;
     }
     if (b & 0x80000000u) c->fcr31 |= fcr::I | fcr::SI;
-    c->f[fd] = hostToPs2(c, std::sqrt(std::fabs(ps2ToHost(b))));
+    c->f[fd] = hostToPs2(c, ps2f::sqrt(std::fabs(ps2ToHost(b))));
 }
 inline void RSQRT_S(Context* c, unsigned fd, unsigned fs, unsigned ft) {
     c->fcr31 &= ~(fcr::I | fcr::D);
@@ -936,18 +938,18 @@ inline void RSQRT_S(Context* c, unsigned fd, unsigned fs, unsigned ft) {
         return;
     }
     if (b & 0x80000000u) c->fcr31 |= fcr::I | fcr::SI;
-    setF(c, fd, ps2ToHost(a) / std::sqrt(std::fabs(ps2ToHost(b))));
+    setF(c, fd, ps2f::div(ps2ToHost(a), ps2f::sqrt(std::fabs(ps2ToHost(b)))));
 }
 inline void ABS_S(Context* c, unsigned fd, unsigned fs) { c->f[fd] = c->f[fs] & 0x7FFFFFFFu; fpuClearOU(c); }
 inline void NEG_S(Context* c, unsigned fd, unsigned fs) { c->f[fd] = c->f[fs] ^ 0x80000000u; fpuClearOU(c); }
 inline void MOV_S(Context* c, unsigned fd, unsigned fs) { c->f[fd] = c->f[fs]; }
-inline void ADDA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, F(c, fs) + F(c, ft)); }
-inline void SUBA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, F(c, fs) - F(c, ft)); }
-inline void MULA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, F(c, fs) * F(c, ft)); }
-inline void MADD_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2ToHost(c->acc) + F(c, fs) * F(c, ft)); }
-inline void MSUB_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2ToHost(c->acc) - F(c, fs) * F(c, ft)); }
-inline void MADDA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2ToHost(c->acc) + F(c, fs) * F(c, ft)); }
-inline void MSUBA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2ToHost(c->acc) - F(c, fs) * F(c, ft)); }
+inline void ADDA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2f::add(F(c, fs), F(c, ft))); }
+inline void SUBA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2f::sub(F(c, fs), F(c, ft))); }
+inline void MULA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2f::mul(F(c, fs), F(c, ft))); }
+inline void MADD_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2f::add(ps2ToHost(c->acc), ps2f::mul(F(c, fs), F(c, ft)))); }
+inline void MSUB_S(Context* c, unsigned fd, unsigned fs, unsigned ft) { setF(c, fd, ps2f::sub(ps2ToHost(c->acc), ps2f::mul(F(c, fs), F(c, ft)))); }
+inline void MADDA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2f::add(ps2ToHost(c->acc), ps2f::mul(F(c, fs), F(c, ft)))); }
+inline void MSUBA_S(Context* c, unsigned fs, unsigned ft) { fpuClearOU(c); c->acc = hostToPs2(c, ps2f::sub(ps2ToHost(c->acc), ps2f::mul(F(c, fs), F(c, ft)))); }
 // MAX/MIN comparam como inteiros em sinal-magnitude (ordem total do PS2).
 inline s64 fpuOrderKey(u32 b) { return (b & 0x80000000u) ? -static_cast<s64>(b & 0x7FFFFFFFu) : static_cast<s64>(b); }
 inline void MAX_S(Context* c, unsigned fd, unsigned fs, unsigned ft) {
@@ -1005,14 +1007,26 @@ inline void EI(Context* c) {
 inline void DI(Context* c) { c->cop0[cop0::Status] &= ~kStatusEIE; }
 
 // ---------------------------------------------------------------------------
-// COP2: movimentação de dados do VU0 (as operações vetoriais são da Fase 5)
+// COP2 / VU0 em modo macro. As instruções vetoriais são executadas pelo
+// mesmo núcleo do microcódigo (vu/vu_core.h), com o pipeline concluído a
+// cada instrução.
 // ---------------------------------------------------------------------------
 
 inline void QMFC2(Context* c, unsigned rt, unsigned fs) { set128(c, rt, c->vf[fs]); }
 inline void QMTC2(Context* c, unsigned rt, unsigned fs) {
     if (fs) c->vf[fs] = c->r[rt];  // vf0 é constante (0,0,0,1)
 }
-inline void CFC2(Context* c, unsigned rt, unsigned id) { set32(c, rt, c->vi[id]); }
+u32 cfc2(Context* c, unsigned id);
+inline void CFC2(Context* c, unsigned rt, unsigned id) { set32(c, rt, cfc2(c, id)); }
+// Macroinstrução vetorial/inteira: (lower, upper) no formato do microcódigo.
+void vu0Macro(Context* c, u32 lowerWord, u32 upperWord, u32 pc);
+// VCALLMS/VCALLMSR: executa um microprograma do VU0 (endereço em bytes).
+void vu0Call(Context* c, u32 addr, u32 pc);
+inline void VCALLMS(Context* c, u32 imm, u32 pc) { vu0Call(c, imm * 8, pc); }
+inline void VCALLMSR(Context* c, u32 pc) { vu0Call(c, (c->vi[27] & 0xFFFF) * 8, pc); }
+// CPCOND2 (BC2F/BC2T): o VU0 nunca está ocupado do ponto de vista do EE
+// (microprogramas rodam até o fim quando chamados).
+inline bool cop2Condition(Context*) { return false; }
 void ctc2(Context* c, unsigned id, u32 value, u32 pc);
 inline void CTC2(Context* c, unsigned rt, unsigned id, u32 pc) { ctc2(c, id, G32(c, rt), pc); }
 inline void LQC2(Context* c, unsigned ft, unsigned base, s32 off, u32 pc) {

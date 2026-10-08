@@ -5,6 +5,7 @@
 #include <set>
 #include <sstream>
 
+#include "anyps2/codegen/vu_generator.h"
 #include "anyps2/common/bytes.h"
 #include "anyps2/common/error.h"
 #include "anyps2/r5900/decoder.h"
@@ -219,6 +220,8 @@ private:
             case Op::BC1T: case Op::BC1TL: return "fpuCondition(c)";
             case Op::BC0F: case Op::BC0FL: return "!cop0Condition(c)";
             case Op::BC0T: case Op::BC0TL: return "cop0Condition(c)";
+            case Op::BC2F: case Op::BC2FL: return "!cop2Condition(c)";
+            case Op::BC2T: case Op::BC2TL: return "cop2Condition(c)";
             default: return "";
         }
     }
@@ -228,8 +231,8 @@ private:
         out_ << "    " << disasmComment(i) << "\n";
         if (i.isBranch()) {
             const std::string cond = condition(i);
-            if (cond.empty()) {  // BC2x: condição do VU0 (Fase 5)
-                out_ << "    " << unsupportedCall(i, "condição do VU0 (BC2x) ainda não emulada — Fase 5") << "\n";
+            if (cond.empty()) {
+                out_ << "    " << unsupportedCall(i, "condição de desvio não tratada pelo gerador") << "\n";
                 return;
             }
             const std::uint32_t t = i.branchTarget();
@@ -302,6 +305,26 @@ private:
         return out;
     }
 
+    // Macroinstrução do VU0: os bits 0–24 têm o mesmo layout do microcódigo;
+    // as instruções "upper" (FMAC) vão para a palavra upper, as "lower"
+    // (inteiros, FDIV, load/store do VU...) para o lower com opcode 0x40.
+    std::string vuMacro(const Instruction& i) {
+        const std::string pc = hex32(i.address);
+        if (i.op == Op::VCALLMS) return "VCALLMS(c, " + hex32((i.raw >> 6) & 0x7FFF) + ", " + pc + ");";
+        if (i.op == Op::VCALLMSR) return "VCALLMSR(c, " + pc + ");";
+        const std::uint32_t f = i.raw & 0x3F;
+        bool lowerType;
+        if (f < 0x3C) {
+            lowerType = f >= 0x30;
+        } else {
+            const std::uint32_t idx = (((i.raw >> 6) & 0x1F) << 2) | (f & 3);
+            lowerType = idx >= 0x30;
+        }
+        const std::uint32_t body = i.raw & 0x01FFFFFFu;
+        if (lowerType) return "vu0Macro(c, " + hex32((0x40u << 25) | body) + ", 0x000002FFu, " + pc + ");";
+        return "vu0Macro(c, 0x8000033Cu, " + hex32(body) + ", " + pc + ");";
+    }
+
     std::string unsupportedCall(const Instruction& i, const std::string& why) {
         const std::string text = r5900::disassemble(i).str(' ');
         report_.unsupported[std::string(i.valid() ? i.info().mnemonic : ".word")]++;
@@ -324,7 +347,7 @@ private:
             return s + ");";
         };
         const bool needsPc = i.has(r5900::Flag::Overflow);
-        if (isVuMacro(info.format)) return unsupportedCall(i, "macroinstrução do VU0 (Fase 5)");
+        if (isVuMacro(info.format)) return vuMacro(i);
         switch (info.format) {
             case Format::FMT_RD_RS_RT:
             case Format::FMT_RDOPT_RS_RT:
@@ -495,11 +518,27 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
     }
     if (curInsns > 0 || files.empty()) flushFile();
 
+    // Microcódigo dos VUs.
+    std::vector<vu::MicroBlob> blobs;
+    if (options.recompileVu) {
+        blobs = findElfMicrocode(elf);
+        for (const auto& dump : options.vuDumps) vu::appendUnique(blobs, findDumpMicrocode(dump));
+    }
+    for (const auto& b : blobs) report.vuPairs += b.words.size() / 2;
+    report.vuBlocks = blobs.size();
+    std::vector<std::string> vuFiles;
+    for (auto& vf : generateVuSources(blobs, "kVuPrograms")) {
+        writeFile(src / vf.name, vf.text);
+        vuFiles.push_back(vf.name);
+    }
+
     // Tabela de funções + main.
     {
         std::ostringstream p;
         p << "// Gerado pelo AnyPS2 — não edite.\n"
              "#include \"anyps2/runtime/runtime.h\"\n#include \"functions.h\"\n\n"
+             "extern const ::anyps2::rt::VuProgramEntry kVuPrograms[];\n"
+             "extern const std::size_t kVuProgramsCount;\n\n"
              "namespace {\n"
              "const ::anyps2::rt::FunctionEntry kFunctions[] = {\n";
         for (const auto& f : model.functions) {
@@ -511,7 +550,8 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
           << "    " << cString(fs::path(elf.name()).filename().string()) << ",\n"
           << "    " << hex32(model.entry) << ",\n"
           << "    kFunctions,\n    sizeof(kFunctions) / sizeof(kFunctions[0]),\n"
-          << "    " << cString(imageName) << ",\n};\n}  // namespace\n\n"
+          << "    " << cString(imageName) << ",\n"
+          << "    kVuPrograms,\n    kVuProgramsCount,\n};\n}  // namespace\n\n"
           << "int main(int argc, char** argv) {\n"
              "    return ::anyps2::rt::runProgram(kProgram, argc, argv);\n}\n";
         writeFile(src / "program.cpp", p.str());
@@ -529,11 +569,24 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
              "include(${ANYPS2_ROOT}/cmake/AnyPS2Runtime.cmake)\n\n"
           << "add_executable(" << name << "\n    src/program.cpp\n";
         for (const auto& f : files) m << "    src/" << f << "\n";
+        for (const auto& f : vuFiles) m << "    src/" << f << "\n";
         m << ")\n"
           << "anyps2_generated_target(" << name << " ${CMAKE_CURRENT_SOURCE_DIR}/" << imageName << ")\n";
+        std::vector<std::string> vuBlocksFiles;
+        for (const auto& f : vuFiles) {
+            if (f != "vu_programs.cpp") vuBlocksFiles.push_back(f);
+        }
+        if (!vuBlocksFiles.empty()) {
+            // Medido: -O1 compila o microcódigo gerado ~2x mais rápido que
+            // -O2/-O3 com o mesmo desempenho (o custo está no núcleo do VU,
+            // não no código de cada par).
+            m << "set_source_files_properties(";
+            for (const auto& f : vuBlocksFiles) m << "\n    src/" << f;
+            m << "\n    PROPERTIES COMPILE_OPTIONS \"$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O1>\")\n";
+        }
         writeFile(options.outputDir / "CMakeLists.txt", m.str());
     }
-    report.sourceFiles = files.size() + 1;
+    report.sourceFiles = files.size() + vuFiles.size() + 1;
     return report;
 }
 

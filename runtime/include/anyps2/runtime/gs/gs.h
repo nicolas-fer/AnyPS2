@@ -74,6 +74,12 @@ public:
     void vblankEnd();
     // Linha HSYNC (o HSINT é calculado sob demanda a partir do relógio).
     void setHsyncSource(std::uint64_t (*now)(void*), void* ctx, std::uint64_t cyclesPerLine);
+    // Eventos de desenho atrasados (FINISH): o GS processa os dados na hora,
+    // mas o evento só aparece depois do tempo estimado de trabalho do GS
+    // (transferência pelo GIF + preenchimento de pixels). Sem relógio
+    // (testes do GS isolado) o evento é imediato.
+    std::uint64_t nextEventTime() const;  // ciclo do EE, ~0 se nenhum
+    void processEvents(std::uint64_t now);
 
     // Compõe a imagem exibida (circuitos de leitura 1 e 2, PMODE, BGCOLOR).
     Frame display() const;
@@ -90,6 +96,7 @@ private:
     };
 
     void raiseEvent(unsigned bit);
+    void addWork(std::uint64_t cycles);
     void vertexKick(bool draw, std::uint32_t pc);
     void draw(std::uint32_t pc);
     void writeTex0(unsigned ctx, std::uint64_t value, std::uint32_t pc);
@@ -143,6 +150,13 @@ private:
     void* hsyncCtx_ = nullptr;
     std::uint64_t cyclesPerLine_ = 0;
     std::uint64_t hsyncClearedAt_ = 0;
+
+    // Modelo de tempo do GS (em ciclos do EE)
+    std::uint64_t work_ = 0;        // trabalho acumulado desde o último evento
+    std::uint64_t pixels_ = 0;      // pixels desenhados desde o último evento
+    std::uint64_t busyUntil_ = 0;   // fim do trabalho já agendado
+    std::uint64_t workStart_ = 0;   // chegada do primeiro dado do lote atual
+    std::vector<std::uint64_t> finishDue_;  // FINISH pendentes (ordem crescente)
 
     std::uint64_t drawCount_ = 0;
     std::set<std::string> warned_;

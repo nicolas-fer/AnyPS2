@@ -14,15 +14,21 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
                          memória, GS, VU, IOP, SPU2, pad, CDVD...)
 ```
 
-> **Status: Fases 1 a 4 concluídas.** Homebrews do ps2dev — de console
-> (printf, threads, timers, arquivos) e gráficos 2D/3D (libgraph/libdraw e
-> gsKit) — são recompilados e rodam nativos, com o Graphics Synthesizer
-> emulado em software e janela SDL2. Ainda não há VU (microprogramas), som,
-> controle nem jogos. Veja o [PLANO.md](PLANO.md) para o roteiro completo.
+> **Status: Fases 1 a 5 concluídas.** Homebrews do ps2dev — de console
+> (printf, threads, timers, arquivos), gráficos 2D/3D (libgraph/libdraw e
+> gsKit) e com os Vector Units (libmath3d no VU0, microprogramas do VU1) —
+> são recompilados e rodam nativos, com o Graphics Synthesizer emulado em
+> software e janela SDL2. O microcódigo dos VUs também é recompilado
+> estaticamente. Ainda não há som, controle nem jogos. Veja o
+> [PLANO.md](PLANO.md) para o roteiro completo.
 
 | `gfx2d` (libgraph + libdraw) | `cube3d` (Z-buffer, textura em perspectiva) | `gskit` |
 |---|---|---|
 | ![gfx2d](tests/homebrew/gfx2d/expected.png) | ![cube3d](tests/homebrew/cube3d/expected.png) | ![gskit](tests/homebrew/gskit/expected.png) |
+
+| `vu1draw` (microprograma do VU1 + XGKICK) | sample `draw/teapot` do ps2sdk | sample `vu1/` do ps2sdk |
+|---|---|---|
+| ![vu1draw](tests/homebrew/vu1draw/expected.png) | ![teapot](tests/homebrew/sdk_teapot/expected.png) | ![vu1](tests/homebrew/sdk_vu1/expected.png) |
 
 Essas imagens são a saída real dos homebrews recompilados (e as
 referências que os testes comparam byte a byte).
@@ -54,15 +60,44 @@ ANYPS2_VIDEO=none ANYPS2_SCREENSHOT=cubo.png /tmp/cube3d/build/cube3d
 
 ## O que funciona hoje
 
+### Fase 5 — Vector Units (VU0/VU1)
+
+- **Núcleo do VU** com a aritmética do PS2 (sem NaN/Inf, saturação, flags e
+  **truncamento** exato — o mesmo código agora serve a FPU do EE) e modelo de
+  pipeline: stalls de VF, flags MAC/status/clip com 4 ciclos de atraso, Q e
+  P (FDIV/EFU) com as latências do hardware, WAITQ/WAITP, upper e lower em
+  paralelo, LOI, bit E e delay slots.
+- **VU0 em modo macro**: cada instrução COP2 do EE (`vadd`, `vmula`, `vdiv`,
+  `vclip`, `viadd`, `vlqi`...) é recompilada como chamada ao núcleo;
+  `CFC2/CTC2`, `VCALLMS/VCALLMSR` (VU0 em modo micro).
+- **VU1**: `MSCAL/MSCNT` pelo VIF1 com double buffering, `XTOP/XITOP`,
+  `XGKICK` (PATH1 para o GIF).
+- **Microcódigo recompilado em C++**: `anyps2 recomp` acha o microcódigo no
+  ELF (pacotes VIF `MPG` e blocos montados em tempo de execução) e gera C++
+  com cada par especializado pelas suas operações. O runtime casa a micro
+  memória com os blocos pelo conteúdo (não importa onde o programa foi
+  carregado) e confere cada par antes de executar; o que não bate vai para o
+  interpretador. Microcódigo que só aparece em tempo de execução pode ser
+  gravado com `ANYPS2_VU_DUMP=dir` e incluído com `--vu-dumps dir`.
+  **Ganho medido: ~1,1x** sobre o interpretador — o custo está na semântica
+  (truncamento, flags, pipeline), não na decodificação; detalhes e o caminho
+  para ganho real no [PLANO.md](PLANO.md#fase-5--vu0vu1-e-recompilação-de-microcódigo-).
+- O evento FINISH do GS agora respeita o tempo de trabalho do GS (o sample
+  `draw/teapot` do ps2sdk travava com ele instantâneo).
+
+Variáveis de ambiente: `ANYPS2_VU=interp` (só interpretador),
+`ANYPS2_VU=compiled` (erro se algum par não estiver recompilado),
+`ANYPS2_VU_DUMP=dir`, `ANYPS2_FRAMES=N` (encerra no N-ésimo VBlank).
+
 ### Fase 4 — gráficos
 
 - **DMAC**: canais VIF0/VIF1/GIF/SPR em modo normal e chain (todos os tags,
   `call/ret` com pilha, IRQ, TTE), D_STAT/D_PCR/D_ENABLE, interrupções por
   canal entregues aos handlers do programa, `BC0T/BC0F` ligados ao DMAC.
 - **GIF**: PATH2/PATH3 (DMA e FIFO), GIFtag PACKED/REGLIST/IMAGE, A+D.
-- **VIF0/VIF1**: todos os VIFcodes exceto execução de microprograma
-  (`MSCAL`/`MSCNT`, Fase 5): `UNPACK` em todos os formatos com máscara,
-  modos e escrita com salto, `MPG`, `DIRECT/DIRECTHL`, `STROW/STCOL`...
+- **VIF0/VIF1**: `UNPACK` em todos os formatos com máscara, modos e escrita
+  com salto, `MPG`, `MSCAL/MSCALF/MSCNT` (Fase 5), `DIRECT/DIRECTHL`,
+  `STROW/STCOL`...
 - **Graphics Synthesizer em software**: VRAM de 4 MB com o swizzle real de
   todos os formatos, todas as primitivas, Gouraud, texturas (32/24/16 bits,
   8/4 bits com CLUT, TEXA, wrap/clamp/região, bilinear, mipmaps, perspectiva),
@@ -179,7 +214,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 Opções: `-DANYPS2_WARNINGS_AS_ERRORS=ON` (usado no CI),
 `-DANYPS2_BUILD_TESTS=OFF`, `-DANYPS2_E2E_TESTS=OFF` (pula os testes de ponta
-a ponta, que recompilam e compilam 8 homebrews, ~1 min com `ctest -j8`).
+a ponta, que recompilam e compilam 16 homebrews, alguns minutos com
+`ctest -j8`).
 
 ### Testes
 
@@ -190,9 +226,13 @@ a ponta, que recompilam e compilam 8 homebrews, ~1 min com `ctest -j8`).
 | `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
 | `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
 | `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes |
-| `gs` | 21 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR) |
+| `gs` | 22 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR) |
 | `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio`, `e2e_timers`, `e2e_timers_real` | homebrews do ps2dev recompilados, compilados e executados; saída comparada (relógio virtual, e `timers` também no real) |
 | `e2e_gfx2d`, `e2e_cube3d`, `e2e_gskit` | homebrews gráficos; saída de texto **e imagem final** (PNG) comparadas byte a byte com `expected.png` |
+| `vu_isa` | decodificador/disassembler do microcódigo contra 12 mil pares do `dvp-objdump` |
+| `vu` | 12 casos do núcleo do VU com valores calculados à mão (truncamento, flags, latências, stalls, Q/P, upper/lower em paralelo, bit E, desvios, EFU, XGKICK, MSCAL com double buffering) |
+| `vu_diff` | **diferencial** interpretador × microcódigo recompilado: 16 microprogramas aleatórios × 48 estados; também realocado para outra base e com um par alterado na micro memória |
+| `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
 
 O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
 (inteiros de 32/64 bits, jump tables, ponteiros de função, recursão,
@@ -211,6 +251,8 @@ anyps2 symbols  jogo.elf --functions     # lista funções
 anyps2 disasm   jogo.elf --symbol main   # desmonta uma função
 anyps2 disasm   jogo.elf --range 0x100000 0x100100 --mark-noncanonical
 anyps2 disasm-bin dump.bin --base 0x00100000
+anyps2 vu       jogo.elf --disasm        # microcódigo de VU encontrado no ELF
+anyps2 vu       vu1_0123abcd.bin         # ... ou num dump (ANYPS2_VU_DUMP)
 ```
 
 Exemplo (fixture `tests/fixtures/hello_r5900.elf`):
@@ -228,19 +270,22 @@ Exemplo (fixture `tests/fixtures/hello_r5900.elf`):
   10005c:	4be108a8 	vadd.xyzw	$vf2xyzw,$vf1xyzw,$vf1xyzw
 ```
 
-`anyps2 recomp jogo.elf -o saida/ [--name NOME] [--function 0xENDERECO]`
-gera o projeto e mostra um relatório (funções, instruções, instruções ainda
-não suportadas que lançariam erro se executadas).
+`anyps2 recomp jogo.elf -o saida/ [--name NOME] [--function 0xENDERECO]
+[--vu-dumps DIR] [--no-vu]` gera o projeto e mostra um relatório (funções,
+instruções, microcódigo de VU recompilado, instruções ainda não suportadas
+que lançariam erro se executadas).
 
 ## Estrutura do repositório
 
 ```
 common/       utilitários compartilhados (erros, leitura little-endian)
+vu/           conjunto de instruções dos VUs: decodificador, disassembler e
+              localizador de microcódigo
 recompiler/   biblioteca: ELF, decodificador/disassembler R5900, análise de
               funções (analysis/) e gerador de C++ (codegen/)
 runtime/      biblioteca linkada pelo código gerado: contexto, memória,
               semântica das instruções (ops.h), kernel do EE, hardware, IOP/SIF,
-              DMAC, GIF, VIF, GS em software (gs/) e vídeo (SDL2)
+              DMAC, GIF, VIF, VUs (vu/), GS em software (gs/) e vídeo (SDL2)
 cmake/        AnyPS2Runtime.cmake (incluído pelos projetos gerados)
 tools/        CLI anyps2
 tests/        framework mínimo, testes unitários, golden do objdump, fixtures,
@@ -259,19 +304,21 @@ tests/fixtures/build_fixtures.sh                        # fixture ELF + listagem
 python3 tests/scripts/objdump_oracle.py check --tests build/tests/anyps2_tests
 ```
 
+O golden do microcódigo dos VUs usa o `dvp-objdump` do ps2dev (Docker):
+`python3 tests/scripts/vu_oracle.py golden` (→ `tests/data/vu_golden.txt`).
+
 ## O que falta
 
-- Fase 5: VU0/VU1 (macroinstruções do VU0 e microprogramas via `MSCAL`
-  hoje lançam erro; por isso a `libmath3d` e as amostras com VU1 ainda não
-  rodam).
 - Fase 6: módulos do IOP (pad, memory card, CDVD, SPU2/áudio, carregar IRX).
 - Fase 7: jogos comerciais.
 
-Limitações atuais (detalhes no [PLANO.md](PLANO.md)): a FPU usa o
-arredondamento do host (o PS2 trunca), não há suporte a código carregado em
-tempo de execução (overlays), o GS em software é mono-thread (~19 Mpixels/s
-com textura bilinear — suficiente para homebrews, não para jogos
-comerciais), DMA termina instantaneamente, e só há vídeo NTSC.
+Limitações atuais (detalhes no [PLANO.md](PLANO.md)): não há suporte a
+código do EE carregado em tempo de execução (overlays), o GS em software é
+mono-thread (~19 Mpixels/s com textura bilinear — suficiente para homebrews,
+não para jogos comerciais; é ele, não o VU, que domina o tempo nos samples
+3D), DMA termina instantaneamente (só o FINISH do GS tem latência), os VUs
+rodam síncronos com o EE, o EFU usa a libm do host (último bit pode
+diferir) e só há vídeo NTSC.
 
 ## Aspectos legais
 

@@ -1,0 +1,1 @@
+-ldraw -lgraph -lmath3d -ldma -lpacket -lm

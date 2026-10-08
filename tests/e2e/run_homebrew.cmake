@@ -8,9 +8,11 @@
 #            EXPECTED (arquivo) ou EXPECTED_COMMAND
 #            (executável cuja saída é o esperado), ARGS (lista), HOST_DIR,
 #            CLOCK (virtual|real; padrão virtual), EXPECTED_FRAME (PNG que a
-#            última imagem exibida deve reproduzir byte a byte).
+#            última imagem exibida deve reproduzir byte a byte), ENV (lista
+#            de VAR=valor para o executável, ex.: ANYPS2_FRAMES=8).
 
 string(REPLACE "|" ";" ARGS "${ARGS}")
+string(REPLACE "|" ";" ENV "${ENV}")
 
 function(run_step)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -68,6 +70,13 @@ if(NOT CLOCK)
 endif()
 set(ENV{ANYPS2_CLOCK} ${CLOCK})
 set(ENV{ANYPS2_VIDEO} none)
+foreach(kv ${ENV})
+    string(FIND "${kv}" "=" eq)
+    string(SUBSTRING "${kv}" 0 ${eq} key)
+    math(EXPR eq "${eq} + 1")
+    string(SUBSTRING "${kv}" ${eq} -1 value)
+    set(ENV{${key}} "${value}")
+endforeach()
 if(EXPECTED_FRAME)
     file(REMOVE ${WORK}/frame.png)
     set(ENV{ANYPS2_SCREENSHOT} ${WORK}/frame.png)

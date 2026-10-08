@@ -1,0 +1,4 @@
+vu1draw: microprograma de 36 instruções
+giftag nloop=36 eop=1
+v0 rgba=(255,64,64,128) xy=(188,305)
+vu1draw: 3 quadros

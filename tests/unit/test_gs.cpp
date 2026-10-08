@@ -11,6 +11,7 @@
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/vif.h"
 #include "minitest.h"
 
@@ -686,8 +687,8 @@ TEST_CASE(gs, vif_unpack_and_direct) {
     }
     run(d);
     CHECK_EQ(g.csr() & 2, 2ull);
-    // MSCAL: erro claro de Fase 5
-    CHECK_THROWS_WITH(run({0x14000010u}), "Fase 5");
+    // MSCAL sem runtime (VIF isolado no teste): erro claro
+    CHECK_THROWS_WITH(run({0x14000010u}), "MSCAL sem runtime");
     vif.reset();
     CHECK_THROWS_WITH(run({0x08000000u}), "VIFcode inválido");
 }
@@ -716,7 +717,13 @@ TEST_CASE(gs, dmac_chain_to_gif) {
     m.write<std::uint32_t>(0x1000A020, 0, 0);           // D2_QWC
     m.write<std::uint32_t>(0x1000A000, 0x105, 0);       // CHCR: DIR, chain, STR
     CHECK_EQ(m.read<std::uint32_t>(0x1000A000, 0) & 0x100, 0u);  // terminou
-    CHECK_EQ(rt.gs().csr() & 2, 2ull);
+    // O FINISH chega depois do trabalho do GS (ver gs.finish_latency); aqui
+    // só interessa que ele chegue.
+    auto drainedCsr = [&] {
+        rt.gs().processEvents(~std::uint64_t{0});
+        return rt.gs().csr();
+    };
+    CHECK_EQ(drainedCsr() & 2, 2ull);
     CHECK_EQ(m.read<std::uint32_t>(0x1000E010, 0) & 4, 4u);  // D_STAT.CIS2
     CHECK_EQ(m.read<std::uint32_t>(0x1000A030, 0), 0x00100120u);
     // Escrever 1 limpa o CIS; escrever 1 nos bits altos inverte o CIM
@@ -727,7 +734,7 @@ TEST_CASE(gs, dmac_chain_to_gif) {
     m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);
     m.write<std::uint32_t>(0x1000A020, 2, 0);
     m.write<std::uint32_t>(0x1000A000, 0x101, 0);
-    CHECK_EQ(rt.gs().csr() & 2, 2ull);
+    CHECK_EQ(drainedCsr() & 2, 2ull);
     CHECK_EQ(m.read<std::uint32_t>(0x1000A010, 0), 0x00200020u);
     // GIF_FIFO por escrita de 128 bits
     rt.gs().writePrivileged(0x12001000, 2, 0);
@@ -736,11 +743,57 @@ TEST_CASE(gs, dmac_chain_to_gif) {
     m.write128(0x10006000, q, 0);
     std::memcpy(&q, p.q.data() + 2, 16);
     m.write128(0x10006000, q, 0);
-    CHECK_EQ(rt.gs().csr() & 2, 2ull);
+    CHECK_EQ(drainedCsr() & 2, 2ull);
     // Endereço fora da RAM: erro claro
     m.write<std::uint32_t>(0x1000A010, 0x0F000000, 0);
     m.write<std::uint32_t>(0x1000A020, 1, 0);
     CHECK_THROWS_WITH(m.write<std::uint32_t>(0x1000A000, 0x101, 0x300), "fora da RAM");
+}
+
+// O GS desenha em paralelo com o EE: o FINISH só aparece depois do tempo
+// estimado de trabalho (GIF + pixels). Padrão do ps2sdk que depende disso:
+// envia o DMA, graph_wait_vsync() escreve CSR |= CSR & 8 (o que limparia um
+// FINISH já presente) e draw_wait_finish() espera o FINISH.
+TEST_CASE(gs, finish_latency) {
+    const ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = true;
+    Runtime rt(info, o);
+    Memory& m = rt.memory();
+    Packet p;
+    p.tag(3, true, 0, 1, 0xE);
+    p.ad(PRIM, 6);                                   // sprite
+    p.ad(XYZ2, 0);
+    p.ad(FINISH, 0);
+    m.copyToGuest(0x00200000, p.q.data(), static_cast<std::uint32_t>(p.q.size() * 8), 0);
+    m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);
+    m.write<std::uint32_t>(0x1000A020, 4, 0);
+    m.write<std::uint32_t>(0x1000A000, 0x101, 0);
+    CHECK_EQ(m.read<std::uint32_t>(0x1000A000, 0) & 0x100, 0u);  // o DMA em si terminou
+    CHECK_EQ(rt.timing().readGsCsr() & 2, 0ull);                  // o GS ainda não
+    rt.gs().writePrivileged(0x12001000, rt.gs().csr(), 0);        // CSR |= CSR & 8
+    const std::uint64_t due = rt.gs().nextEventTime();
+    CHECK(due > rt.timing().now());
+    CHECK(due - rt.timing().now() < 1000);  // 3 registradores: poucos ciclos
+    CHECK_EQ(rt.timing().cyclesUntilNextEvent(), due - rt.timing().now());
+    rt.timing().consume(static_cast<std::int64_t>(due - rt.timing().now()));
+    CHECK_EQ(rt.timing().readGsCsr() & 2, 2ull);
+    CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
+    // Trabalho antigo (o GS já terminou) não atrasa um FINISH muito depois.
+    for (int i = 0; i < 1000; ++i) rt.gs().writeRegister(PRIM, 6, 0);
+    rt.timing().consume(1000000);
+    rt.gs().writeRegister(FINISH, 0, 0);
+    CHECK(rt.gs().nextEventTime() - rt.timing().now() <= 4);
+    rt.timing().consume(4);
+    CHECK_EQ(rt.timing().readGsCsr() & 2, 2ull);
+    rt.gs().writePrivileged(0x12001000, 2, 0);
+    // Dois FINISH seguidos: cada um no seu tempo; o reset do GS cancela.
+    m.write<std::uint32_t>(0x1000A020, 4, 0);
+    m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);
+    m.write<std::uint32_t>(0x1000A000, 0x101, 0);
+    rt.gs().writePrivileged(0x12001000, 0x200, 0);  // RESET
+    CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
+    // GS isolado (sem relógio): imediato, ver gs.signal_finish_and_csr.
 }
 
 TEST_CASE(gs, dmac_scratchpad_and_vif_memory_map) {

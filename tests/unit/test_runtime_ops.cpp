@@ -285,6 +285,13 @@ TEST_CASE(runtime_ops, fpu_ps2_semantics) {
     DIV_S(&x.c, 3, 1, 2);
     CHECK_EQ(x.c.f[3], 0x7F7FFFFFu);           // +Fmax, não infinito
     CHECK((x.c.fcr31 & fcr::D) != 0);
+    // Arredondamento em direção a zero: 1/3 = 0x3EAAAAAA (o IEEE daria ...AB)
+    x.c.f[8] = fbits(3.0f);
+    DIV_S(&x.c, 9, 1, 8);
+    CHECK_EQ(x.c.f[9], 0x3EAAAAAAu);
+    x.c.f[10] = fbits(-1.0f);
+    MUL_S(&x.c, 11, 9, 10);                   // sinal não muda o truncamento
+    CHECK_EQ(x.c.f[11], 0xBEAAAAAAu);
     x.c.f[4] = 0x7F7FFFFFu;
     ADD_S(&x.c, 5, 4, 4);                      // overflow satura
     CHECK_EQ(x.c.f[5], 0x7F7FFFFFu);

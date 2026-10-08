@@ -1,0 +1,52 @@
+; Microprograma do VU1: transforma vértices e envia triângulos ao GS.
+;
+; Buffer de entrada (endereço em TOP, double buffering do VIF1):
+;   +0..3  matriz (convenção de vetor-linha: v' = x*M0 + y*M1 + z*M2 + M3)
+;   +4     escala da tela (x, y, z) e número de vértices (w, inteiro)
+;   +5     deslocamento da tela (x, y, z)
+;   +6     GIFtag (PACKED, RGBAQ + XYZ2)
+;   +7..   por vértice: posição (x, y, z, 1) e cor (r, g, b, a em 0..255)
+; Saída logo depois da entrada: GIFtag + (RGBAQ, XYZ2) por vértice.
+        .vu
+        .align 4
+        .global vu1_draw_start
+        .global vu1_draw_end
+vu1_draw_start:
+        nop                             xtop vi02
+        nop                             lq.xyzw vf01, 0(vi02)
+        nop                             lq.xyzw vf02, 1(vi02)
+        nop                             lq.xyzw vf03, 2(vi02)
+        nop                             lq.xyzw vf04, 3(vi02)
+        nop                             lq.xyzw vf05, 4(vi02)
+        nop                             lq.xyzw vf10, 5(vi02)
+        nop                             ilw.w vi03, 4(vi02)
+        nop                             iaddiu vi04, vi02, 7
+        nop                             iadd vi05, vi04, vi03
+        nop                             iadd vi05, vi05, vi03
+        nop                             lq.xyzw vf06, 6(vi02)
+        nop                             iaddiu vi06, vi05, 0
+        nop                             sqi.xyzw vf06, (vi06++)
+loop:
+        nop                             lqi.xyzw vf07, (vi04++)
+        nop                             lqi.xyzw vf08, (vi04++)
+        mulaw.xyzw ACC, vf04, vf00w     nop
+        maddax.xyzw ACC, vf01, vf07x    nop
+        madday.xyzw ACC, vf02, vf07y    nop
+        maddz.xyzw vf09, vf03, vf07z    nop
+        nop                             div Q, vf00w, vf09w
+        nop                             waitq
+        mulq.xyz vf09, vf09, Q          nop
+        mul.xyz vf09, vf09, vf05        nop
+        add.xyz vf09, vf09, vf10        nop
+        ftoi4.xy vf11, vf09             nop
+        ftoi0.z vf11, vf09              nop
+        ftoi0.xyzw vf12, vf08           nop
+        nop                             sqi.xyzw vf12, (vi06++)
+        nop                             sqi.xyz vf11, (vi06++)
+        nop                             iaddi vi03, vi03, -1
+        nop                             ibne vi03, vi00, loop
+        nop                             nop
+        nop                             xgkick vi05
+        nop[E]                          nop
+        nop                             nop
+vu1_draw_end:

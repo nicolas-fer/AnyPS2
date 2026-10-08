@@ -20,6 +20,8 @@ class Gif;
 class Vif;
 struct VuMemory;
 class Video;
+class Vu;
+struct VuProgramEntry;
 namespace gs {
 class Gs;
 }
@@ -41,6 +43,9 @@ struct ProgramInfo {
     const FunctionEntry* functions;  // ordenado por start
     std::size_t functionCount;
     const char* imageFile;       // arquivo com os segmentos (ao lado do executável)
+    // Microprogramas dos VUs recompilados (opcional).
+    const VuProgramEntry* vuPrograms = nullptr;
+    std::size_t vuProgramCount = 0;
 };
 
 // Endereço mágico de retorno ao host: quando o runtime chama código do guest
@@ -53,13 +58,20 @@ struct RuntimeOptions {
     bool traceCalls = false;     // ANYPS2_TRACE contém "call"
     bool traceHardware = false;  // ANYPS2_TRACE contém "hw"
     bool traceIop = false;       // ANYPS2_TRACE contém "iop"
-    bool traceGs = false;        // ANYPS2_TRACE contém "gs" (DMA, GIF, VIF)
+    bool traceGs = false;        // ANYPS2_TRACE contém "gs" (DMA, GIF, VIF, VU)
+    // ANYPS2_VU: "interp" ignora os microprogramas recompilados; "compiled"
+    // exige que todo par executado tenha versão recompilada (testes).
+    std::string vuMode;
+    std::string vuDumpDir;        // ANYPS2_VU_DUMP: grava microprogramas interpretados
     bool virtualClock = false;   // ANYPS2_CLOCK=virtual (determinístico)
     // ANYPS2_VIDEO: "sdl" (janela), "none" (sem janela) ou "" (automático:
     // janela se o runtime foi compilado com SDL e há display).
     std::string video;
     // ANYPS2_SCREENSHOT: grava a última imagem exibida (PNG) ao terminar.
     std::string screenshot;
+    // ANYPS2_FRAMES=N: encerra o programa (código 0) no N-ésimo VBlank. Para
+    // testar programas que desenham em laço infinito.
+    std::uint64_t frames = 0;
     static RuntimeOptions fromEnvironment();
 };
 
@@ -104,6 +116,8 @@ public:
     Vif& vif1() { return *vif1_; }
     Dmac& dmac() { return *dmac_; }
     VuMemory& vu() { return *vu_; }
+    Vu& vu0() { return *vu0_; }
+    Vu& vu1() { return *vu1_; }
     // Início do VBlank: apresenta o quadro e processa eventos da janela.
     void onVblank();
     const RuntimeOptions& options() const { return options_; }
@@ -132,7 +146,15 @@ private:
     std::unique_ptr<Gif> gif_;
     std::unique_ptr<Vif> vif0_, vif1_;
     std::unique_ptr<Dmac> dmac_;
+    struct Vu1Regs {
+        Reg128 vf[32];
+        std::uint32_t vi[32];
+        Reg128 acc;
+    };
+    std::unique_ptr<Vu1Regs> vu1Regs_;
+    std::unique_ptr<Vu> vu0_, vu1_;
     std::unique_ptr<Video> video_;
+    std::uint64_t vblanks_ = 0;
 };
 
 // Ponto de entrada usado pelo main() gerado.
