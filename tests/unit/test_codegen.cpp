@@ -137,6 +137,33 @@ TEST_CASE(codegen, project_files_and_image) {
     fs::remove_all(out);
 }
 
+// ERET (sair de um trecho em modo kernel): salto indireto para EPC/ErrorEPC,
+// sem delay slot; o destino carregado por lui/addiu vira rótulo local.
+TEST_CASE(codegen, eret_is_an_indirect_jump) {
+    using namespace anyps2::elf;
+    testutil::ElfBuilder b;
+    b.entry = 0x00100000;
+    b.addSection({".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 0x00100000,
+                  testutil::ElfBuilder::words({
+                      0x3C090010,  // lui   t1, 0x10
+                      0x25290010,  // addiu t1, t1, 0x10   (0x00100010)
+                      0x40897000,  // mtc0  t1, EPC
+                      0x42000018,  // eret
+                      0x03E00008,  // 0x00100010: jr ra
+                      0x00000000,
+                  })});
+    b.symbols = {{"_start", 0x00100000, 0x18, STT_FUNC, STB_GLOBAL, 1}};
+    b.segments = {{PT_LOAD, ".text", 0x00100000, 0, PF_R | PF_X}};
+    const auto f = elf::ElfFile::loadFromMemory(b.build(), "eret.elf");
+    const auto model = analysis::analyze(f);
+    REQUIRE(model.functions.size() == 1u);
+    codegen::GenerationReport report;
+    const std::string code = codegen::generateFunction(f, model, model.functions[0], report);
+    CHECK(contains(code, "ERET(c)"));
+    CHECK(contains(code, "case " + hexU(0x00100010) + ": goto"));
+    CHECK_EQ(report.unsupported.count("eret"), 0u);
+}
+
 TEST_CASE(codegen, gaps_without_symbols_become_functions) {
     // Código sem símbolos: o ponto de entrada e os alvos de JAL viram funções.
     auto b = testutil::typicalExecutable();

@@ -187,4 +187,8 @@ if(ANYPS2_E2E_TESTS)
     anyps2_e2e(cdvd ENV ANYPS2_ISO=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/cdvd/disc.iso)
     anyps2_e2e(cdvd NAME cdvd_noiso EXPECTED expected_noiso.txt EXPECT_FAIL "nenhuma imagem foi informada")
     anyps2_e2e(audio)
+
+    # Fase 7: o que jogos comerciais fazem no boot (tabela de syscalls do
+    # kernel, ERET, fileio do SDK 3.0, reboot do IOP na ordem da Sony).
+    anyps2_e2e(kpatch)
 endif()

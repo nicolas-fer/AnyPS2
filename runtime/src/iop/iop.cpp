@@ -79,6 +79,30 @@ const char* fioName(std::uint32_t f) {
 constexpr std::uint32_t kIoRdOnly = 1, kIoWrOnly = 2, kIoAppend = 0x100, kIoCreat = 0x200, kIoTrunc = 0x400;
 constexpr std::int32_t kENOENT = 2, kEBADF = 9, kEINVAL = 22, kEROFS = 30;
 
+// Arquivos da ROM do console que programas leem como dados (não são
+// conteúdo de ROM: só identificadores sintéticos). ROMVER = versão 2.30,
+// região A (EUA/NTSC), console de varejo (C), 2008-02-20.
+const std::vector<std::uint8_t>* syntheticRomFile(const std::string& path) {
+    static const std::vector<std::uint8_t> kRomver = [] {
+        std::vector<std::uint8_t> v(16, 0);
+        const char text[] = "0230AC20080220";
+        std::memcpy(v.data(), text, sizeof(text) - 1);
+        return v;
+    }();
+    const auto colon = path.find(':');
+    if (colon == std::string::npos) return nullptr;
+    const std::string device = path.substr(0, colon);
+    if (device != "rom" && device != "rom0") return nullptr;
+    std::string name = path.substr(colon + 1);
+    while (!name.empty() && (name[0] == '/' || name[0] == '\\')) name.erase(0, 1);
+    if (name == "ROMVER") return &kRomver;
+    return nullptr;
+}
+
+bool isRomPath(const std::string& path) {
+    return path.rfind("rom:", 0) == 0 || path.rfind("rom0:", 0) == 0;
+}
+
 // "cdrom0:\\ARQ;1" → true e o caminho no disco.
 bool cdPath(const std::string& name, std::string& rel) {
     const auto colon = name.find(':');
@@ -207,7 +231,7 @@ std::uint32_t Iop::sifGetReg(std::uint32_t reg) const {
         case kRegMainAddr: return mscom_;
         case kRegSubAddr: return smcom_;
         case kRegMsFlag: return msflg_;
-        case kRegSmFlag: return smflg_;
+        case kRegSmFlag: return smflag();
         default: {
             auto it = sysregs_.find(reg);
             return it == sysregs_.end() ? 0 : it->second;
@@ -215,12 +239,24 @@ std::uint32_t Iop::sifGetReg(std::uint32_t reg) const {
     }
 }
 
+// O reboot do IOP (SifIopReset) termina na primeira leitura do SMFLAG depois
+// do reset: logo depois de mandar o reset, o EE limpa SIFINIT/CMDINIT (no
+// console o IOP ainda está reiniciando) e só então espera as flags voltarem.
+// Ligá-las já no reset faria o EE apagá-las e esperar para sempre.
+std::uint32_t Iop::smflag() const {
+    if (rebootPending_) {
+        rebootPending_ = false;
+        smflg_ |= kStatSifInit | kStatCmdInit | kStatBootEnd;
+    }
+    return smflg_;
+}
+
 std::uint32_t Iop::sifReadRegister(std::uint32_t addr) const {
     switch (addr) {
         case 0x1000F200: return mscom_;
         case 0x1000F210: return smcom_;
         case 0x1000F220: return msflg_;
-        case 0x1000F230: return smflg_;
+        case 0x1000F230: return smflag();
         case 0x1000F240: return ctrl_;
         case 0x1000F260: return bd6_;
         default: return 0;
@@ -288,9 +324,10 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             return;
         case kCmdResetCmd:
             // Reboot do IOP (SifIopReset): os módulos carregados pelo programa
-            // somem; o IOP do HLE já volta pronto.
+            // somem; as flags de "pronto" voltam na próxima leitura (smflag()).
             resetModules();
-            smflg_ |= kStatSifInit | kStatCmdInit | kStatBootEnd;
+            smflg_ &= ~(kStatSifInit | kStatCmdInit | kStatBootEnd);
+            rebootPending_ = true;
             return;
         case kCmdRpcBind: {
             const std::uint32_t sid = rd32(p, 32);
@@ -422,12 +459,18 @@ void Iop::sendToEe(std::uint32_t cid, std::vector<std::uint8_t> packet, const st
     if (eeCmdBuffer_ == 0) {
         throw GuestError("IOP tentou enviar comando ao EE antes de SIF_CMD_INIT_CMD", pc);
     }
-    if (extraSize > 0) rt_.memory().copyToGuest(extraDest, extra, extraSize, pc);
     const auto psize = static_cast<std::uint32_t>(packet.size());
     wr32(packet, 0, (psize & 0xFF) | (extraSize << 8));
     wr32(packet, 4, extraSize ? extraDest : 0);
     wr32(packet, 8, cid);
-    pending_.push_back({std::move(packet)});
+    // Os dados vão para o EE junto com o comando (como o DMA do SIF), não
+    // antes: um buffer do EE reaproveitado só é sobrescrito depois que o
+    // comando anterior foi tratado.
+    Pending p;
+    p.packet = std::move(packet);
+    if (extraSize > 0) p.extra.assign(extra, extra + extraSize);
+    p.extraDest = extraDest;
+    pending_.push_back(std::move(p));
 }
 
 void Iop::deliverPending(std::uint32_t pc) {
@@ -437,6 +480,10 @@ void Iop::deliverPending(std::uint32_t pc) {
         while (!pending_.empty() && rt_.kernel().canDeliverDmac(kDmacSif0)) {
             Pending next = std::move(pending_.front());
             pending_.erase(pending_.begin());
+            if (!next.extra.empty()) {
+                rt_.memory().copyToGuest(next.extraDest, next.extra.data(),
+                                         static_cast<std::uint32_t>(next.extra.size()), pc);
+            }
             rt_.memory().copyToGuest(eeCmdBuffer_, next.packet.data(),
                                      static_cast<std::uint32_t>(next.packet.size()), pc);
             rt_.kernel().raiseDmacInterrupt(kDmacSif0, pc);
@@ -512,6 +559,9 @@ void Iop::resetModules() {
     }
     loaded_ = {"cdvdman", "cdvdfsv"};
     missingBinds_.clear();
+    // O fileio recarregado volta ao protocolo inicial até receber a função 255.
+    fioSce_ = false;
+    fioSceNext_ = 0;
     pad_->reset();
     mc_->reset();
     audsrv_->reset();
@@ -535,11 +585,9 @@ void Iop::registerIopHeap() {
                 const std::uint32_t addr = rd32(in, 0);
                 std::string path(reinterpret_cast<const char*>(in.data() + 4),
                                  strnlen(reinterpret_cast<const char*>(in.data() + 4), in.size() - 4));
-                if (path == "rom:ROMVER" || path == "rom0:ROMVER") {
-                    // Identificador de versão sintético (não é conteúdo de ROM):
-                    // versão 2.30, região E, console CEX, data 2008-02-20.
-                    static const char kRomver[16] = "0230AC20080220";  // 2.30, EUA (NTSC), console
-                    std::memcpy(iopPointer(addr, 16, pc), kRomver, 16);
+                if (const auto* rom = syntheticRomFile(path)) {
+                    const auto n = static_cast<std::uint32_t>(rom->size());
+                    std::memcpy(iopPointer(addr, n, pc), rom->data(), n);
                     return result32(0);
                 }
                 throw Unimplemented("SifLoadIopHeap(\"" + path + "\") não suportado no HLE", pc);
@@ -568,190 +616,375 @@ std::filesystem::path Iop::hostPath(const std::string& name, std::uint32_t pc) c
     return std::filesystem::path(base ? base : ".") / rel;
 }
 
-void Iop::registerFileio() {
-    registerServer(0x80000001u, "fileio", [this](std::uint32_t fn, const std::vector<std::uint8_t>& in,
-                                                 std::uint32_t pc) -> std::vector<std::uint8_t> {
-        Memory& m = rt_.memory();
-        if (rt_.options().traceIop) std::fprintf(stderr, "[iop] fileio.%s\n", fioName(fn));
-        switch (fn) {
-            case FIO_OPEN: {
-                const std::uint32_t mode = rd32(in, 0);
-                std::string name(reinterpret_cast<const char*>(in.data() + 4),
-                                 strnlen(reinterpret_cast<const char*>(in.data() + 4), 256));
-                if (name.rfind("tty", 0) == 0) {
-                    const std::int32_t fd = nextFd_++;
-                    files_[fd] = makeFile(stdout, true, name);
-                    return result32(fd);
-                }
-                if (std::string rel; cdPath(name, rel)) {
-                    if ((mode & 3) != kIoRdOnly) return result32(-kEROFS);
-                    const auto e = cdvd_->image("open(\"" + name + "\")", pc).lookup(rel);
-                    if (!e || e->isDir) return result32(-kENOENT);
-                    OpenFile f;
-                    f.path = name;
-                    f.cd = true;
-                    f.cdLsn = e->lsn;
-                    f.cdSize = e->size;
-                    const std::int32_t fd = nextFd_++;
-                    files_[fd] = std::move(f);
-                    return result32(fd);
-                }
-                const std::filesystem::path path = hostPath(name, pc);
-                std::string fmode;
-                const std::uint32_t acc = mode & 3;
-                if (acc == kIoRdOnly) fmode = "rb";
-                else if (mode & kIoAppend) fmode = acc == kIoWrOnly ? "ab" : "a+b";
-                else if (mode & (kIoTrunc | kIoCreat)) fmode = acc == kIoWrOnly ? "wb" : "w+b";
-                else fmode = "r+b";
-                std::FILE* fp = std::fopen(path.string().c_str(), fmode.c_str());
-                if (!fp) return result32(-kENOENT);
-                const std::int32_t fd = nextFd_++;
-                files_[fd] = makeFile(fp, false, path.string());
-                return result32(fd);
+// ---- Operações do fileio, comuns aos dois protocolos -----------------------
+
+std::int32_t Iop::fioOpen(const std::string& name, std::uint32_t flags, std::uint32_t pc) {
+    if (name.rfind("tty", 0) == 0) {
+        const std::int32_t fd = nextFd_++;
+        files_[fd] = makeFile(stdout, true, name);
+        return fd;
+    }
+    if (isRomPath(name)) {
+        const auto* rom = syntheticRomFile(name);
+        if (!rom) {
+            throw Unimplemented("open(\"" + name + "\"): arquivo da ROM do console que o HLE não fornece", pc);
+        }
+        if ((flags & 3) != kIoRdOnly) return -kEROFS;
+        OpenFile f;
+        f.path = name;
+        f.rom = rom;
+        f.cdSize = static_cast<std::uint32_t>(rom->size());
+        const std::int32_t fd = nextFd_++;
+        files_[fd] = std::move(f);
+        return fd;
+    }
+    if (std::string rel; cdPath(name, rel)) {
+        if ((flags & 3) != kIoRdOnly) return -kEROFS;
+        const auto e = cdvd_->image("open(\"" + name + "\")", pc).lookup(rel);
+        if (!e || e->isDir) return -kENOENT;
+        OpenFile f;
+        f.path = name;
+        f.cd = true;
+        f.cdLsn = e->lsn;
+        f.cdSize = e->size;
+        const std::int32_t fd = nextFd_++;
+        files_[fd] = std::move(f);
+        return fd;
+    }
+    const std::filesystem::path path = hostPath(name, pc);
+    std::string fmode;
+    const std::uint32_t acc = flags & 3;
+    if (acc == kIoRdOnly) fmode = "rb";
+    else if (flags & kIoAppend) fmode = acc == kIoWrOnly ? "ab" : "a+b";
+    else if (flags & (kIoTrunc | kIoCreat)) fmode = acc == kIoWrOnly ? "wb" : "w+b";
+    else fmode = "r+b";
+    std::FILE* fp = std::fopen(path.string().c_str(), fmode.c_str());
+    if (!fp) return -kENOENT;
+    const std::int32_t fd = nextFd_++;
+    files_[fd] = makeFile(fp, false, path.string());
+    return fd;
+}
+
+std::int32_t Iop::fioClose(std::int32_t fd) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || it->second.isDir) return -kEBADF;
+    if (it->second.fp && !it->second.console) std::fclose(it->second.fp);
+    files_.erase(it);
+    return 0;
+}
+
+std::int32_t Iop::fioWrite(std::int32_t fd, const std::uint8_t* head, std::uint32_t headSize, std::uint32_t ptr,
+                           std::uint32_t size, std::uint32_t pc) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || it->second.isDir) return -kEBADF;
+    if (it->second.cd || it->second.rom) return -kEROFS;
+    std::vector<std::uint8_t> buf(size);
+    const std::uint32_t h = std::min(headSize, size);
+    if (h) std::memcpy(buf.data(), head, h);
+    if (size > h) rt_.memory().copyFromGuest(buf.data() + h, ptr + h, size - h, pc);
+    const std::size_t written = std::fwrite(buf.data(), 1, size, it->second.fp);
+    if (it->second.console) std::fflush(it->second.fp);
+    return static_cast<std::int32_t>(written);
+}
+
+std::int32_t Iop::fioRead(std::int32_t fd, std::uint32_t ptr, std::uint32_t size, std::uint32_t pc) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || it->second.isDir) return -kEBADF;
+    std::vector<std::uint8_t> buf(size);
+    std::size_t got = 0;
+    if (OpenFile& f = it->second; f.rom) {
+        got = std::min(size, f.cdSize - std::min(f.cdPos, f.cdSize));
+        if (got) std::memcpy(buf.data(), f.rom->data() + f.cdPos, got);
+        f.cdPos += static_cast<std::uint32_t>(got);
+    } else if (f.cd) {
+        got = std::min(size, f.cdSize - std::min(f.cdPos, f.cdSize));
+        if (got && !cdvd_->image("read", pc).readBytes(f.cdLsn, f.cdPos, static_cast<std::uint32_t>(got), buf.data())) {
+            throw GuestError("leitura de " + f.path + " passa do fim da imagem de disco", pc);
+        }
+        f.cdPos += static_cast<std::uint32_t>(got);
+    } else {
+        got = std::fread(buf.data(), 1, size, f.fp);
+    }
+    if (got) rt_.memory().copyToGuest(ptr, buf.data(), static_cast<std::uint32_t>(got), pc);
+    return static_cast<std::int32_t>(got);
+}
+
+std::int32_t Iop::fioLseek(std::int32_t fd, std::int32_t offset, std::uint32_t whence) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || it->second.console || it->second.isDir) return -kEBADF;
+    if (whence > 2) return -kEINVAL;
+    if (OpenFile& f = it->second; f.cd || f.rom) {
+        const std::int64_t base = whence == 0 ? 0 : whence == 1 ? f.cdPos : f.cdSize;
+        const std::int64_t pos = base + offset;
+        if (pos < 0) return -kEINVAL;
+        f.cdPos = static_cast<std::uint32_t>(std::min<std::int64_t>(pos, 0xFFFFFFFF));
+        return static_cast<std::int32_t>(f.cdPos);
+    }
+    if (std::fseek(it->second.fp, offset, static_cast<int>(whence)) != 0) return -kEINVAL;
+    return static_cast<std::int32_t>(std::ftell(it->second.fp));
+}
+
+std::int32_t Iop::fioGetstat(const std::string& name, std::vector<std::uint8_t>& stat, std::uint32_t pc) {
+    if (isRomPath(name)) {
+        const auto* rom = syntheticRomFile(name);
+        if (!rom) {
+            throw Unimplemented("getstat(\"" + name + "\"): arquivo da ROM do console que o HLE não fornece", pc);
+        }
+        stat.assign(40, 0);
+        writeLE32(stat, 0, 0x0010u | 0x0004u);  // FIO_SO_IFREG, só leitura
+        writeLE32(stat, 8, static_cast<std::uint32_t>(rom->size()));
+        return 0;
+    }
+    if (std::string rel; cdPath(name, rel)) {
+        const auto e = cdvd_->image("getstat(\"" + name + "\")", pc).lookup(rel);
+        if (!e) return -kENOENT;
+        stat = cdStat(*e);
+        return 0;
+    }
+    bool ok = false;
+    stat = ioStat(hostPath(name, pc), ok);
+    return ok ? 0 : -kENOENT;
+}
+
+std::int32_t Iop::fioRemove(const std::string& name, std::uint32_t pc) {
+    std::error_code ec;
+    return std::filesystem::remove(hostPath(name, pc), ec) ? 0 : -kENOENT;
+}
+
+std::int32_t Iop::fioMkdir(const std::string& name, std::uint32_t pc) {
+    std::error_code ec;
+    std::filesystem::create_directory(hostPath(name, pc), ec);
+    return ec ? -kENOENT : 0;
+}
+
+std::int32_t Iop::fioDopen(const std::string& name, std::uint32_t pc) {
+    if (std::string rel; cdPath(name, rel)) {
+        IsoImage& iso = cdvd_->image("dopen(\"" + name + "\")", pc);
+        const auto e = iso.lookup(rel);
+        if (!e || !e->isDir) return -kENOENT;
+        OpenFile f;
+        f.path = rel;
+        f.isDir = true;
+        f.cd = true;
+        for (const auto& c : iso.list(*e)) f.entries.push_back(c.name);
+        const std::int32_t fd = nextFd_++;
+        files_[fd] = std::move(f);
+        return fd;
+    }
+    const auto path = hostPath(name, pc);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(path, ec)) return -kENOENT;
+    OpenFile f;
+    f.path = path.string();
+    f.isDir = true;
+    for (const auto& e : std::filesystem::directory_iterator(path, ec)) {
+        f.entries.push_back(e.path().filename().string());
+    }
+    const std::int32_t fd = nextFd_++;
+    files_[fd] = std::move(f);
+    return fd;
+}
+
+std::int32_t Iop::fioDclose(std::int32_t fd) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || !it->second.isDir) return -kEBADF;
+    files_.erase(it);
+    return 0;
+}
+
+std::int32_t Iop::fioDread(std::int32_t fd, std::string& name, std::vector<std::uint8_t>& stat, std::uint32_t pc) {
+    auto it = files_.find(fd);
+    if (it == files_.end() || !it->second.isDir) return -kEBADF;
+    OpenFile& d = it->second;
+    if (d.nextEntry >= d.entries.size()) return 0;
+    name = d.entries[d.nextEntry++];
+    if (d.cd) {
+        const auto e = cdvd_->image("dread", pc).lookup(d.path + "\\" + name);
+        stat = e ? cdStat(*e) : std::vector<std::uint8_t>(40, 0);
+    } else {
+        bool ok = false;
+        stat = ioStat(std::filesystem::path(d.path) / name, ok);
+    }
+    return 1;
+}
+
+// ---- Protocolo do ps2sdk (fileio-common.h) ---------------------------------
+
+std::vector<std::uint8_t> Iop::fileioSdk(std::uint32_t fn, const std::vector<std::uint8_t>& in, std::uint32_t pc) {
+    Memory& m = rt_.memory();
+    const auto fd = static_cast<std::int32_t>(rd32(in, 0));
+    switch (fn) {
+        case FIO_OPEN:  // {int mode; char name[256]}
+            return result32(fioOpen(cstr(in, 4, 256), rd32(in, 0), pc));
+        case FIO_CLOSE: return result32(fioClose(fd));
+        case FIO_WRITE: {  // {fd, ptr, size, mis, aligned[16]}
+            const std::uint32_t mis = std::min<std::uint32_t>(rd32(in, 12), 16);
+            const std::uint8_t* head = in.size() >= 16 + mis ? in.data() + 16 : nullptr;
+            return result32(fioWrite(fd, head, head ? mis : 0, rd32(in, 4), rd32(in, 8), pc));
+        }
+        case FIO_READ: {  // {fd, ptr, size, _fio_read_data*}
+            const std::int32_t got = fioRead(fd, rd32(in, 4), rd32(in, 8), pc);
+            // _fio_read_intr copia buf1/buf2 para as pontas desalinhadas; já
+            // escrevemos tudo, então os tamanhos são zero.
+            if (const std::uint32_t readData = rd32(in, 12); readData && got >= 0) {
+                const std::uint32_t zero[4] = {0, 0, 0, 0};
+                m.copyToGuest(readData, zero, sizeof(zero), pc);
             }
-            case FIO_CLOSE: {
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end()) return result32(-kEBADF);
-                if (it->second.fp && !it->second.console) std::fclose(it->second.fp);
-                files_.erase(it);
-                return result32(0);
-            }
-            case FIO_WRITE: {
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end() || it->second.isDir) return result32(-kEBADF);
-                if (it->second.cd) return result32(-kEROFS);
-                const std::uint32_t ptr = rd32(in, 4), size = rd32(in, 8), mis = rd32(in, 12);
-                std::vector<std::uint8_t> buf(size);
-                const std::uint32_t head = std::min(mis, size);
-                if (head) std::memcpy(buf.data(), in.data() + 16, head);
-                if (size > head) m.copyFromGuest(buf.data() + head, ptr + head, size - head, pc);
-                const std::size_t written = std::fwrite(buf.data(), 1, size, it->second.fp);
-                if (it->second.console) std::fflush(it->second.fp);
-                return result32(static_cast<std::int32_t>(written));
-            }
-            case FIO_READ: {
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end() || it->second.isDir) return result32(-kEBADF);
-                const std::uint32_t ptr = rd32(in, 4), size = rd32(in, 8), readData = rd32(in, 12);
-                std::vector<std::uint8_t> buf(size);
-                std::size_t got = 0;
-                if (OpenFile& f = it->second; f.cd) {
-                    got = std::min(size, f.cdSize - std::min(f.cdPos, f.cdSize));
-                    if (got && !cdvd_->image("read", pc).readBytes(f.cdLsn, f.cdPos,
-                                                                   static_cast<std::uint32_t>(got), buf.data())) {
-                        throw GuestError("leitura de " + f.path + " passa do fim da imagem de disco", pc);
-                    }
-                    f.cdPos += static_cast<std::uint32_t>(got);
-                } else {
-                    got = std::fread(buf.data(), 1, size, f.fp);
-                }
-                if (got) m.copyToGuest(ptr, buf.data(), static_cast<std::uint32_t>(got), pc);
-                // _fio_read_intr copia buf1/buf2 para as pontas desalinhadas;
-                // já escrevemos tudo, então os tamanhos são zero.
-                if (readData) {
-                    const std::uint32_t zero[4] = {0, 0, 0, 0};
-                    m.copyToGuest(readData, zero, sizeof(zero), pc);
-                }
-                return result32(static_cast<std::int32_t>(got));
-            }
-            case FIO_LSEEK: {
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end() || it->second.console || it->second.isDir) return result32(-kEBADF);
-                const auto off = static_cast<std::int32_t>(rd32(in, 4));
-                const std::uint32_t whence = rd32(in, 8);
-                if (whence > 2) return result32(-kEINVAL);
-                if (OpenFile& f = it->second; f.cd) {
-                    const std::int64_t base = whence == 0 ? 0 : whence == 1 ? f.cdPos : f.cdSize;
-                    const std::int64_t pos = base + off;
-                    if (pos < 0) return result32(-kEINVAL);
-                    f.cdPos = static_cast<std::uint32_t>(std::min<std::int64_t>(pos, 0xFFFFFFFF));
-                    return result32(static_cast<std::int32_t>(f.cdPos));
-                }
-                if (std::fseek(it->second.fp, off, static_cast<int>(whence)) != 0) return result32(-kEINVAL);
-                return result32(static_cast<std::int32_t>(std::ftell(it->second.fp)));
-            }
-            case FIO_GETSTAT: {  // {io_stat_t* buf; char name[256]}
-                const std::uint32_t buf = rd32(in, 0);
-                const std::string name = cstr(in, 4, 256);
-                if (std::string rel; cdPath(name, rel)) {
-                    const auto e = cdvd_->image("getstat(\"" + name + "\")", pc).lookup(rel);
-                    if (!e) return result32(-kENOENT);
-                    const auto st = cdStat(*e);
-                    m.copyToGuest(buf, st.data(), static_cast<std::uint32_t>(st.size()), pc);
-                    return result32(0);
-                }
-                bool ok = false;
-                const auto st = ioStat(hostPath(name, pc), ok);
-                if (!ok) return result32(-kENOENT);
-                m.copyToGuest(buf, st.data(), static_cast<std::uint32_t>(st.size()), pc);
-                return result32(0);
-            }
-            case FIO_REMOVE:
-            case FIO_RMDIR: {
-                std::error_code ec;
-                const bool removed = std::filesystem::remove(hostPath(cstr(in, 0, 256), pc), ec);
-                return result32(removed ? 0 : -kENOENT);
-            }
-            case FIO_MKDIR: {  // union {char name[256]; int result}
-                std::error_code ec;
-                std::filesystem::create_directory(hostPath(cstr(in, 0, 256), pc), ec);
-                return result32(ec ? -kENOENT : 0);
-            }
-            case FIO_DOPEN: {  // union {char name[256]; int result}
-                const std::string name = cstr(in, 0, 256);
-                if (std::string rel; cdPath(name, rel)) {
-                    IsoImage& iso = cdvd_->image("dopen(\"" + name + "\")", pc);
-                    const auto e = iso.lookup(rel);
-                    if (!e || !e->isDir) return result32(-kENOENT);
-                    OpenFile f;
-                    f.path = rel;
-                    f.isDir = true;
-                    f.cd = true;
-                    for (const auto& c : iso.list(*e)) f.entries.push_back(c.name);
-                    const std::int32_t fd = nextFd_++;
-                    files_[fd] = std::move(f);
-                    return result32(fd);
-                }
-                const auto path = hostPath(name, pc);
-                std::error_code ec;
-                if (!std::filesystem::is_directory(path, ec)) return result32(-kENOENT);
-                OpenFile f;
-                f.path = path.string();
-                f.isDir = true;
-                for (const auto& e : std::filesystem::directory_iterator(path, ec)) {
-                    f.entries.push_back(e.path().filename().string());
-                }
-                const std::int32_t fd = nextFd_++;
-                files_[fd] = std::move(f);
-                return result32(fd);
-            }
-            case FIO_DCLOSE: {
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end() || !it->second.isDir) return result32(-kEBADF);
-                files_.erase(it);
-                return result32(0);
-            }
-            case FIO_DREAD: {  // {int fd; io_dirent_t* buf} -> 1 se leu, 0 no fim
-                auto it = files_.find(static_cast<std::int32_t>(rd32(in, 0)));
-                if (it == files_.end() || !it->second.isDir) return result32(-kEBADF);
-                OpenFile& d = it->second;
-                if (d.nextEntry >= d.entries.size()) return result32(0);
-                const std::string& name = d.entries[d.nextEntry++];
-                bool ok = false;
-                std::vector<std::uint8_t> dirent;  // io_stat_t + nome
-                if (d.cd) {
-                    const auto e = cdvd_->image("dread", pc).lookup(d.path + "\\" + name);
-                    dirent = e ? cdStat(*e) : std::vector<std::uint8_t>(40, 0);
-                } else {
-                    dirent = ioStat(std::filesystem::path(d.path) / name, ok);
-                }
+            return result32(got);
+        }
+        case FIO_LSEEK: return result32(fioLseek(fd, static_cast<std::int32_t>(rd32(in, 4)), rd32(in, 8)));
+        case FIO_GETSTAT: {  // {io_stat_t* buf; char name[256]}
+            std::vector<std::uint8_t> st;
+            const std::int32_t r = fioGetstat(cstr(in, 4, 256), st, pc);
+            if (r == 0) m.copyToGuest(rd32(in, 0), st.data(), static_cast<std::uint32_t>(st.size()), pc);
+            return result32(r);
+        }
+        case FIO_REMOVE:
+        case FIO_RMDIR: return result32(fioRemove(cstr(in, 0, 256), pc));
+        case FIO_MKDIR: return result32(fioMkdir(cstr(in, 0, 256), pc));  // union {name; result}
+        case FIO_DOPEN: return result32(fioDopen(cstr(in, 0, 256), pc));
+        case FIO_DCLOSE: return result32(fioDclose(fd));
+        case FIO_DREAD: {  // {int fd; io_dirent_t* buf} -> 1 se leu, 0 no fim
+            std::string name;
+            std::vector<std::uint8_t> dirent;  // io_stat_t + nome
+            const std::int32_t r = fioDread(fd, name, dirent, pc);
+            if (r == 1) {
                 dirent.resize(40 + 256 + 4, 0);
                 std::memcpy(dirent.data() + 40, name.c_str(), std::min<std::size_t>(name.size(), 255));
                 m.copyToGuest(rd32(in, 4), dirent.data(), static_cast<std::uint32_t>(dirent.size()), pc);
-                return result32(1);
             }
+            return result32(r);
+        }
+        default:
+            throw Unimplemented(std::string("fileio.") + fioName(fn) + " ainda não implementado no HLE do IOP", pc);
+    }
+}
+
+// ---- Protocolo do fileio da Sony (SDK 3.0, módulo FILEIO_service 2.x) -------
+//
+// O EE registra dois buffers de conclusão (função 255) e um handler para o
+// comando SIF 0x80000011. Cada pedido começa com {sema, endereço do
+// resultado, tamanho do resultado}; a resposta do RPC só diz "aceito". Ao
+// terminar, o IOP escreve no buffer {sema, função, endereço, tamanho,
+// resultado, extras da função} e manda 0x80000011 com o índice do buffer em
+// `opt`; o handler do EE copia o resultado (e dirent/stat) e faz iSignalSema
+// (ou, com sema < 0 — modo NOWAIT —, só marca o pedido como concluído).
+// No HLE a operação termina na hora e os dados de read vão direto ao destino.
+
+namespace {
+constexpr std::uint32_t kCmdFileioDone = 0x80000011u;
+
+// io_stat_t (bits FIO_SO_* do ioman antigo) → iox_stat_t de 64 bytes (bits
+// FIO_S_* do iomanX: 0x1000 diretório, 0x2000 arquivo, rwx em 0x1FF).
+std::vector<std::uint8_t> ioxStat(std::vector<std::uint8_t> st) {
+    st.resize(64, 0);
+    const std::uint32_t old = readLE32(st, 0);
+    std::uint32_t mode = (old & 0x20) ? 0x1000u : (old & 0x10) ? 0x2000u : 0;
+    if (old & 4) mode |= 0x124;  // r--r--r--
+    if (old & 2) mode |= 0x092;  // -w--w--w-
+    if (old & 1) mode |= 0x049;  // --x--x--x
+    writeLE32(st, 0, mode);
+    return st;
+}
+}  // namespace
+
+std::vector<std::uint8_t> Iop::fileioSce(std::uint32_t fn, const std::vector<std::uint8_t>& in, std::uint32_t pc) {
+    const auto fd = static_cast<std::int32_t>(rd32(in, 12));
+    std::int32_t result = 0;
+    std::vector<std::uint8_t> extra;  // a partir do offset 20 do buffer de conclusão
+    switch (fn) {
+        case FIO_OPEN:  // [12] flags, [16] modo, [20..1043] nome, [1044] slot do EE
+            result = fioOpen(cstr(in, 20, 1024), rd32(in, 12), pc);
+            break;
+        case FIO_CLOSE: result = fioClose(fd); break;
+        case FIO_READ:  // [12] fd, [16] buffer, [20] tamanho
+            result = fioRead(fd, rd32(in, 16), rd32(in, 20), pc);
+            extra.assign(16, 0);  // tamanhos/destinos das pontas desalinhadas: nenhuma
+            break;
+        case FIO_WRITE: {  // [12] fd, [16] buffer, [20] tamanho, [24] cabeça desalinhada, [28..43] bytes dela
+            const std::uint32_t mis = std::min<std::uint32_t>(rd32(in, 24), 16);
+            const std::uint8_t* head = in.size() >= 28 + mis ? in.data() + 28 : nullptr;
+            result = fioWrite(fd, head, head ? mis : 0, rd32(in, 16), rd32(in, 20), pc);
+            break;
+        }
+        case FIO_LSEEK:  // [12] fd, [16] offset, [20] whence
+            result = fioLseek(fd, static_cast<std::int32_t>(rd32(in, 16)), rd32(in, 20));
+            break;
+        case FIO_REMOVE:
+        case FIO_RMDIR: result = fioRemove(cstr(in, 12, 1024), pc); break;  // [12..] nome
+        case FIO_DOPEN: result = fioDopen(cstr(in, 12, 1024), pc); break;
+        case FIO_DCLOSE: result = fioDclose(fd); break;
+        case FIO_DREAD: {  // [12] fd, [16] iox_dirent_t* → extras {destino, iox_dirent_t (324 bytes)}
+            std::string name;
+            std::vector<std::uint8_t> st;
+            result = fioDread(fd, name, st, pc);
+            extra.assign(4 + 324, 0);
+            writeLE32(extra, 0, rd32(in, 16));
+            if (result == 1) {
+                const auto x = ioxStat(st);
+                std::memcpy(extra.data() + 4, x.data(), x.size());
+                std::memcpy(extra.data() + 4 + 64, name.c_str(), std::min<std::size_t>(name.size(), 255));
+            }
+            break;
+        }
+        case FIO_GETSTAT: {  // [12] iox_stat_t*, [16..] nome → extras {destino, iox_stat_t}
+            std::vector<std::uint8_t> st;
+            result = fioGetstat(cstr(in, 16, 1024), st, pc);
+            extra.assign(4 + 64, 0);
+            writeLE32(extra, 0, rd32(in, 12));
+            if (result == 0) {
+                const auto x = ioxStat(st);
+                std::memcpy(extra.data() + 4, x.data(), x.size());
+            }
+            break;
+        }
+        default: {
+            static const char* kNames[] = {"open", "close", "read", "write", "lseek", "ioctl", "remove",
+                                           "mkdir", "rmdir", "dopen", "dclose", "dread", "getstat", "chstat",
+                                           "format", "adddrv", "deldrv", "rename", "chdir", "sync", "mount",
+                                           "umount", "lseek64", "devctl", "symlink", "readlink", "ioctl2"};
+            throw Unimplemented(std::string("fileio (protocolo da Sony, SDK 3.0): função ") + std::to_string(fn) +
+                                    (fn < 27 ? std::string(" (") + kNames[fn] + ")" : std::string()) +
+                                    " ainda não implementada no HLE do IOP",
+                                pc);
+        }
+    }
+    // Buffer de conclusão: {sema, função, destino, 4, resultado, extras}
+    std::vector<std::uint8_t> done(20, 0);
+    wr32(done, 0, rd32(in, 0));
+    wr32(done, 4, fn);
+    wr32(done, 8, rd32(in, 4));
+    wr32(done, 12, std::min<std::uint32_t>(rd32(in, 8), 4));
+    wr32(done, 16, static_cast<std::uint32_t>(result));
+    done.insert(done.end(), extra.begin(), extra.end());
+    const unsigned index = fioSceNext_;
+    fioSceNext_ ^= 1;
+    std::vector<std::uint8_t> packet(16, 0);
+    wr32(packet, 12, index);  // opt: qual dos dois buffers
+    sendToEe(kCmdFileioDone, std::move(packet), done.data(), static_cast<std::uint32_t>(done.size()),
+             fioSceBuffers_[index], pc);
+    return result32(1);  // pedido aceito
+}
+
+void Iop::registerFileio() {
+    registerServer(0x80000001u, "fileio", [this](std::uint32_t fn, const std::vector<std::uint8_t>& in,
+                                                 std::uint32_t pc) -> std::vector<std::uint8_t> {
+        if (rt_.options().traceIop) std::fprintf(stderr, "[iop] fileio.%s (%u)\n", fioName(fn), fn);
+        switch (fn) {
+            case 255: {  // Sony: registra os buffers de conclusão; responde {versão, nº de buffers}
+                fioSce_ = true;
+                fioSceBuffers_[0] = rd32(in, 0);
+                fioSceBuffers_[1] = rd32(in, 4);
+                fioSceNext_ = 0;
+                std::vector<std::uint8_t> out = {'3', '0', '0', '0'};
+                wr32(out, 4, 2);
+                return out;
+            }
+            case 254:  // Sony: tamanho/quantidade de buffers do lado do IOP — nada a fazer no HLE
+            case 253:
+                return result32(0);
             default:
-                throw Unimplemented(std::string("fileio.") + fioName(fn) + " ainda não implementado no HLE do IOP", pc);
+                return fioSce_ ? fileioSce(fn, in, pc) : fileioSdk(fn, in, pc);
         }
     });
 }

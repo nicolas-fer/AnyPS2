@@ -121,7 +121,10 @@ private:
 
     Runtime& rt_;
     std::vector<std::uint8_t> ram_;
-    std::uint32_t mscom_ = 0, smcom_ = 0, msflg_ = 0, smflg_ = 0, ctrl_ = 0, bd6_ = 0;
+    std::uint32_t mscom_ = 0, smcom_ = 0, msflg_ = 0, ctrl_ = 0, bd6_ = 0;
+    mutable std::uint32_t smflg_ = 0;
+    mutable bool rebootPending_ = false;  // SifIopReset recebido, flags ainda não voltaram
+    std::uint32_t smflag() const;
     std::map<std::uint32_t, std::uint32_t> sysregs_;
     std::uint32_t eeCmdBuffer_ = 0;  // onde o EE quer receber os pacotes
     std::map<std::uint32_t, Server> servers_;
@@ -132,6 +135,8 @@ private:
     // Pacotes para o EE aguardando entrega (um por vez no buffer do EE).
     struct Pending {
         std::vector<std::uint8_t> packet;
+        std::vector<std::uint8_t> extra;  // dados copiados para extraDest na entrega
+        std::uint32_t extraDest = 0;
     };
     std::vector<Pending> pending_;
     bool delivering_ = false;
@@ -167,10 +172,34 @@ private:
         // Arquivo do disco (cdrom0:): lido da imagem ISO.
         bool cd = false;
         std::uint32_t cdLsn = 0, cdSize = 0, cdPos = 0;
+        // Arquivo sintético da ROM (rom0:ROMVER): conteúdo em memória; usa
+        // cdSize/cdPos como tamanho e posição.
+        const std::vector<std::uint8_t>* rom = nullptr;
     };
     static OpenFile makeFile(std::FILE* fp, bool console, std::string path);
     std::map<std::int32_t, OpenFile> files_;
     std::int32_t nextFd_ = 3;
+    // Operações comuns aos dois protocolos (resultado < 0 = -errno).
+    std::int32_t fioOpen(const std::string& name, std::uint32_t flags, std::uint32_t pc);
+    std::int32_t fioClose(std::int32_t fd);
+    std::int32_t fioRead(std::int32_t fd, std::uint32_t ptr, std::uint32_t size, std::uint32_t pc);
+    std::int32_t fioWrite(std::int32_t fd, const std::uint8_t* head, std::uint32_t headSize, std::uint32_t ptr,
+                          std::uint32_t size, std::uint32_t pc);
+    std::int32_t fioLseek(std::int32_t fd, std::int32_t offset, std::uint32_t whence);
+    std::int32_t fioGetstat(const std::string& name, std::vector<std::uint8_t>& stat, std::uint32_t pc);
+    std::int32_t fioRemove(const std::string& name, std::uint32_t pc);
+    std::int32_t fioMkdir(const std::string& name, std::uint32_t pc);
+    std::int32_t fioDopen(const std::string& name, std::uint32_t pc);
+    std::int32_t fioDclose(std::int32_t fd);
+    // 1 = leu uma entrada (nome e io_stat_t), 0 = fim, < 0 = erro.
+    std::int32_t fioDread(std::int32_t fd, std::string& name, std::vector<std::uint8_t>& stat, std::uint32_t pc);
+    // Protocolos: ps2sdk (fileio-common.h) e Sony SDK 3.0 (buffers de
+    // conclusão no EE, ativado pela função 255).
+    std::vector<std::uint8_t> fileioSdk(std::uint32_t fn, const std::vector<std::uint8_t>& in, std::uint32_t pc);
+    std::vector<std::uint8_t> fileioSce(std::uint32_t fn, const std::vector<std::uint8_t>& in, std::uint32_t pc);
+    bool fioSce_ = false;
+    std::uint32_t fioSceBuffers_[2] = {0, 0};
+    unsigned fioSceNext_ = 0;
 };
 
 // Helpers de serialização little-endian usados pelos servidores HLE.

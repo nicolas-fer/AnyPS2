@@ -107,15 +107,75 @@ void Kernel::notImplemented(std::int32_t number, std::uint32_t pc, const char* p
                         pc);
 }
 
+std::optional<std::uint32_t> Kernel::syscallStub(std::uint32_t address) {
+    if (address < kSyscallStubBase || (address - kSyscallStubBase) % 8 != 0) return std::nullopt;
+    const std::uint32_t index = (address - kSyscallStubBase) / 8;
+    if (index >= kSyscallCount) return std::nullopt;
+    return index;
+}
+
+void Kernel::initSyscallTable() {
+    Memory& m = rt_.memory();
+    for (std::uint32_t i = 0; i < kSyscallCount; ++i) {
+        m.write<std::uint32_t>(kSyscallTable + i * 4, syscallStubAddress(i), 0);
+    }
+}
+
+std::uint32_t Kernel::syscallEntry(std::uint32_t index, std::uint32_t pc) {
+    if (index >= kSyscallCount) return syscallStubAddress(index);
+    return rt_.memory().read<std::uint32_t>(kSyscallTable + index * 4, pc);
+}
+
 void Kernel::syscall(Context* c, std::uint32_t pc) {
-    const auto number = static_cast<std::int32_t>(c->r[3].uw[0]);
-    const std::uint64_t ret = dispatch(c, number, pc);
+    runSyscall(c, static_cast<std::int32_t>(c->r[3].uw[0]), pc);
+}
+
+void Kernel::callSyscallStub(Context* c, std::uint32_t index, std::uint32_t pc) {
+    runSyscall(c, static_cast<std::int32_t>(index), pc);
+    c->pc = c->r[31].uw[0];
+}
+
+// Vale o que estiver na tabela de syscalls do guest:
+//  - sentinela da própria syscall: semântica HLE;
+//  - sentinela de outra syscall (SetSyscall(n, GetEntryAddress(k))): HLE de k;
+//  - outro endereço (handler instalado pelo programa): se o HLE implementa a
+//    syscall, o HLE continua valendo — os patches de kernel da libkernel da
+//    Sony/ps2sdk substituem syscalls que o HLE já implementa com a semântica
+//    corrigida, e o código deles costuma ser copiado para a RAM do kernel em
+//    tempo de execução (não recompilado). Se o HLE não a implementa, executa
+//    o handler do programa (como o kernel real, que só salta para ele).
+void Kernel::runSyscall(Context* c, std::int32_t number, std::uint32_t pc) {
+    const std::uint32_t index = number < 0 ? 0u - static_cast<std::uint32_t>(number) : static_cast<std::uint32_t>(number);
+    const std::uint32_t entry = syscallEntry(index, pc);
+    const auto stub = syscallStub(entry);
+    std::int32_t effective = number;
+    if (stub && *stub != index) {
+        effective = number < 0 ? -static_cast<std::int32_t>(*stub) : static_cast<std::int32_t>(*stub);
+    }
+    std::optional<std::uint64_t> result = dispatch(c, effective, pc);
+    if (!result) {
+        if (stub) notImplemented(effective, pc, nullptr);
+        if (!rt_.lookup(entry)) {
+            notImplemented(number, pc,
+                           ("o programa a redirecionou (SetSyscall) para " + anyps2::hex(entry) +
+                            ", código que não foi recompilado (copiado em tempo de execução?)")
+                               .c_str());
+        }
+        result = rt_.invokeGuest(entry, {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5),
+                                         arg(c, 6), arg(c, 7)},
+                                 pc);
+    }
+    const std::uint64_t ret = *result;
     if (rt_.options().traceSyscalls) {
         std::fprintf(stderr, "[syscall] t%d %s(0x%x, 0x%x, 0x%x, 0x%x) = 0x%llx  @ %s\n",
                      currentThreadId(), syscallName(number).c_str(), arg(c, 0), arg(c, 1), arg(c, 2),
                      arg(c, 3), static_cast<unsigned long long>(ret), rt_.describe(pc).c_str());
     }
-    c->r[2].ud[0] = ret;
+    // O kernel do EE devolve valores de 32 bits; no registrador de 64 bits eles
+    // ficam com extensão de sinal (0x80001000 → 0xFFFFFFFF80001000), como
+    // qualquer resultado de "lw"/"addu". Sem isso, comparar o retorno com um
+    // endereço de kernel lido da memória falharia.
+    c->r[2].sd[0] = static_cast<std::int32_t>(static_cast<std::uint32_t>(ret));
     // Fim da syscall é um safepoint: avança o relógio, entrega interrupções
     // pendentes e troca de thread se preciso (o v0 já está no contexto).
     rt_.safepoint(c, pc, kSyscallCycles);
@@ -254,7 +314,7 @@ void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle
     if (allowReschedule && reschedulePending_ && interruptDepth_ == 0) reschedule(pc);
 }
 
-std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc) {
+std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc) {
     Memory& m = rt_.memory();
     auto ret32 = [](std::int32_t v) { return static_cast<std::uint64_t>(static_cast<std::int64_t>(v)); };
     auto sarg = [c](unsigned i) { return static_cast<std::int32_t>(arg(c, i)); };
@@ -292,11 +352,11 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
             m.copyToGuest(arg(c, 0), tmp.data(), arg(c, 2), pc);
             return 0;
         }
-        case 0x74:  // SetSyscall(número, endereço): o HLE continua tratando a syscall
-            userSyscalls_[sarg(0)] = arg(c, 1);
+        case 0x74:  // SetSyscall(número, endereço): grava na tabela (ver runSyscall)
+            if (arg(c, 0) < kSyscallCount) m.write<std::uint32_t>(kSyscallTable + arg(c, 0) * 4, arg(c, 1), pc);
             return 0;
-        case 0x5B:  // GetEntryAddress(syscall): não há kernel real para apontar
-            return 0;
+        case 0x5B:  // GetEntryAddress(syscall): a entrada da tabela
+            return syscallEntry(arg(c, 0), pc);
         case 0x75:  // _print(fmt, ...): imprime só a string de formato
             std::fputs(m.readCString(arg(c, 0), 4096, pc).c_str(), stdout);
             return 0;
@@ -578,7 +638,7 @@ std::uint64_t Kernel::dispatch(Context* c, std::int32_t number, std::uint32_t pc
         case 0x06: case 0x07: case 0x7B: case 0x87:
             notImplemented(number, pc, "carregar outro executável não é suportado");
         default:
-            notImplemented(number, pc, nullptr);
+            return std::nullopt;
     }
 }
 

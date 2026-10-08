@@ -1005,6 +1005,22 @@ inline void EI(Context* c) {
     onInterruptsEnabled(c);
 }
 inline void DI(Context* c) { c->cop0[cop0::Status] &= ~kStatusEIE; }
+inline constexpr u32 kStatusEXL = 1u << 1;
+inline constexpr u32 kStatusERL = 1u << 2;
+// ERET (retorno de exceção, sem delay slot): com ERL ligado volta para
+// ErrorEPC e limpa ERL; senão volta para EPC e limpa EXL. Devolve o destino.
+// Jogos usam isso para sair de trechos que rodam em modo kernel (ex.: a
+// libkernel da Sony escreve nos timers do kernel com ERL ligado e faz "eret"
+// com ErrorEPC = ra).
+inline u32 ERET(Context* c) {
+    u32& sr = c->cop0[cop0::Status];
+    if (sr & kStatusERL) {
+        sr &= ~kStatusERL;
+        return c->cop0[cop0::ErrorEPC];
+    }
+    sr &= ~kStatusEXL;
+    return c->cop0[cop0::EPC];
+}
 
 // ---------------------------------------------------------------------------
 // COP2 / VU0 em modo macro. As instruções vetoriais são executadas pelo

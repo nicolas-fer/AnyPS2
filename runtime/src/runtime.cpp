@@ -171,6 +171,10 @@ std::string Runtime::describe(std::uint32_t address) const {
 void Runtime::call(Context* c) {
     const FunctionEntry* f = lookup(c->pc);
     if (!f) {
+        if (const auto stub = Kernel::syscallStub(c->pc)) {
+            kernel_->callSyscallStub(c, *stub, c->pc);
+            return;
+        }
         throw GuestError("salto/chamada para " + anyps2::hex(c->pc) +
                              ", que não pertence a nenhuma função recompilada (ra = " +
                              describe(c->r[31].uw[0]) + ")",
@@ -222,6 +226,7 @@ void Runtime::safepoint(Context* c, std::uint32_t pc, std::int64_t extraCycles) 
 
 int Runtime::run(const std::vector<std::string>& args, const std::string& imagePath) {
     loadImage(imagePath);
+    kernel_->initSyscallTable();
     Context* c = ctx_.get();
     // vf0 = (0, 0, 0, 1.0)
     c->vf[0].uw[3] = 0x3F800000u;

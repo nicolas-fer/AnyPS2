@@ -477,6 +477,52 @@ Limitações (honestas):
 - ✅ ISO 9660: DVDs de camada dupla (DVD-9) — o volume da camada 1 é achado e
   seus arquivos têm LSN absoluto. (O `sceCdLayerSearchFile` do libcdvd, que
   busca na camada 1, ainda não existe no HLE.)
+### Gran Turismo 4 (PAL, SCES-51719) — primeiro alvo
+
+Triagem: DVD-9; o `SCES_517.19` (273 KB) é só o boot — o jogo de verdade é o
+`CORE.GT4` (deflate → 6,1 MB de código cru do EE, carregado em tempo de
+execução); 24 dos 28 IRX do disco sem HLE, inclusive drivers próprios da
+Polyphony (`libpdi`, `pdicdvd`, `pdispu2`, `pdistr`, `rt_ac` embutido).
+
+Marco 1 — o boot recompilado roda até a tela de copyright ✅ (desenhada pelo
+GS em software) e para no primeiro módulo sem HLE (`mtapman`). Para chegar lá:
+- ✅ **Tabela de syscalls visível ao guest** na RAM do kernel (0x80000800, 512
+  entradas com sentinelas): `SetSyscall`/`GetEntryAddress` a usam, a
+  `FindAddress` que a libkernel da Sony instala acha a base dela, e o despacho
+  respeita o que o programa instalou — redirecionamento para outra syscall
+  do HLE, handler do programa para syscalls que o HLE não implementa, e
+  chamada direta a um sentinela. Patches de kernel que substituem syscalls
+  que o HLE já implementa (alarmes, TLB) são absorvidos: o HLE continua.
+- ✅ **ERET** com a semântica real (ERL → ErrorEPC, senão EPC; limpa o bit),
+  gerado como salto indireto: a libkernel escreve nos timers do kernel em
+  modo ERL e volta com `eret`.
+- ✅ Bug corrigido: o retorno das syscalls ia para `v0` estendido com zeros; no
+  EE valores de 32 bits ficam com extensão de sinal (comparar o retorno com
+  um endereço de kernel lido da memória falhava).
+- ✅ **fileio do SDK 3.0** (FILEIO_service 2.x do IOPRP300), engenharia reversa
+  do lado do EE: função 255 registra dois buffers de conclusão; cada pedido
+  leva {sema, endereço/tamanho do resultado}; o IOP preenche o buffer
+  {sema, função, destino, tamanho, resultado, extras (dirent/stat no formato
+  `iox_*`)} e manda o comando SIF 0x80000011, cujo handler do EE copia e faz
+  `iSignalSema`. Implementados open/close/read/write/lseek/remove/rmdir/
+  dopen/dclose/dread/getstat; os demais dão erro com nome e número. As
+  operações são compartilhadas com o protocolo do ps2sdk.
+- ✅ Versão `"3000"` nas funções 255 do fileio e do loadfile (a libsifdev da
+  Sony recusa carregar módulos se não bater).
+- ✅ **Reboot do IOP leva tempo**: as flags SIFINIT/CMDINIT/BOOTEND voltam na
+  primeira leitura do SMFLAG depois do reset (o EE da Sony as limpa logo
+  depois de mandar o reset e esperava para sempre).
+- ✅ `rom0:ROMVER` (sintético) também pelo fileio; dados que o IOP manda junto
+  com um comando SIF agora chegam ao EE na entrega do comando, como o DMA.
+- ✅ Teste `e2e_kpatch` (homebrew novo): tabela de syscalls, redirecionamento,
+  ERET nos dois modos, fileio do SDK 3.0 (cliente escrito a partir do
+  protocolo, sem código da Sony), reboot na ordem da Sony, versões e ROMVER.
+
+Próximos passos do GT4: módulos de periféricos ausentes com HLE de "nenhum
+dispositivo" (multitap, USB, EyeToy, rede, volante, impressora), controles
+pelo `dbcman`/libdbc, carregar e recompilar o `CORE.GT4`, PAL, e o IOP
+executando os drivers próprios da Polyphony.
+
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.
 - ⬜ Lista de compatibilidade (`docs/COMPATIBILIDADE.md`) com status por jogo.

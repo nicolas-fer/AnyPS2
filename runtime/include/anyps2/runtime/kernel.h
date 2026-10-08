@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,11 +40,32 @@ public:
     // encerra a thread (ExitThread implícito).
     static constexpr std::uint32_t kThreadExitAddress = 0xFFFFFFE0u;
 
+    // Tabela de syscalls visível ao guest, na RAM do kernel, como no console:
+    // SetSyscall/GetEntryAddress a alteram e leem, e a libkernel da Sony acha
+    // a base dela procurando na memória do kernel um handler que acabou de
+    // instalar (GetSyscallHandler). Cada entrada começa com um sentinela que
+    // representa o handler HLE daquela syscall; na hora da syscall vale o que
+    // estiver na tabela (ver runSyscall).
+    static constexpr std::uint32_t kSyscallTable = 0x80000800u;
+    static constexpr std::uint32_t kSyscallCount = 512;
+    static constexpr std::uint32_t kSyscallStubBase = 0x80001000u;  // entrada n: base + 8n
+    static constexpr std::uint32_t syscallStubAddress(std::uint32_t index) {
+        return kSyscallStubBase + index * 8u;
+    }
+    // Número da syscall de um sentinela (std::nullopt se não for um).
+    static std::optional<std::uint32_t> syscallStub(std::uint32_t address);
+
     explicit Kernel(Runtime& rt);
     ~Kernel();
 
+    // Preenche a tabela de syscalls na RAM do guest (antes do programa rodar).
+    void initSyscallTable();
+
     void setBootArguments(const std::vector<std::string>& args) { bootArgs_ = args; }
     void syscall(Context* c, std::uint32_t pc);
+    // Salto/chamada direta a um sentinela da tabela (handler obtido com
+    // GetEntryAddress ou lido da tabela): executa a syscall e volta para ra.
+    void callSyscallStub(Context* c, std::uint32_t index, std::uint32_t pc);
 
     // Executa o programa a partir do ponto de entrada na thread principal do
     // EE e espera até Exit (ou erro em qualquer thread). Retorna o código de saída.
@@ -100,7 +122,10 @@ private:
     struct ShutdownSignal {};  // desenrola threads do host no fim do programa
     struct ThreadExitSignal {};  // desenrola a thread corrente até o laço dela
 
-    std::uint64_t dispatch(Context* c, std::int32_t number, std::uint32_t pc);
+    // Semântica HLE da syscall; std::nullopt se o HLE não a implementa.
+    std::optional<std::uint64_t> dispatch(Context* c, std::int32_t number, std::uint32_t pc);
+    void runSyscall(Context* c, std::int32_t number, std::uint32_t pc);
+    std::uint32_t syscallEntry(std::uint32_t index, std::uint32_t pc);
     [[noreturn]] void notImplemented(std::int32_t number, std::uint32_t pc, const char* phase);
 
     std::int32_t setupThread(Context* c, std::uint32_t pc);
@@ -163,7 +188,6 @@ private:
     std::vector<PendingAlarm> pendingAlarms_;
     std::uint32_t osdConfig_ = 0;
     std::uint32_t osdConfig2_[2] = {0, 0};
-    std::map<std::int32_t, std::uint32_t> userSyscalls_;  // SetSyscall
     unsigned interruptDepth_ = 0;
 };
 

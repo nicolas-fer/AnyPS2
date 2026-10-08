@@ -131,6 +131,10 @@ public:
                 continue;
             }
             out_ << "    " << disasmComment(insn) << "\n";
+            if (insn.valid() && insn.op == Op::ERET) {
+                emitEret();
+                continue;
+            }
             out_ << "    " << simple(insn) << "\n";
         }
         // Execução que "cai" do fim da função continua no endereço seguinte.
@@ -284,6 +288,19 @@ private:
         }
     }
 
+    // ERET: salto indireto para EPC/ErrorEPC (sem delay slot). Destino = ra é
+    // um retorno, como "jr ra"; senão rótulo local ou despacho dinâmico.
+    void emitEret() {
+        out_ << "    {\n        const std::uint32_t target = ERET(c);\n";
+        out_ << "        c->pc = target;\n";
+        out_ << "        if (target != c->r[31].uw[0]) {\n";
+        std::ostringstream body;
+        std::swap(out_, body);
+        emitLocalSwitch();
+        std::swap(out_, body);
+        out_ << indent(body.str()) << "        }\n        return;\n    }\n";
+    }
+
     // jr para registrador: se o alvo é um rótulo desta função (jump table),
     // desvia localmente; senão é um tail call.
     void emitLocalSwitch() {
@@ -395,7 +412,6 @@ private:
                     case Op::DI: return "DI(c);";
                     case Op::VNOP: return "/* vnop */";
                     case Op::VWAITQ: return "/* vwaitq: o resultado de Q já está disponível */";
-                    case Op::ERET: return unsupportedCall(i, "ERET só existe no kernel (HLE)");
                     default: return unsupportedCall(i, "operação de TLB do kernel (HLE)");
                 }
             default:

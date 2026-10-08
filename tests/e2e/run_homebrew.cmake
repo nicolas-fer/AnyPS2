@@ -89,8 +89,11 @@ if(EXPECTED_WAV)
     file(REMOVE ${WORK}/audio.wav)
     set(ENV{ANYPS2_AUDIO_WAV} ${WORK}/audio.wav)
 endif()
+# A saída é UTF-8. Sem ENCODING, no Windows o CMake a decodifica pela code
+# page do console, que muda conforme outros processos (o anyps2 liga UTF-8 no
+# console compartilhado): o resultado variava entre execuções paralelas.
 execute_process(COMMAND ${exe} ${ARGS} WORKING_DIRECTORY ${HOST_DIR}
-                RESULT_VARIABLE rc OUTPUT_VARIABLE actual ERROR_VARIABLE err)
+                RESULT_VARIABLE rc OUTPUT_VARIABLE actual ERROR_VARIABLE err ENCODING UTF8)
 if(EXPECT_FAIL)
     if(rc EQUAL 0)
         message(FATAL_ERROR "${NAME} deveria falhar (\"${EXPECT_FAIL}\"), mas terminou com sucesso\n${actual}")
@@ -104,7 +107,7 @@ elseif(NOT rc EQUAL 0)
 endif()
 
 if(EXPECTED_COMMAND)
-    execute_process(COMMAND ${EXPECTED_COMMAND} ${ARGS} RESULT_VARIABLE rc OUTPUT_VARIABLE expected)
+    execute_process(COMMAND ${EXPECTED_COMMAND} ${ARGS} RESULT_VARIABLE rc OUTPUT_VARIABLE expected ENCODING UTF8)
     if(NOT rc EQUAL 0)
         message(FATAL_ERROR "oráculo ${EXPECTED_COMMAND} falhou (${rc})")
     endif()

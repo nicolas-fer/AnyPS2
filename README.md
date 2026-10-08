@@ -19,10 +19,13 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > gsKit), com os Vector Units (libmath3d no VU0, microprogramas do VU1) e
 > agora com controle, memory card, disco (ISO) e som — são recompilados e
 > rodam nativos, com o Graphics Synthesizer e o SPU2 emulados em software e
-> janela/áudio/controles via SDL2. Ainda não roda jogos comerciais: eles
-> costumam trazer drivers próprios para o IOP, que ainda não executa código
-> (ver [O que falta](#o-que-falta)). Veja o [PLANO.md](PLANO.md) para o
-> roteiro completo.
+> janela/áudio/controles via SDL2. **Fase 7 em andamento:** o boot do
+> Gran Turismo 4 (dump do usuário) recompilado já passa pelos patches de
+> kernel da libkernel da Sony, pelo fileio do SDK 3.0 e pelo reboot do IOP e
+> desenha a tela de copyright; para no primeiro módulo do IOP sem HLE. Jogos
+> comerciais ainda não são jogáveis: eles trazem drivers próprios para o
+> IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
+> [PLANO.md](PLANO.md) para o roteiro completo.
 
 | `gfx2d` (libgraph + libdraw) | `cube3d` (Z-buffer, textura em perspectiva) | `gskit` |
 |---|---|---|
@@ -283,6 +286,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
 | `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release) |
 | `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
+| `e2e_kpatch` | o que jogos comerciais fazem no boot: tabela de syscalls do kernel (FindAddress do programa, GetEntryAddress, redirecionamento, chamada por ponteiro), ERET nos dois modos, fileio do SDK 3.0 (cliente escrito a partir do protocolo), reboot do IOP na ordem da Sony, versões e `rom0:ROMVER` |
 | `disc`, `cli_disc` | triagem de discos: o `disc.iso` de teste (BOOT2 sem executável no disco) e um DVD-9 sintético (camada 1, IRX com e sem HLE, imagem IOPRP, executável com IRX embutidos e strings de módulos, overlay na camada 1) |
 | `e2e_pad`, `e2e_pad_rom`, `e2e_memcard`, `e2e_cdvd`, `e2e_cdvd_noiso`, `e2e_audio` | controles por roteiro (dois protocolos, mesma saída), memory card, disco a partir de `disc.iso` (e o erro sem ISO), som via `audsrv.irx` com o **WAV comparado byte a byte** |
 

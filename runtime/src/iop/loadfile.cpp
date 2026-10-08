@@ -145,7 +145,10 @@ void Iop::registerLoadfile() {
                 return out;
             }
             case LF_F_GET_VERSION:
-                wr32(out, 0, 0x0202);
+                // A libsifdev da Sony compara estes 4 bytes com a versão do SDK
+                // ("3000" = SDK 3.0, o do IOPRP300) e recusa carregar módulos
+                // se não baterem; o ps2sdk não usa esta função.
+                out.assign({'3', '0', '0', '0'});
                 return out;
             case LF_F_ELF_LOAD:
             case LF_F_MG_ELF_LOAD:

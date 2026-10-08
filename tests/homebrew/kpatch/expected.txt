@@ -1,0 +1,18 @@
+FindAddress do programa achou a entrada: sim
+tabela[0x7F] == GetEntryAddress(0x7F): sim
+syscall 0x84 -> GetMemorySize: 0x2000000
+GetMemorySize com handler trocado: 0x2000000
+handler de 0x7F chamado por ponteiro: 0x2000000
+T2_COMP escrito em modo kernel: 0x1234
+ERL depois do ERET: 0
+EXL depois do ERET para EPC: 0
+reboot do IOP: ok
+fileio 255: versao 3000, 2 buffers
+open(rom0:ROMVER): ok
+read: 16 bytes, "0230AC20080220"
+lseek(4): 4
+close: 0
+getstat(host:dado.bin): 0, modo 0x2000, tamanho 1234
+getstat(host:nao_existe): -2
+rom0:ROMVER pelo fileio do ps2sdk: 0230AC20080220
+versao do loadfile: 3000
