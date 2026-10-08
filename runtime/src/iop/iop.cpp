@@ -14,6 +14,7 @@
 #include "anyps2/runtime/iop/audsrv.h"
 #include "anyps2/runtime/iop/cdvd.h"
 #include "anyps2/runtime/iop/dbcman.h"
+#include "anyps2/runtime/iop/pdicdvd.h"
 #include "anyps2/runtime/iop/mcserv.h"
 #include "anyps2/runtime/iop/pad.h"
 #include "anyps2/runtime/iop/spu2.h"
@@ -34,6 +35,13 @@ constexpr std::uint32_t kCmdRpcEnd = 0x80000008u;
 constexpr std::uint32_t kCmdRpcBind = 0x80000009u;
 constexpr std::uint32_t kCmdRpcCall = 0x8000000Au;
 constexpr std::uint32_t kCmdRpcRdata = 0x8000000Cu;
+// SIF RPC multi-thread da Sony (msifrpc.irx no IOP, libmrpc no EE): o mesmo
+// layout de pacote do SIF RPC, com outros números; as respostas vêm todas
+// pelo comando 0x80000018 com o comando original em [32].
+constexpr std::uint32_t kCmdMsifEnd = 0x80000018u;
+constexpr std::uint32_t kCmdMsifBind = 0x80000019u;
+constexpr std::uint32_t kCmdMsifCall = 0x8000001Au;
+constexpr std::uint32_t kSregMsifInit = 1;  // handshake do sceSifMInitRpc
 
 // Registradores SIF (ps2sdk/ee/kernel/include/sifdma.h).
 constexpr std::uint32_t kRegMainAddr = 1, kRegSubAddr = 2, kRegMsFlag = 3, kRegSmFlag = 4;
@@ -179,6 +187,7 @@ Iop::OpenFile Iop::makeFile(std::FILE* fp, bool console, std::string path) {
 }
 
 Iop::Iop(Runtime& rt) : rt_(rt), ram_(kRamSize, 0) {
+    if (const char* v = std::getenv("ANYPS2_IOP_ACCEPT_MISSING")) exploring_ = *v && std::string(v) != "0";
     // O IOP do HLE já "bootou": SIF e SIFCMD prontos.
     smcom_ = kIopCmdBuffer;
     smflg_ = kStatSifInit | kStatCmdInit | kStatBootEnd;
@@ -191,6 +200,7 @@ Iop::Iop(Runtime& rt) : rt_(rt), ram_(kRamSize, 0) {
     spu2_ = std::make_unique<Spu2>();
     audsrv_ = std::make_unique<AudSrv>(*this);
     dbc_ = std::make_unique<DbcMan>(*this);
+    pdiCdvd_ = std::make_unique<PdiCdvd>(*this);
     // Módulos residentes desde o boot (IOPBTCONF do console).
     registerFileio();
     registerIopHeap();
@@ -326,6 +336,14 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             return;
         case kCmdSetSreg:
             sysregs_[0x40000000u | rd32(p, 16)] = rd32(p, 20);
+            // sceSifMInitRpc: o EE escreve 1 no SREG 1 do IOP e espera o
+            // msifrpc responder no SREG 1 dele.
+            if (rd32(p, 16) == kSregMsifInit && rd32(p, 20) != 0 && moduleLoaded("msifrpc")) {
+                std::vector<std::uint8_t> reply(24, 0);
+                wr32(reply, 16, kSregMsifInit);
+                wr32(reply, 20, 1);
+                sendToEe(kCmdSetSreg, reply, nullptr, 0, 0, pc);
+            }
             return;
         case kCmdResetCmd:
             // Reboot do IOP (SifIopReset): os módulos carregados pelo programa
@@ -334,7 +352,12 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             smflg_ &= ~(kStatSifInit | kStatCmdInit | kStatBootEnd);
             rebootPending_ = true;
             return;
-        case kCmdRpcBind: {
+        case kCmdRpcBind:
+        case kCmdMsifBind: {
+            if (cid == kCmdMsifBind && !moduleLoaded("msifrpc")) {
+                throw Unimplemented("bind do SIF RPC multi-thread (libmrpc) sem o módulo msifrpc carregado", pc);
+            }
+            const std::uint32_t endCmd = cid == kCmdMsifBind ? kCmdMsifEnd : kCmdRpcEnd;
             const std::uint32_t sid = rd32(p, 32);
             auto it = servers_.find(sid);
             std::vector<std::uint8_t> reply(64, 0);
@@ -342,7 +365,11 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             wr32(reply, 20, rd32(p, 20));  // pkt_addr
             wr32(reply, 24, rd32(p, 24));  // rpc_id
             wr32(reply, 28, rd32(p, 28));  // cd
-            wr32(reply, 32, kCmdRpcBind);  // cid
+            wr32(reply, 32, cid);
+            if (it == servers_.end() && exploring_) {
+                registerExplorationServer(sid);
+                it = servers_.find(sid);
+            }
             if (it == servers_.end()) {
                 // Como no console: server = NULL e o EE tenta de novo. Sem
                 // módulo que registre o servidor, isso nunca termina.
@@ -356,7 +383,7 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
                 if (rt_.options().traceIop) {
                     std::fprintf(stderr, "[iop] bind %08x: servidor inexistente\n", sid);
                 }
-                sendToEe(kCmdRpcEnd, reply, nullptr, 0, 0, pc);
+                sendToEe(endCmd, reply, nullptr, 0, 0, pc);
                 return;
             }
             missingBinds_.erase(sid);
@@ -364,10 +391,12 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             wr32(reply, 40, it->second.buffer);
             wr32(reply, 44, 0);  // cbuf
             if (rt_.options().traceIop) std::fprintf(stderr, "[iop] bind %s\n", it->second.name.c_str());
-            sendToEe(kCmdRpcEnd, reply, nullptr, 0, 0, pc);
+            sendToEe(endCmd, reply, nullptr, 0, 0, pc);
             return;
         }
-        case kCmdRpcCall: {
+        case kCmdRpcCall:
+        case kCmdMsifCall: {
+            const bool msif = cid == kCmdMsifCall;
             const std::uint32_t rpcNumber = rd32(p, 32);
             const std::uint32_t sendSize = rd32(p, 36);
             const std::uint32_t sd = rd32(p, 52);
@@ -387,13 +416,16 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
             Deferred call;
             call.recvBuf = rd32(p, 40);
             call.recvSize = rd32(p, 44);
-            call.rmode = rd32(p, 48);
+            // O cliente do msifrpc só libera o pacote e a trava com a resposta:
+            // ela vai sempre, mesmo sem callback.
+            call.rmode = msif ? 1 : rd32(p, 48);
+            call.endCmd = msif ? kCmdMsifEnd : kCmdRpcEnd;
             call.reply.assign(64, 0);
             wr32(call.reply, 16, rd32(p, 16));
             wr32(call.reply, 20, rd32(p, 20));
             wr32(call.reply, 24, rd32(p, 24));
             wr32(call.reply, 28, rd32(p, 28));
-            wr32(call.reply, 32, kCmdRpcCall);
+            wr32(call.reply, 32, cid);
             if (rt_.options().traceIop) {
                 std::fprintf(stderr, "[iop] %s.%u (%u bytes)\n", server->name.c_str(), rpcNumber, sendSize);
             }
@@ -445,7 +477,7 @@ void Iop::finishCall(const Deferred& d, const std::vector<std::uint8_t>& out, st
         if (pktAddr) rt_.memory().copyToGuest(pktAddr, pkt.data(), static_cast<std::uint32_t>(pkt.size()), pc);
         return;
     }
-    sendToEe(kCmdRpcEnd, d.reply, out.data(), n, d.recvBuf, pc);
+    sendToEe(d.endCmd, d.reply, out.data(), n, d.recvBuf, pc);
 }
 
 std::uint32_t Iop::deferCurrentCall() {
@@ -506,6 +538,43 @@ void Iop::deliverPending(std::uint32_t pc) {
     delivering_ = false;
 }
 
+// Exploração: responde zeros e registra cada chamada (função, começo dos dados
+// e as strings que aparecerem), para levantar o protocolo de um módulo sem HLE.
+void Iop::registerExplorationServer(std::uint32_t sid) {
+    std::string tag;
+    for (int i = 3; i >= 0; --i) {
+        const char ch = static_cast<char>(sid >> (8 * i));
+        tag += (ch >= 0x20 && ch < 0x7F) ? ch : '.';
+    }
+    char name[48];
+    std::snprintf(name, sizeof(name), "exploração %08x \"%s\"", sid, tag.c_str());
+    std::fprintf(stderr, "[aviso] servidor RPC %08x \"%s\" sem HLE: servidor de exploração (responde zeros)\n", sid,
+                 tag.c_str());
+    const std::string label = name;
+    registerServer(sid, label, [label](std::uint32_t fn, const std::vector<std::uint8_t>& in, std::uint32_t)
+                                   -> std::optional<std::vector<std::uint8_t>> {
+        std::string hexs, text;
+        for (std::size_t i = 0; i < std::min<std::size_t>(in.size(), 32); ++i) {
+            char b[4];
+            std::snprintf(b, sizeof(b), "%02x", in[i]);
+            hexs += b;
+            if (i % 4 == 3) hexs += ' ';
+        }
+        std::string run;
+        for (std::uint8_t c : in) {
+            if (c >= 0x20 && c < 0x7F) {
+                run += static_cast<char>(c);
+            } else {
+                if (run.size() >= 4) text += " \"" + run + "\"";
+                run.clear();
+            }
+        }
+        std::fprintf(stderr, "[exploração] %s fn %u, %zu bytes: %s%s\n", label.c_str(), fn, in.size(), hexs.c_str(),
+                     text.c_str());
+        return std::vector<std::uint8_t>(256, 0);
+    });
+}
+
 void Iop::registerServer(std::uint32_t sid, std::string name, RpcHandler handler) {
     auto it = servers_.find(sid);
     if (it != servers_.end()) {  // módulo recarregado: mantém os endereços
@@ -530,6 +599,7 @@ void Iop::registerServer(std::uint32_t sid, std::string name, RpcHandler handler
 void Iop::vblank(std::uint32_t pc) {
     pad_->vblank(pc);
     dbc_->vblank(pc);
+    pdiCdvd_->vblank(pc);
     flushAudio(pc);
 }
 
@@ -576,6 +646,7 @@ void Iop::resetModules() {
     fioSceNext_ = 0;
     pad_->reset();
     dbc_->reset();
+    pdiCdvd_->reset();
     mc_->reset();
     audsrv_->reset();
     spu2_->reset();

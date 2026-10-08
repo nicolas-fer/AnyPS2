@@ -1,6 +1,7 @@
 #include "anyps2/runtime/runtime.h"
 
 #include <algorithm>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -41,6 +42,7 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
         o.traceGs = s.find("gs") != std::string::npos || s == "all";
     }
     if (const char* clock = std::getenv("ANYPS2_CLOCK")) o.virtualClock = std::string(clock) == "virtual";
+    if (const char* p = std::getenv("ANYPS2_PROFILE")) o.profile = *p && std::string(p) != "0";
     if (const char* v = std::getenv("ANYPS2_VIDEO")) o.video = v;
     if (const char* shot = std::getenv("ANYPS2_SCREENSHOT")) o.screenshot = shot;
     if (const char* v = std::getenv("ANYPS2_VU")) o.vuMode = v;
@@ -96,7 +98,9 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     }
 }
 
-Runtime::~Runtime() = default;
+Runtime::~Runtime() {
+    printProfile();
+}
 
 void Runtime::onVblank(std::uint32_t pc) {
     ++vblanks_;
@@ -211,7 +215,24 @@ void Runtime::syscall(Context* c, std::uint32_t pc) {
     kernel_->syscall(c, pc);
 }
 
+void Runtime::printProfile() const {
+    if (profile_.empty()) return;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
+    std::uint64_t total = 0;
+    for (const auto& [pc, n] : profile_) {
+        top.emplace_back(n, pc);
+        total += n;
+    }
+    std::sort(top.begin(), top.end(), std::greater<>());
+    std::fprintf(stderr, "[perfil] %llu amostras; mais frequentes:\n", static_cast<unsigned long long>(total));
+    for (std::size_t i = 0; i < top.size() && i < 20; ++i) {
+        std::fprintf(stderr, "[perfil] %6.2f%%  %s\n", 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total),
+                     describe(top[i].second).c_str());
+    }
+}
+
 void Runtime::safepoint(Context* c, std::uint32_t pc, std::int64_t extraCycles) {
+    if (options_.profile) ++profile_[pc];
     // Instruções executadas desde a última recarga ~ ciclos (1 IPC).
     timing_->consume(static_cast<std::int64_t>(c->budgetReload) - c->budget + extraCycles);
     c->budget = c->budgetReload = 0;
@@ -248,6 +269,16 @@ int Runtime::run(const std::vector<std::string>& args, const std::string& imageP
 }
 
 namespace gen {
+void rtCall(Context* c) {
+    c->rt->call(c);
+}
+void rtSyscall(Context* c, std::uint32_t pc) {
+    c->rt->syscall(c, pc);
+}
+void rtSafepoint(Context* c, std::uint32_t pc) {
+    c->rt->safepoint(c, pc);
+}
+
 void badEntry(Context* c, std::uint32_t functionStart) {
     throw GuestError("entrada em " + anyps2::hex(c->pc) + " no meio de " +
                          c->rt->describe(functionStart) +

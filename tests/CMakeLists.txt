@@ -202,6 +202,8 @@ if(ANYPS2_E2E_TESTS)
     anyps2_e2e(execps2 RECOMP_ARGS --extra ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/execchild/execchild.elf)
     # Controles do SDK 3.0 (dbcman/libdbc/libpad2) e sceMcGetSlotMax.
     anyps2_e2e(dbcpad ENV ANYPS2_PAD_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/dbcpad/script.txt)
+    # Drivers da Polyphony (pdicdvd, pdistr, lgdev) e o SIF RPC multi-thread.
+    anyps2_e2e(pdi ENV ANYPS2_ISO=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/cdvd/disc.iso)
     anyps2_e2e(execps2 NAME execps2_missing EXPECTED expected_missing.txt
                EXPECT_FAIL "ExecPS2.0x00100B20.*foi recompilado")
 endif()

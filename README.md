@@ -22,8 +22,9 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > janela/áudio/controles via SDL2. **Fase 7 em andamento:** o boot do
 > Gran Turismo 4 (dump do usuário) recompilado desenha a tela de copyright,
 > descomprime e executa o programa principal (também recompilado: 1,4 M
-> instruções), inicializa controles e memory card e para nos drivers de
-> disco/som próprios da Polyphony, que ainda não têm HLE. Jogos
+> instruções), inicializa controles e memory card, lê os dados do disco
+> pelos drivers da Polyphony (em HLE, sem som) e para na sincronização do
+> desenho (interrupção do VIF1), que ainda não é emulada. Jogos
 > comerciais ainda não são jogáveis: eles trazem drivers próprios para o
 > IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
 > [PLANO.md](PLANO.md) para o roteiro completo.
@@ -195,7 +196,8 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_SCREENSHOT=arquivo.png` | grava a última imagem exibida ao terminar |
 | `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
-| `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; o RPC deles continua não existindo |
+| `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
+| `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes ao terminar (onde o programa gasta tempo ou fica girando) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 
 ### Fase 1 — ELF e decodificador
@@ -397,11 +399,15 @@ O golden do microcódigo dos VUs usa o `dvp-objdump` do ps2dev (Docker):
   emulando ou recompilando o próprio IOP (R3000A) — trabalho do porte da
   Fase 2. Só um dump real vai dizer quanto disso cada jogo exige.
 
-Limitações atuais (detalhes no [PLANO.md](PLANO.md)): não há suporte a
-código do EE carregado em tempo de execução (overlays), o GS em software é
+Limitações atuais (detalhes no [PLANO.md](PLANO.md)): código do EE criado
+em tempo de execução (overlays, executáveis descomprimidos) precisa ser
+gravado da RAM e recompilado junto (`ANYPS2_EXEC_DUMP`, `anyps2 ram2elf`,
+`recomp --extra`), o GS em software é
 mono-thread (~19 Mpixels/s com textura bilinear — suficiente para homebrews,
 não para jogos comerciais; é ele, não o VU, que domina o tempo nos samples
-3D), DMA termina instantaneamente (só o FINISH do GS tem latência), os VUs
+3D), DMA termina instantaneamente (só o FINISH do GS tem latência; VIFcode
+com bit de interrupção e a parada do DMA no meio da cadeia não são
+emulados), os VUs
 rodam síncronos com o EE, o EFU usa a libm do host (último bit pode
 diferir), só há vídeo NTSC e os limites do IOP em HLE listados na
 [Fase 6](#fase-6--iop-em-hle-módulos-controle-memory-card-disco-e-som).

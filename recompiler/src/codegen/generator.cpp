@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <sstream>
 
@@ -172,7 +173,7 @@ private:
     std::string staticCall(std::uint32_t t) const {
         const Function* g = model_.functionContaining(t);
         if (g && (t == g->start || g->entries.count(t))) return functionSymbol(g->start) + "(c);";
-        return "c->rt->call(c);";
+        return "rtCall(c);";
     }
 
     // Desvio sem link para t: goto local ou "tail call" e retorno.
@@ -183,7 +184,7 @@ private:
         if (f_.contains(t) && labels_.count(t)) {
             if (t > from) return "goto " + label(t) + ";";
             const std::uint32_t cost = (from - t) / 4 + 2;
-            return "{ if ((c->budget -= " + std::to_string(cost) + ") < 0) [[unlikely]] c->rt->safepoint(c, " +
+            return "{ if ((c->budget -= " + std::to_string(cost) + ") < 0) [[unlikely]] rtSafepoint(c, " +
                    hex32(from) + "); goto " + label(t) + "; }";
         }
         return "{ c->pc = " + hex32(t) + "; " + staticCall(t) + " return; }";
@@ -280,7 +281,7 @@ private:
                 const std::string l = link(i.rd(), ret);
                 if (!l.empty()) out_ << "        " << l << "\n";
                 out_ << delaySlot(i);
-                out_ << "        c->pc = target;\n        c->rt->call(c);\n";
+                out_ << "        c->pc = target;\n        rtCall(c);\n";
                 out_ << "        if (c->pc != " << hex32(ret) << ") [[unlikely]] return;\n    }\n";
                 return;
             }
@@ -312,7 +313,7 @@ private:
             }
             out_ << "            default: break;\n        }\n";
         }
-        out_ << "        c->rt->call(c);\n";
+        out_ << "        rtCall(c);\n";
     }
 
     static std::string indent(const std::string& s) {
@@ -406,7 +407,7 @@ private:
             case Format::FMT_FD_FT: return args({n(i.fd()), n(i.ft())});
             case Format::FMT_FS_FT: return args({n(i.fs()), n(i.ft())});
             case Format::FMT_BREAK: return "BREAK(c, " + pc + ");";
-            case Format::FMT_SYSCALL: return "c->rt->syscall(c, " + pc + ");";
+            case Format::FMT_SYSCALL: return "rtSyscall(c, " + pc + ");";
             case Format::FMT_NONE:
                 switch (i.op) {
                     case Op::EI: return "EI(c);";
@@ -428,7 +429,16 @@ private:
     std::ostringstream out_;
 };
 
+// Só grava se o conteúdo mudou: regenerar um projeto grande (um jogo tem
+// centenas de arquivos) não força recompilar o que é igual.
 void writeFile(const std::filesystem::path& path, const std::string& content) {
+    {
+        std::ifstream old(path, std::ios::binary);
+        if (old) {
+            std::string current((std::istreambuf_iterator<char>(old)), std::istreambuf_iterator<char>());
+            if (current == content) return;
+        }
+    }
     std::ofstream out(path, std::ios::binary);
     if (!out) throw anyps2::Error("não foi possível criar " + path.string());
     out << content;

@@ -19,6 +19,7 @@ Os ELFs gerados ficam versionados para que os testes não dependam do ps2dev.
 | `memcard/` | libmc: info, mkdir, escrita/leitura/seek, getDir, chdir, rename, delete | `expected.txt` |
 | `cdvd/` | libcdvd e `cdrom0:` sobre `disc.iso` (gerado por `make_iso.py`); sem ISO → erro claro | `expected.txt`, `expected_noiso.txt` |
 | `audio/` | `audsrv.irx` + `freesd.irx` do ps2sdk embutidos: PCM 22050 Hz e sample ADPCM com pan | `expected.txt` + `expected.wav` |
+| `pdi/` | drivers da Polyphony (pdicdvd, pdistr, lgdev) e o SIF RPC multi-thread (msifrpc) com IRX mínimos só com o nome, sobre `cdvd/disc.iso` | `expected.txt` |
 
 Regenerar (requer Docker; usa a imagem `ghcr.io/ps2dev/ps2dev`):
 

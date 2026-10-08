@@ -215,7 +215,10 @@ ProgramModel analyze(const elf::ElfFile& elf, const AnalysisOptions& options) {
                 const Instruction lui = r5900::decode(word(a), a);
                 if (lui.op != Op::LUI || lui.rt() == 0) continue;
                 const std::uint32_t hi = std::uint32_t{lui.imm16()} << 16;
-                for (std::uint32_t b = a + 4; b < f.end && b <= a + 32; b += 4) {
+                // Até 64 instruções depois do lui: compiladores separam o par (ex.:
+                // lui no começo da função e addiu 11 instruções depois, no GT4).
+                // Um par espúrio só acrescenta um ponto de entrada.
+                for (std::uint32_t b = a + 4; b < f.end && b <= a + 256; b += 4) {
                     const Instruction lo = r5900::decode(word(b), b);
                     if ((lo.op == Op::ADDIU || lo.op == Op::ORI) && lo.rs() == lui.rt()) {
                         const std::uint32_t v = lo.op == Op::ADDIU

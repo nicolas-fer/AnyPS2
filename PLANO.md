@@ -566,18 +566,49 @@ Marco 3 — o núcleo roda até os drivers da Polyphony ✅:
   montado pelo teste — só o nome no cabeçalho; roteiro de controle com
   CROSS+START e porta 1 desconectada) e `e2e_kpatch` com o devctl.
 
-Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para os módulos de
-rede/USB): o núcleo carrega `libsd`, `usbd`, a pilha de rede, `dev9`,
-`msifrpc`, `PDI_Library` e `PDI_CDVD_Manager` e espera o RPC 0x50434456
-("PCDV") do `pdicdvd`, o driver de disco da Polyphony — o muro previsto na
-triagem.
+Marco 4 — drivers da Polyphony e o jogo lendo o GT4.VOL ✅ (experimento,
+sem som):
+- ✅ **pdicdvd** (`PDI_CDVD_Manager`): RPC "PCDV" — pronto, conferência do
+  PVD, leitura de setores para a memória do EE e o início da camada 1 do
+  DVD-9; RPC "Pcdv" — buffer de status no EE com o relógio (segundos desde
+  1999-12-30, fuso do Japão) reescrito a cada VBlank.
+- ✅ **pdistr** (`PDI_Streaming_service`): RPC "STRP" — abrir um trecho do
+  disco por LSN absoluto (handle ≠ 0), ler em pedaços direto na memória do
+  EE, fechar. É assim que o jogo lê o GT4.VOL (3 GB, atravessa as duas
+  camadas). Abrir por caminho e as funções 1/5/6/8/9 ainda não foram vistas
+  em uso e dão erro claro.
+- ✅ **lgdev** (volante Logitech, RPC 0x046D046D): versão 0x010B2400 (o
+  jogo trava de propósito com outra) e enumeração sem volante (código
+  negativo: o jogo para de procurar).
+- ✅ **msifrpc** (SIF RPC multi-thread da Sony, libmrpc no EE, usado pela
+  Libnet): handshake pelo SREG 1 e bind/call com o mesmo layout de pacote
+  do SIF RPC, nos comandos 0x80000019/0x8000001A, respostas no 0x80000018.
+- ✅ Exploração (`ANYPS2_IOP_ACCEPT_MISSING=1`): servidor RPC sem HLE vira um
+  servidor que responde zeros e registra cada chamada (função, começo dos
+  dados, strings) — foi assim que os protocolos acima foram levantados.
+- ✅ `ANYPS2_PROFILE=1`: amostra o PC nos safepoints e imprime os mais
+  frequentes ao terminar (achou a espera do msifrpc e a trava proposital
+  do lgdev).
+- ✅ Recompilador: a varredura de constantes (lui + addiu) olha 256 bytes
+  adiante (o GT4 separa os pares por até 11 instruções); o gerador não
+  regrava arquivos iguais e o código gerado não inclui mais `runtime.h`
+  (mudar o runtime não recompila o jogo inteiro — 23 min no GT4).
+- ✅ Teste `e2e_pdi`: fala os quatro protocolos (escritos a partir do que o
+  jogo faz) com IRX mínimos só com o nome, sobre o `disc.iso` do teste cdvd.
 
-Próximos passos do GT4: o HLE dos drivers da Polyphony por engenharia
-reversa do lado do EE (pdicdvd primeiro: leitura do GT4.VOL/GT4L1.VOL;
-depois pdispu2/pdistr/rt_ac, que são som e streaming — o caminho mais curto
-é aceitar os comandos e o jogo rodar sem som; som de verdade exige executar
-o código do IOP), HLE de "nenhum dispositivo" para rede/USB/EyeToy/volante/
-impressora, e PAL.
+Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para som, USB e
+rede, que respondem zeros): o jogo lê dados reais do GT4.VOL e começa a
+desenhar, e para no VIF1: um `FLUSH` com o bit de interrupção. O GT4
+sincroniza o desenho com um sistema próprio: o VIF1 para no VIFcode com bit
+I até o handler da interrupção (causa 5) decidir, por contadores no
+scratchpad, se libera (FBRST.STC); tags de DMA com IRQ e o FINISH do GS
+(causa 0) também mexem nesses contadores e liberam o VIF1 ou o PATH3.
+
+Próximos passos do GT4: DMA/VIF assíncronos — o canal parar no meio de uma
+cadeia (VIFcode com bit I, tag com IRQ) e continuar quando o programa
+liberar; interrupções do VIF1 e do GS (SIGNAL/FINISH). Depois: o que
+aparecer (som continua mudo: pdispu2/rt_ac exigem executar o código do
+IOP), e PAL.
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

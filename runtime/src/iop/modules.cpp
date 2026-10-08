@@ -41,6 +41,16 @@ const std::vector<ModuleDef>& moduleTable() {
         {"dbcman", {"Dbc_Manager"}, {}},
         {"sio2d", {"sio2d"}, {}},
         {"ds2u_d", {"ds2u_d"}, {}},
+        // Polyphony Digital (Gran Turismo 4): biblioteca do IOP sem RPC próprio,
+        // o driver de disco e o streaming (leitura do GT4.VOL).
+        {"libpdi", {"PDI_Library"}, {}},
+        {"pdicdvd", {"PDI_CDVD_Manager"}, {}},
+        {"pdistr", {"PDI_Streaming_service"}, {}},
+        // Volante Logitech: o HLE responde sem volante conectado.
+        {"lgdev", {"LgDev_tb_rb_Driver"}, {}},
+        // SIF RPC multi-thread da Sony (libmrpc no EE): bind/call no próprio
+        // núcleo do IOP HLE (iop.cpp); quem registra servidores são os módulos.
+        {"msifrpc", {"IOP_MSIF_rpc_interface"}, {}},
     };
     return kTable;
 }

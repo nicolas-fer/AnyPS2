@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -61,6 +62,10 @@ struct RuntimeOptions {
     bool traceHardware = false;  // ANYPS2_TRACE contém "hw"
     bool traceIop = false;       // ANYPS2_TRACE contém "iop"
     bool traceGs = false;        // ANYPS2_TRACE contém "gs" (DMA, GIF, VIF, VU)
+    // ANYPS2_PROFILE=1: amostra o PC em cada safepoint (desvios para trás e fim
+    // de syscalls) e imprime os mais frequentes ao terminar — mostra onde o
+    // programa passa o tempo ou fica girando.
+    bool profile = false;
     // ANYPS2_VU: "interp" ignora os microprogramas recompilados; "compiled"
     // exige que todo par executado tenha versão recompilada (testes).
     std::string vuMode;
@@ -144,6 +149,8 @@ public:
     void runUntil(std::uint32_t stopPc);
 
 private:
+    void printProfile() const;
+    std::map<std::uint32_t, std::uint64_t> profile_;  // ANYPS2_PROFILE
     void loadImage(const std::string& path);
     void saveScreenshot();
 

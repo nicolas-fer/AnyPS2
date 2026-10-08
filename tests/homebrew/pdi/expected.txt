@@ -1,0 +1,15 @@
+PDI_CDVD_Manager: carregado
+PCDV leitura: 0, "Ola do setor do disco!"
+PDI_Streaming_service: carregado
+STRP abrir: handle 1
+STRP 4 leituras de 256 bytes: conferem
+STRP fechado
+LgDev_tb_rb_Driver: carregado
+lgdev versao: 0x010b2400
+lgdev enumeracao do dispositivo 0: 0x80000001
+IOP_MSIF_rpc_interface: carregado
+msif: SREG 1 = 1
+msif bind: resposta 0x80000019, cliente 0x1234, servidor ok, buffer ok
+msif call: resposta 0x8000001a, handle 2
+msif leitura pelo STRP: "Ola do setor do disco!"
+fim

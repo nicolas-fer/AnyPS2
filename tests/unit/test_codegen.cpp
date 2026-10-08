@@ -83,7 +83,7 @@ TEST_CASE(codegen, function_body) {
     CHECK(contains(mainCode, "fn_" + hexU(strlenAddr).substr(2, 8) + "(c);"));
     CHECK(contains(mainCode, ") [[unlikely]] return;"));
     // jalr t9: despacho dinâmico
-    CHECK(contains(mainCode, "c->rt->call(c);"));
+    CHECK(contains(mainCode, "rtCall(c);"));
     // lq/sq/pextlw/FPU viram chamadas para o runtime
     CHECK(contains(mainCode, "LQ(c, 9, 8, 0, "));
     CHECK(contains(mainCode, "PEXTLW(c, 10, 9, 9);"));

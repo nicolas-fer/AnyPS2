@@ -22,6 +22,7 @@ class Cdvd;
 class Spu2;
 class AudSrv;
 class DbcMan;
+class PdiCdvd;
 
 // IOP em HLE, visto pelo EE através do SIF.
 //
@@ -85,6 +86,10 @@ public:
     std::int32_t loadModule(const std::string& name, std::uint16_t version, const std::string& origin,
                             std::uint32_t pc);
     bool moduleLoaded(const std::string& hleName) const { return loaded_.count(hleName) != 0; }
+    // ANYPS2_IOP_ACCEPT_MISSING=1 (exploração, desenvolvimento): módulos sem HLE
+    // são aceitos com aviso e servidores RPC inexistentes viram servidores de
+    // exploração, que respondem zeros e registram cada chamada.
+    bool exploring() const { return exploring_; }
     // Lê um arquivo dos dispositivos do IOP (host:, cdrom0:) inteiro.
     std::optional<std::vector<std::uint8_t>> readDeviceFile(const std::string& path, std::uint32_t pc);
     // Aloca na RAM do IOP (heap do HLE). 0 se não couber.
@@ -96,6 +101,7 @@ public:
     Spu2& spu2() { return *spu2_; }
     AudSrv& audsrv() { return *audsrv_; }
     DbcMan& dbc() { return *dbc_; }
+    PdiCdvd& pdiCdvd() { return *pdiCdvd_; }
 
 private:
     struct Server {
@@ -108,6 +114,7 @@ private:
     struct Deferred {
         std::vector<std::uint8_t> reply;  // RPC_END já montado
         std::uint32_t recvBuf = 0, recvSize = 0, rmode = 0;
+        std::uint32_t endCmd = 0x80000008u;  // RPC_END (ou o fim do msifrpc)
     };
 
     void handleCommand(const std::vector<std::uint8_t>& packet, std::uint32_t pc);
@@ -163,6 +170,9 @@ private:
     std::unique_ptr<Spu2> spu2_;
     std::unique_ptr<AudSrv> audsrv_;
     std::unique_ptr<DbcMan> dbc_;
+    std::unique_ptr<PdiCdvd> pdiCdvd_;
+    bool exploring_ = false;
+    void registerExplorationServer(std::uint32_t sid);
 
     // fileio
     struct OpenFile {
@@ -212,5 +222,9 @@ void wr32(std::vector<std::uint8_t>& v, std::size_t off, std::uint32_t x);
 std::string cstr(const std::vector<std::uint8_t>& in, std::size_t off, std::size_t max);
 std::vector<std::uint8_t> result32(std::int32_t r);
 }  // namespace iopio
+
+// Módulos simples em HLE registrados direto (um .cpp cada).
+void registerLgDev(Iop& iop);  // volante Logitech (lgdev.cpp)
+void registerPdiStr(Iop& iop);  // streaming da Polyphony (pdistr.cpp)
 
 }  // namespace anyps2::rt

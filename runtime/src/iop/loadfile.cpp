@@ -17,6 +17,7 @@
 #include "anyps2/runtime/iop/audsrv.h"
 #include "anyps2/runtime/iop/cdvd.h"
 #include "anyps2/runtime/iop/dbcman.h"
+#include "anyps2/runtime/iop/pdicdvd.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/iop/mcserv.h"
 #include "anyps2/runtime/iop/pad.h"
@@ -57,11 +58,7 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
         if (!def) {
             // Exploração (desenvolvimento): aceita o módulo sem nenhum serviço, com
             // aviso. Quem usar o RPC dele para no erro de servidor inexistente.
-            static const bool acceptMissing = [] {
-                const char* v = std::getenv("ANYPS2_IOP_ACCEPT_MISSING");
-                return v && *v && std::string(v) != "0";
-            }();
-            if (acceptMissing) {
+            if (exploring_) {
                 std::fprintf(stderr,
                              "[aviso] módulo IRX \"%s\" v%s (%s) aceito SEM implementação HLE "
                              "(ANYPS2_IOP_ACCEPT_MISSING): os serviços dele não existem\n",
@@ -85,6 +82,9 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
         else if (hle == "mcserv") mc_->registerServer();
         else if (hle == "audsrv") audsrv_->registerServer();
         else if (hle == "dbcman") dbc_->load();
+        else if (hle == "pdicdvd") pdiCdvd_->load();
+        else if (hle == "lgdev") registerLgDev(*this);
+        else if (hle == "pdistr") registerPdiStr(*this);
         loaded_.insert(hle);
     }
     return nextModuleId_++;
@@ -117,6 +117,16 @@ void Iop::registerLoadfile() {
             case LF_F_MOD_LOAD:
             case LF_F_MG_MOD_LOAD: {  // _lf_module_load_arg: {arg_len, modres, path[252], args[252]}
                 const std::string path = cstr(in, 8, 252);
+                if (rt_.options().traceIop && rd32(in, 0) > 0) {
+                    // Argumentos do módulo: strings separadas por '\0'.
+                    std::string args;
+                    const std::uint32_t len = std::min<std::uint32_t>(rd32(in, 0), 252);
+                    for (std::uint32_t i = 0; i < len && 260 + i < in.size(); ++i) {
+                        const char ch = static_cast<char>(in[260 + i]);
+                        args += ch ? ch : ' ';
+                    }
+                    std::fprintf(stderr, "[iop] SifLoadModule(\"%s\") argumentos: \"%s\"\n", path.c_str(), args.c_str());
+                }
                 if (path.rfind("rom0:", 0) == 0 || path.rfind("rom1:", 0) == 0) {
                     return reply(loadModule(romModuleName(path), 0, path, pc), 0);
                 }
