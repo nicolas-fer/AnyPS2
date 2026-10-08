@@ -1,0 +1,10 @@
+Dbc_Manager carregado: sim
+versao: 0x316
+socket da porta 0: 0, estado na area de trabalho: 1
+socket da porta 1: 1, estado na area de trabalho: 0
+logo depois de iniciar: estado 1, 18 bytes, perfil 5 bytes, status 1, botoes ff ff, analogicos 128 128 128 128, pressao X 0
+consulta de estado: 1 byte(s), valor 1, resultado 0
+CROSS+START: estado 1, 18 bytes, perfil 5 bytes, status 1, botoes f7 bf, analogicos 128 128 128 128, pressao X 255
+solto: estado 1, 18 bytes, perfil 5 bytes, status 1, botoes ff ff, analogicos 128 128 128 128, pressao X 0
+socket da porta 1 apagado: 0, estado agora 0
+slots na porta 0 do memory card: 1

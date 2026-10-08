@@ -16,6 +16,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/iop/audsrv.h"
 #include "anyps2/runtime/iop/cdvd.h"
+#include "anyps2/runtime/iop/dbcman.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/iop/mcserv.h"
 #include "anyps2/runtime/iop/pad.h"
@@ -83,6 +84,7 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
         else if (hle == "padman-rom") pad_->load(false);
         else if (hle == "mcserv") mc_->registerServer();
         else if (hle == "audsrv") audsrv_->registerServer();
+        else if (hle == "dbcman") dbc_->load();
         loaded_.insert(hle);
     }
     return nextModuleId_++;

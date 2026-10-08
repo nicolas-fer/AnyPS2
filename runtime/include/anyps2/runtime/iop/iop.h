@@ -21,6 +21,7 @@ class McServ;
 class Cdvd;
 class Spu2;
 class AudSrv;
+class DbcMan;
 
 // IOP em HLE, visto pelo EE através do SIF.
 //
@@ -94,6 +95,7 @@ public:
     Cdvd& cdvd() { return *cdvd_; }
     Spu2& spu2() { return *spu2_; }
     AudSrv& audsrv() { return *audsrv_; }
+    DbcMan& dbc() { return *dbc_; }
 
 private:
     struct Server {
@@ -160,6 +162,7 @@ private:
     std::unique_ptr<Cdvd> cdvd_;
     std::unique_ptr<Spu2> spu2_;
     std::unique_ptr<AudSrv> audsrv_;
+    std::unique_ptr<DbcMan> dbc_;
 
     // fileio
     struct OpenFile {

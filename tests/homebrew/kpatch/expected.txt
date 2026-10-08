@@ -14,5 +14,6 @@ lseek(4): 4
 close: 0
 getstat(host:dado.bin): 0, modo 0x2000, tamanho 1234
 getstat(host:nao_existe): -2
+devctl(dev9x:): -19
 rom0:ROMVER pelo fileio do ps2sdk: 0230AC20080220
 versao do loadfile: 3000

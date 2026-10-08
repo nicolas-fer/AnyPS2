@@ -1,0 +1,4 @@
+# vblank porta botões
+30 0 CROSS+START
+60 0 -
+0 1 unplug

@@ -35,6 +35,7 @@ add_library(anyps2_runtime STATIC
     src/iop/iop.cpp
     src/iop/loadfile.cpp
     src/iop/pad.cpp
+    src/iop/dbcman.cpp
     src/iop/mcserv.cpp
     src/iop/cdvd.cpp
     src/iop/spu2.cpp

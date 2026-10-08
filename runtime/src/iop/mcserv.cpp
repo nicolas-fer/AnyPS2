@@ -21,7 +21,7 @@ namespace {
 
 // Operações (libmc.c: numeração do XMCSERV e do MCSERV antigo).
 enum Op { INIT, GET_INFO, OPEN, CLOSE, SEEK, READ, WRITE, FLUSH, CH_DIR, GET_DIR, SET_INFO, DELETE, FORMAT,
-          UNFORMAT, GET_ENT, OTHER };
+          UNFORMAT, GET_ENT, GET_SLOT_MAX, OTHER };
 Op decode(std::uint32_t fn, bool& oldProtocol) {
     oldProtocol = fn >= 0x70 && fn <= 0x80;
     switch (fn) {
@@ -40,6 +40,7 @@ Op decode(std::uint32_t fn, bool& oldProtocol) {
         case 0x10: case 0x77: return FORMAT;
         case 0x11: case 0x80: return UNFORMAT;
         case 0x12: return GET_ENT;
+        case 0x15: return GET_SLOT_MAX;  // libmc do SDK 3.0 (sceMcGetSlotMax)
         default: return OTHER;
     }
 }
@@ -198,6 +199,8 @@ std::optional<std::vector<std::uint8_t>> McServ::rpc(std::uint32_t fn, const std
     auto cardPresent = [&](unsigned port) { return fs::is_directory(root(port), ec); };
 
     switch (op) {
+        case GET_SLOT_MAX:  // [4] porta -> slots na porta: 1 (sem multitap)
+            return result32(rd32(in, 4) < 2 ? 1 : -1);
         case INIT: {
             std::vector<std::uint8_t> out(12, 0);
             wr32(out, 0, 0);

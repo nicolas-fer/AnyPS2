@@ -50,6 +50,12 @@ private:
     bool scripted_ = false;
 };
 
+// Relatório de 18 bytes de um DualShock 2 (como o controle o envia e o
+// libpad entrega depois de {0, modo}): 2 bytes de botões ativos em 0, os
+// analógicos rx ry lx ly e 12 pressões (RIGHT LEFT UP DOWN TRIANGLE CIRCLE
+// CROSS SQUARE L1 R1 L2 R2; sem sensor de pressão no host, pressionado = 255).
+void ds2Report(const PadInput& in, std::uint8_t out[18]);
+
 // "CROSS+START" → bits; "-" → 0. Nomes: SELECT L3 R3 START UP RIGHT DOWN
 // LEFT L2 R2 L1 R1 TRIANGLE CIRCLE CROSS SQUARE.
 std::uint16_t parsePadButtons(const std::string& text);

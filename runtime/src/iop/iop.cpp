@@ -13,6 +13,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/iop/audsrv.h"
 #include "anyps2/runtime/iop/cdvd.h"
+#include "anyps2/runtime/iop/dbcman.h"
 #include "anyps2/runtime/iop/mcserv.h"
 #include "anyps2/runtime/iop/pad.h"
 #include "anyps2/runtime/iop/spu2.h"
@@ -40,7 +41,10 @@ constexpr std::uint32_t kStatSifInit = 0x10000, kStatCmdInit = 0x20000, kStatBoo
 
 // Layout da RAM do IOP no HLE.
 constexpr std::uint32_t kIopCmdBuffer = 0x00001000u;  // onde o EE envia comandos (SMCOM)
-constexpr std::uint32_t kServerBufferSize = 0x10000u;
+// Buffer de recepção de cada servidor RPC na RAM do IOP (o maior pedido
+// conhecido tem 0x2090 bytes: troca grande do dbcman). 16 KB cabem 60
+// servidores entre 0x10000 e o heap.
+constexpr std::uint32_t kServerBufferSize = 0x4000u;
 constexpr unsigned kDmacSif0 = 5;
 constexpr std::uint32_t heapStart() { return 0x00100000u; }
 constexpr std::uint32_t kMaxMissingBinds = 2000;
@@ -186,6 +190,7 @@ Iop::Iop(Runtime& rt) : rt_(rt), ram_(kRamSize, 0) {
     cdvd_ = std::make_unique<Cdvd>(*this);
     spu2_ = std::make_unique<Spu2>();
     audsrv_ = std::make_unique<AudSrv>(*this);
+    dbc_ = std::make_unique<DbcMan>(*this);
     // Módulos residentes desde o boot (IOPBTCONF do console).
     registerFileio();
     registerIopHeap();
@@ -371,6 +376,12 @@ void Iop::handleCommand(const std::vector<std::uint8_t>& p, std::uint32_t pc) {
                 if (s.serverData == sd) server = &s;
             }
             if (!server) throw GuestError("chamada SIF RPC para servidor desconhecido " + anyps2::hex(sd), pc);
+            if (sendSize > kServerBufferSize) {
+                throw GuestError("chamada SIF RPC ao servidor " + server->name + " com " + std::to_string(sendSize) +
+                                     " bytes: maior que o buffer de recepção do HLE (" +
+                                     std::to_string(kServerBufferSize) + ")",
+                                 pc);
+            }
             const std::uint8_t* data = iopPointer(server->buffer, sendSize, pc);
             std::vector<std::uint8_t> in(data, data + sendSize);
             Deferred call;
@@ -518,6 +529,7 @@ void Iop::registerServer(std::uint32_t sid, std::string name, RpcHandler handler
 
 void Iop::vblank(std::uint32_t pc) {
     pad_->vblank(pc);
+    dbc_->vblank(pc);
     flushAudio(pc);
 }
 
@@ -563,6 +575,7 @@ void Iop::resetModules() {
     fioSce_ = false;
     fioSceNext_ = 0;
     pad_->reset();
+    dbc_->reset();
     mc_->reset();
     audsrv_->reset();
     spu2_->reset();
@@ -938,14 +951,42 @@ std::vector<std::uint8_t> Iop::fileioSce(std::uint32_t fn, const std::vector<std
             }
             break;
         }
+        case 23: {  // devctl: [12] nome[1024], [1036] comando, [1040] arg[1024], [2064] tam. arg, [2068] tam. saída
+            const std::string name = cstr(in, 12, 1024);
+            const std::string device = name.substr(0, name.find(':'));
+            const std::uint32_t cmd = rd32(in, 1036);
+            // Console sem adaptador de rede/HDD: o dev9 não registra esses
+            // dispositivos e o iomanX responde -ENODEV.
+            if (device == "dev9x" || device == "hdd" || device == "hdd0" || device == "pfs" || device == "pfs0") {
+                if (rt_.options().traceIop) {
+                    std::fprintf(stderr, "[iop] devctl(\"%s\", 0x%x): sem adaptador de rede/HDD -> -ENODEV\n",
+                                 name.c_str(), cmd);
+                }
+                result = -19;  // ENODEV
+                extra.assign(8, 0);  // {destino, tamanho} da saída: nada
+                break;
+            }
+            throw Unimplemented("devctl(\"" + name + "\", " + anyps2::hex(cmd) +
+                                    ") do fileio (SDK 3.0) ainda não implementado no HLE do IOP",
+                                pc);
+        }
         default: {
             static const char* kNames[] = {"open", "close", "read", "write", "lseek", "ioctl", "remove",
                                            "mkdir", "rmdir", "dopen", "dclose", "dread", "getstat", "chstat",
                                            "format", "adddrv", "deldrv", "rename", "chdir", "sync", "mount",
                                            "umount", "lseek64", "devctl", "symlink", "readlink", "ioctl2"};
+            // Diagnóstico: começo do pedido e o texto em [12] (onde ficam os nomes).
+            std::string dump;
+            for (std::size_t i = 0; i < std::min<std::size_t>(in.size(), 32); ++i) {
+                char b[4];
+                std::snprintf(b, sizeof(b), "%02x", in[i]);
+                dump += b;
+                if (i % 4 == 3) dump += ' ';
+            }
             throw Unimplemented(std::string("fileio (protocolo da Sony, SDK 3.0): função ") + std::to_string(fn) +
                                     (fn < 27 ? std::string(" (") + kNames[fn] + ")" : std::string()) +
-                                    " ainda não implementada no HLE do IOP",
+                                    " ainda não implementada no HLE do IOP; pedido de " + std::to_string(in.size()) +
+                                    " bytes: " + dump + "... texto em [12]: \"" + cstr(in, 12, 64) + "\"",
                                 pc);
         }
     }

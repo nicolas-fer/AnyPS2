@@ -40,6 +40,20 @@ void Input::setHost(unsigned port, const PadInput& state) {
     host_[port] = state;
 }
 
+void ds2Report(const PadInput& in, std::uint8_t out[18]) {
+    const auto btns = static_cast<std::uint16_t>(~in.buttons);  // ativo em 0
+    out[0] = static_cast<std::uint8_t>(btns);
+    out[1] = static_cast<std::uint8_t>(btns >> 8);
+    out[2] = in.rx;
+    out[3] = in.ry;
+    out[4] = in.lx;
+    out[5] = in.ly;
+    static const std::uint16_t kPressOrder[12] = {padbtn::RIGHT,    padbtn::LEFT,   padbtn::UP,    padbtn::DOWN,
+                                                  padbtn::TRIANGLE, padbtn::CIRCLE, padbtn::CROSS, padbtn::SQUARE,
+                                                  padbtn::L1,       padbtn::R1,     padbtn::L2,    padbtn::R2};
+    for (int i = 0; i < 12; ++i) out[6 + i] = (in.buttons & kPressOrder[i]) ? 0xFF : 0x00;
+}
+
 PadInput Input::sample(unsigned port, std::uint64_t vblank) {
     if (!scripted_) {
         std::lock_guard lock(mutex_);

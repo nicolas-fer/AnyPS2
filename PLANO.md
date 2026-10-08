@@ -548,10 +548,36 @@ Marco 2 — o boot termina e o executável principal entra no projeto ✅:
   e encontra o kernel zerado), `e2e_execps2_missing` (sem `--extra`: erro
   claro) e `cli_ram2elf`. `tests/homebrew/build.sh` aceita `LOADADDR`.
 
-Próximos passos do GT4: rodar o núcleo recompilado e seguir pelos módulos
-que ele carrega (rede, USB, EyeToy, volante, impressora com HLE de "nenhum
-dispositivo"; controles pelo `dbcman`/libdbc), PAL, e o IOP executando os
-drivers próprios da Polyphony.
+Marco 3 — o núcleo roda até os drivers da Polyphony ✅:
+- ✅ **Controles do SDK 3.0** (`dbcman` + `sio2d` + `ds2u_d`, usados pela
+  libdbc/libpad2): protocolo levantado do lado do EE — RPC 0x80001300
+  (versão 0x0316, área de trabalho, criar/apagar/iniciar socket, consulta
+  ao dispositivo), 0x8000131E/1F (vibração, aceita). Cada socket tem dois
+  quadros de 128 bytes no EE que o IOP reescreve a cada VBlank (estado,
+  tamanhos, status, os 18 bytes do DualShock 2, perfil "16 digitais + 16
+  analógicos", contador). A entrada é a mesma do padman (teclado, controle,
+  roteiro); o relatório do DS2 virou `ds2Report`, comum aos dois.
+- ✅ `sceMcGetSlotMax` (mcserv 0x15): 1 slot (sem multitap).
+- ✅ `devctl("dev9x:")` (e hdd/pfs) pelo fileio do SDK 3.0: -ENODEV, como num
+  console sem adaptador de rede/HDD; os demais devctl dão erro explícito.
+- ✅ Buffers dos servidores RPC do HLE: 16 KB (eram 64 KB, cabiam só 15
+  servidores); pedido maior que o buffer é erro claro.
+- ✅ Testes: `e2e_dbcpad` (fala o protocolo do dbcman com um IRX mínimo
+  montado pelo teste — só o nome no cabeçalho; roteiro de controle com
+  CROSS+START e porta 1 desconectada) e `e2e_kpatch` com o devctl.
+
+Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para os módulos de
+rede/USB): o núcleo carrega `libsd`, `usbd`, a pilha de rede, `dev9`,
+`msifrpc`, `PDI_Library` e `PDI_CDVD_Manager` e espera o RPC 0x50434456
+("PCDV") do `pdicdvd`, o driver de disco da Polyphony — o muro previsto na
+triagem.
+
+Próximos passos do GT4: o HLE dos drivers da Polyphony por engenharia
+reversa do lado do EE (pdicdvd primeiro: leitura do GT4.VOL/GT4L1.VOL;
+depois pdispu2/pdistr/rt_ac, que são som e streaming — o caminho mais curto
+é aceitar os comandos e o jogo rodar sem som; som de verdade exige executar
+o código do IOP), HLE de "nenhum dispositivo" para rede/USB/EyeToy/volante/
+impressora, e PAL.
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

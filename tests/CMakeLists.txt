@@ -200,6 +200,8 @@ if(ANYPS2_E2E_TESTS)
     # Boot que põe outro programa na memória e chama ExecPS2 (como o GT4): o
     # filho entra no projeto com --extra; sem ele, erro claro.
     anyps2_e2e(execps2 RECOMP_ARGS --extra ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/execchild/execchild.elf)
+    # Controles do SDK 3.0 (dbcman/libdbc/libpad2) e sceMcGetSlotMax.
+    anyps2_e2e(dbcpad ENV ANYPS2_PAD_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/dbcpad/script.txt)
     anyps2_e2e(execps2 NAME execps2_missing EXPECTED expected_missing.txt
                EXPECT_FAIL "ExecPS2.0x00100B20.*foi recompilado")
 endif()

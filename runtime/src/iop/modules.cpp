@@ -36,6 +36,11 @@ const std::vector<ModuleDef>& moduleTable() {
         // módulo mesmo sem usá-lo); a RPC dele (libmtap, 0x800009xx) não existe,
         // então quem tentar usá-la para com o erro de servidor inexistente.
         {"mtapman", {"multitap_manager"}, {"MTAPMAN", "XMTAPMAN"}},
+        // Pilha de controles do SDK 3.0 (libdbc/libpad2): o HLE do dbcman
+        // cobre os três; sio2d e ds2u_d não têm RPC próprio.
+        {"dbcman", {"Dbc_Manager"}, {}},
+        {"sio2d", {"sio2d"}, {}},
+        {"ds2u_d", {"ds2u_d"}, {}},
     };
     return kTable;
 }

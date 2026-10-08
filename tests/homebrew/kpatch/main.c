@@ -81,7 +81,7 @@ static void eret_tests(void)
 /* ---- 3. fileio do SDK 3.0 ----------------------------------------------- */
 
 static SifRpcClientData_t fio_cd __attribute__((aligned(64)));
-static u32 req[264] __attribute__((aligned(64)));            /* 1056 bytes */
+static u32 req[520] __attribute__((aligned(64)));            /* até 2080 bytes (devctl) */
 static u32 reply[4] __attribute__((aligned(64)));
 static u8 done_buf[2][0x440] __attribute__((aligned(64)));
 static u8 data[64] __attribute__((aligned(64)));
@@ -152,6 +152,12 @@ static void sce_fileio(void)
         (unsigned)((u32 *)stat_buf)[2]);
     strcpy((char *)&req[4], "host:nao_existe");
     LOG("getstat(host:nao_existe): %d\n", (int)fio_call(12, 1040));
+
+    /* devctl no adaptador de rede/HDD, que este console não tem */
+    memset(req, 0, sizeof(req));
+    strcpy((char *)&req[3], "dev9x:");
+    req[259] = 0x4401; /* comando */
+    LOG("devctl(dev9x:): %d\n", (int)fio_call(23, 2076));
 }
 
 /* ---- 4. reboot do IOP na ordem da Sony ---------------------------------- */

@@ -205,20 +205,9 @@ void PadMan::writeState(unsigned port, Slot& s, std::uint32_t pc) {
     // Bytes de botões como o padman entrega ao EE (padButtonStatus).
     std::uint8_t data[32];
     std::memset(data, 0, sizeof(data));
-    const std::uint16_t btns = static_cast<std::uint16_t>(~in.buttons);  // ativo em 0
     data[0] = 0;
     data[1] = s.modeCurId;
-    data[2] = static_cast<std::uint8_t>(btns);
-    data[3] = static_cast<std::uint8_t>(btns >> 8);
-    data[4] = in.rx;
-    data[5] = in.ry;
-    data[6] = in.lx;
-    data[7] = in.ly;
-    // Pressão (0..255): sem sensor analógico no host, pressionado = 255.
-    static const std::uint16_t kPressOrder[12] = {padbtn::RIGHT,  padbtn::LEFT,   padbtn::UP,    padbtn::DOWN,
-                                                  padbtn::TRIANGLE, padbtn::CIRCLE, padbtn::CROSS, padbtn::SQUARE,
-                                                  padbtn::L1,     padbtn::R1,     padbtn::L2,    padbtn::R2};
-    for (int i = 0; i < 12; ++i) data[8 + i] = (in.buttons & kPressOrder[i]) ? 0xFF : 0x00;
+    ds2Report(in, data + 2);
     const bool connected = in.connected;
     const std::uint32_t length = connected ? 2u + 2u * (s.modeCurId & 0x0Fu) : 0u;
     const std::uint8_t state = connected ? kStateStable : kStateDisconnected;
