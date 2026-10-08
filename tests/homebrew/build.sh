@@ -79,8 +79,15 @@ for dir in "$here"/*/; do
     done
     libs=""
     [ -f "$dir/LIBS" ] && libs=$(eval echo "$(cat "$dir/LIBS")")
+    # LOADADDR opcional: endereço do .text no lugar do 0x00100000 do linkfile
+    # (ex.: um "boot" que carrega outro programa em 0x00100000).
+    ldflags="$LDFLAGS"
+    if [ -f "$dir/LOADADDR" ]; then
+        sed "s/\.text 0x00100000:/.text $(cat "$dir/LOADADDR"):/" "$PS2SDK/ee/startup/linkfile" > "/tmp/$name.ld"
+        ldflags="-T/tmp/$name.ld -O2 -L$PS2SDK/ee/lib -Wl,-zmax-page-size=128"
+    fi
     # shellcheck disable=SC2086
-    $CC $LDFLAGS -o "$dir/$name.elf" $objs $libs
+    $CC $ldflags -o "$dir/$name.elf" $objs $libs
     # Mantém os símbolos (úteis para a análise), remove só a informação de debug.
     mips64r5900el-ps2-elf-strip --strip-debug "$dir/$name.elf"
     echo "gerado: $name/$name.elf"

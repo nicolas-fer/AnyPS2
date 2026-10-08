@@ -120,6 +120,13 @@ private:
         bool enabled = true;
     };
     struct ShutdownSignal {};  // desenrola threads do host no fim do programa
+    // ExecPS2: o programa atual termina e outro, já na memória, começa (com
+    // threads, semáforos, handlers e alarmes novos; memória, IOP e tabela de
+    // syscalls ficam).
+    struct ExecRequest {
+        std::uint32_t entry = 0, gp = 0;
+        std::vector<std::string> args;
+    };
     struct ThreadExitSignal {};  // desenrola a thread corrente até o laço dela
 
     // Semântica HLE da syscall; std::nullopt se o HLE não a implementa.
@@ -150,7 +157,13 @@ private:
     void switchTo(Thread* next, std::uint32_t pc);
     void waitForBaton(Thread* self);
     void hostThreadMain(Thread* t);
+    // Executa um programa até Exit, erro ou ExecPS2 (runMain repete no ExecPS2).
+    void runProgram(std::uint32_t entry);
     void requestShutdown(std::exception_ptr error, int code);
+    void requestExec(const ExecRequest& request);
+    [[noreturn]] void execPs2(Context* c, std::uint32_t pc);
+    std::string dumpExecImage(const std::string& dir, const ExecRequest& request, std::uint32_t pc);
+    void resetForExec();
     [[noreturn]] void deadlock(std::uint32_t pc);
     std::string describeThreads() const;
 
@@ -172,6 +185,7 @@ private:
     bool shutdown_ = false;
     int exitCode_ = 0;
     std::exception_ptr fatal_;
+    std::optional<ExecRequest> pendingExec_;
 
     std::map<std::int32_t, Semaphore> semas_;
     std::int32_t nextSema_ = 1;

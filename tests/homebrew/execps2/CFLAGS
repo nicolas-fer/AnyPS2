@@ -1,0 +1,1 @@
+-Wa,-I$(dirname "$dir")

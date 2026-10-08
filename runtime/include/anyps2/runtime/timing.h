@@ -59,6 +59,7 @@ public:
     // ---- Alarmes do kernel (unidade: linhas HSYNC) --------------------------
     std::int32_t setAlarm(std::uint16_t lines, std::uint32_t handler, std::uint32_t arg, std::uint32_t gp);
     bool releaseAlarm(std::int32_t id);
+    void clearAlarms() { alarms_.clear(); }  // ExecPS2: o programa novo começa sem alarmes
     struct Alarm {
         std::int32_t id;
         std::uint64_t due;

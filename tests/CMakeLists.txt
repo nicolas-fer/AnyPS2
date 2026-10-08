@@ -63,6 +63,10 @@ add_test(NAME vu_diff COMMAND anyps2_vu_diff)
 add_test(NAME cli_version COMMAND anyps2 --version)
 add_test(NAME cli_info_fixture COMMAND anyps2 info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello_r5900.elf)
 add_test(NAME cli_disc COMMAND anyps2 disc ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/cdvd/disc.iso)
+# ram2elf: ELF a partir de uma "RAM" (aqui, os bytes de um ELF qualquer).
+add_test(NAME cli_ram2elf COMMAND anyps2 ram2elf ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello_r5900.elf
+         --entry 0x40 --text 0x0 0x80 --data 0x80 0x100 --bss-end 0x200 -o ${CMAKE_CURRENT_BINARY_DIR}/ram2elf.elf)
+set_tests_properties(cli_ram2elf PROPERTIES PASS_REGULAR_EXPRESSION "ELF gerado: .*entrada 0x00000040, 2 segmento")
 set_tests_properties(cli_disc PROPERTIES PASS_REGULAR_EXPRESSION "BOOT2 = cdrom0:.AP2_000.00;1")
 add_test(NAME cli_disasm_fixture COMMAND anyps2 disasm ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello_r5900.elf)
 add_test(NAME cli_recomp_missing_output COMMAND anyps2 recomp x)
@@ -97,7 +101,7 @@ if(ANYPS2_E2E_TESTS)
     endif()
 
     function(anyps2_e2e name)
-        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK;EXPECT_FAIL" "ARGS;ENV" ${ARGN})
+        cmake_parse_arguments(E "" "EXPECTED;EXPECTED_COMMAND;NAME;CLOCK;EXPECT_FAIL" "ARGS;ENV;RECOMP_ARGS" ${ARGN})
         if(NOT E_NAME)
             set(E_NAME ${name})
         endif()
@@ -107,6 +111,7 @@ if(ANYPS2_E2E_TESTS)
         set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${E_NAME})
         string(REPLACE ";" "|" args "${E_ARGS}")
         string(REPLACE ";" "|" env "${E_ENV}")
+        string(REPLACE ";" "|" recomp_args "${E_RECOMP_ARGS}")
         set(cmd ${CMAKE_COMMAND}
             -DANYPS2=$<TARGET_FILE:anyps2>
             -DELF=${CMAKE_CURRENT_SOURCE_DIR}/homebrew/${name}/${name}.elf
@@ -121,7 +126,8 @@ if(ANYPS2_E2E_TESTS)
             "-DLINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             -DWITH_SDL=${e2e_with_sdl}
             "-DARGS=${args}"
-            "-DENV=${env}")
+            "-DENV=${env}"
+            "-DRECOMP_ARGS=${recomp_args}")
         if(E_EXPECTED_COMMAND)
             list(APPEND cmd -DEXPECTED_COMMAND=${E_EXPECTED_COMMAND})
         elseif(E_EXPECTED)
@@ -191,4 +197,9 @@ if(ANYPS2_E2E_TESTS)
     # Fase 7: o que jogos comerciais fazem no boot (tabela de syscalls do
     # kernel, ERET, fileio do SDK 3.0, reboot do IOP na ordem da Sony).
     anyps2_e2e(kpatch)
+    # Boot que põe outro programa na memória e chama ExecPS2 (como o GT4): o
+    # filho entra no projeto com --extra; sem ele, erro claro.
+    anyps2_e2e(execps2 RECOMP_ARGS --extra ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/execchild/execchild.elf)
+    anyps2_e2e(execps2 NAME execps2_missing EXPECTED expected_missing.txt
+               EXPECT_FAIL "ExecPS2.0x00100B20.*foi recompilado")
 endif()

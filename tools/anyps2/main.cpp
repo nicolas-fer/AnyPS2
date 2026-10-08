@@ -67,6 +67,7 @@ Uso:
 
   anyps2 recomp <arquivo.elf> -o <diretório> [--name NOME] [--root RAIZ]
                [--function 0xENDERECO ...] [--vu-dumps DIR] [--no-vu]
+               [--extra OUTRO.elf ...]
       Gera um projeto CMake com o código C++ recompilado. Compile com
       "cmake -S <diretório> -B <diretório>/build && cmake --build ...".
       --root aponta para a raiz do AnyPS2 (padrão: a usada neste build).
@@ -75,6 +76,15 @@ Uso:
       acrescenta os dumps gravados com ANYPS2_VU_DUMP=DIR (microcódigo que
       só existe em tempo de execução); --no-vu deixa tudo para o
       interpretador.
+      --extra inclui código que o programa só cria em tempo de execução (ex.:
+      o executável principal que o boot de um jogo descomprime e chama com
+      ExecPS2): é recompilado no mesmo projeto, mas fica fora da imagem.
+
+  anyps2 ram2elf <ram.bin> --entry ENDERECO --text INICIO FIM [--text ...]
+                 [--data INICIO FIM ...] [--bss-end FIM] -o <saida.elf>
+      Monta um ELF a partir de uma imagem da RAM do EE (ANYPS2_EXEC_DUMP):
+      faixas de código (--text) e de dados (--data), e .bss depois da última. Serve para recompilar
+      com "recomp --extra" um programa que só existe na memória.
 
   anyps2 vu <arquivo.elf | dump.bin> [--disasm]
       Lista (e desmonta) o microcódigo de VU encontrado: pacotes VIF MPG,
@@ -437,8 +447,154 @@ int cmdVuGen(const std::vector<std::string_view>& args) {
     return 0;
 }
 
+// Faixa da RAM que vira um segmento do ELF gerado por "ram2elf".
+struct RamRegion {
+    std::uint32_t start = 0, end = 0;
+    bool code = false;
+};
+
+// ELF32 mínimo (MIPS LE, marca R5900) com as faixas dadas como segmentos e
+// seções .text/.data, e um .bss depois da última faixa (até bssEnd).
+std::vector<std::uint8_t> buildRamElf(const std::vector<std::uint8_t>& ram, std::uint32_t entry,
+                                      std::vector<RamRegion> regions, std::uint32_t bssEnd) {
+    auto put16 = [](std::vector<std::uint8_t>& v, std::size_t off, std::uint16_t x) {
+        v[off] = static_cast<std::uint8_t>(x);
+        v[off + 1] = static_cast<std::uint8_t>(x >> 8);
+    };
+    auto put32 = [](std::vector<std::uint8_t>& v, std::size_t off, std::uint32_t x) {
+        for (int i = 0; i < 4; ++i) v[off + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(x >> (8 * i));
+    };
+    auto align = [](std::size_t v, std::size_t a) { return (v + a - 1) & ~(a - 1); };
+    std::sort(regions.begin(), regions.end(), [](const RamRegion& a, const RamRegion& b) { return a.start < b.start; });
+    const std::uint32_t lastEnd = regions.back().end;
+    const std::uint32_t bssSize = bssEnd > lastEnd ? bssEnd - lastEnd : 0;
+    const std::string shstr = std::string("\0.text\0.data\0.bss\0.shstrtab\0", 28);
+    const auto n = static_cast<unsigned>(regions.size());
+    // Cabeçalho, phdrs, conteúdo das faixas, shstrtab, shdrs.
+    std::vector<std::size_t> offsets;
+    std::size_t off = align(52 + n * 32, 16);
+    for (const auto& r : regions) {
+        offsets.push_back(off);
+        off = align(off + (r.end - r.start), 16);
+    }
+    const std::size_t strOff = off;
+    const std::size_t shOff = align(strOff + shstr.size(), 4);
+    const unsigned shnum = n + 3;  // nulo, faixas, .bss, .shstrtab
+    std::vector<std::uint8_t> e(shOff + shnum * 40, 0);
+    const std::uint8_t ident[] = {0x7F, 'E', 'L', 'F', 1, 1, 1};
+    std::copy(std::begin(ident), std::end(ident), e.begin());
+    put16(e, 16, 2);  // ET_EXEC
+    put16(e, 18, 8);  // EM_MIPS
+    put32(e, 20, 1);
+    put32(e, 24, entry);
+    put32(e, 28, 52);
+    put32(e, 32, static_cast<std::uint32_t>(shOff));
+    put32(e, 36, 0x20924001u);  // MIPS III, R5900, noreorder
+    put16(e, 40, 52);
+    put16(e, 42, 32);
+    put16(e, 44, static_cast<std::uint16_t>(n));
+    put16(e, 46, 40);
+    put16(e, 48, static_cast<std::uint16_t>(shnum));
+    put16(e, 50, static_cast<std::uint16_t>(shnum - 1));
+    auto shdr = [&](unsigned i, std::uint32_t nameOff, std::uint32_t type, std::uint32_t flags, std::uint32_t addr,
+                    std::size_t fileOff, std::uint32_t size) {
+        const std::size_t p = shOff + i * 40;
+        put32(e, p, nameOff);
+        put32(e, p + 4, type);
+        put32(e, p + 8, flags);
+        put32(e, p + 12, addr);
+        put32(e, p + 16, static_cast<std::uint32_t>(fileOff));
+        put32(e, p + 20, size);
+        put32(e, p + 32, type == elf::SHT_STRTAB ? 1 : 16);
+    };
+    for (unsigned i = 0; i < n; ++i) {
+        const RamRegion& r = regions[i];
+        const std::uint32_t size = r.end - r.start;
+        const bool last = i + 1 == n;
+        const std::size_t p = 52 + i * 32;
+        put32(e, p, elf::PT_LOAD);
+        put32(e, p + 4, static_cast<std::uint32_t>(offsets[i]));
+        put32(e, p + 8, r.start);
+        put32(e, p + 12, r.start);
+        put32(e, p + 16, size);
+        put32(e, p + 20, size + (last ? bssSize : 0));
+        put32(e, p + 24, r.code ? (elf::PF_R | elf::PF_X) : (elf::PF_R | elf::PF_W));
+        put32(e, p + 28, 16);
+        std::copy(ram.begin() + r.start, ram.begin() + r.end, e.begin() + static_cast<std::ptrdiff_t>(offsets[i]));
+        shdr(i + 1, r.code ? 1 : 7, elf::SHT_PROGBITS,
+             r.code ? (elf::SHF_ALLOC | elf::SHF_EXECINSTR) : (elf::SHF_ALLOC | elf::SHF_WRITE), r.start, offsets[i],
+             size);
+    }
+    shdr(n + 1, 13, bssSize ? elf::SHT_NOBITS : elf::SHT_NULL, elf::SHF_ALLOC | elf::SHF_WRITE, lastEnd,
+         offsets.back() + (regions.back().end - regions.back().start), bssSize);
+    std::copy(shstr.begin(), shstr.end(), e.begin() + static_cast<std::ptrdiff_t>(strOff));
+    shdr(n + 2, 18, elf::SHT_STRTAB, 0, 0, strOff, static_cast<std::uint32_t>(shstr.size()));
+    return e;
+}
+
+int cmdRam2Elf(const std::vector<std::string_view>& args) {
+    std::optional<std::string> path, out;
+    std::optional<std::uint32_t> entry;
+    std::vector<RamRegion> regions;
+    std::uint32_t bssEnd = 0;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const auto a = args[i];
+        auto next = [&]() -> std::string_view {
+            if (i + 1 >= args.size()) throw Error("faltou valor para " + std::string(a));
+            return args[++i];
+        };
+        if (a == "-o" || a == "--output") out = std::string(next());
+        else if (a == "--entry") entry = parseNumber(next());
+        else if (a == "--text" || a == "--data") {
+            RamRegion r;
+            r.code = a == "--text";
+            r.start = parseNumber(next());
+            r.end = parseNumber(next());
+            regions.push_back(r);
+        } else if (a == "--bss-end") bssEnd = parseNumber(next());
+        else if (!path) path = std::string(a);
+        else throw Error("argumento inesperado: " + std::string(a));
+    }
+    const bool anyCode = std::any_of(regions.begin(), regions.end(), [](const RamRegion& r) { return r.code; });
+    if (!path || !out || !entry || !anyCode) {
+        throw Error("uso: anyps2 ram2elf <ram.bin> --entry ENDERECO --text INICIO FIM [--text ...] "
+                    "[--data INICIO FIM ...] [--bss-end FIM] -o <saida.elf>");
+    }
+    std::ifstream in(*path, std::ios::binary);
+    if (!in) throw Error("não foi possível abrir '" + *path + "'");
+    std::vector<std::uint8_t> ram((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::sort(regions.begin(), regions.end(), [](const RamRegion& x, const RamRegion& y) { return x.start < y.start; });
+    bool entryInCode = false;
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        const RamRegion& r = regions[i];
+        const char* what = r.code ? "--text" : "--data";
+        if (r.end <= r.start) throw Error(std::string(what) + ": FIM deve ser maior que INICIO");
+        if ((r.start & 3) || (r.end & 3)) throw Error(std::string(what) + ": as faixas precisam ser alinhadas a 4 bytes");
+        if (r.end > ram.size()) {
+            throw Error(std::string(what) + ": " + hex(r.end) + " passa do fim da imagem (" + hex(ram.size()) + ")");
+        }
+        if (i > 0 && r.start < regions[i - 1].end) {
+            throw Error("as faixas " + hex(regions[i - 1].start) + ".." + hex(regions[i - 1].end) + " e " +
+                        hex(r.start) + ".." + hex(r.end) + " se sobrepõem");
+        }
+        if (r.code && *entry >= r.start && *entry < r.end) entryInCode = true;
+    }
+    if (!entryInCode) throw Error("--entry " + hex(*entry) + " fora das faixas --text");
+    const auto bytes = buildRamElf(ram, *entry, regions, bssEnd);
+    std::ofstream o(*out, std::ios::binary);
+    o.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    o.close();
+    if (!o) throw Error("não foi possível gravar '" + *out + "'");
+    // Confere com o próprio parser.
+    const auto f = elf::ElfFile::loadFromFile(*out);
+    std::cout << "ELF gerado: " << *out << " (entrada " << hex(f.entry()) << ", " << f.segments().size()
+              << " segmento(s))\n";
+    return 0;
+}
+
 int cmdRecomp(const std::vector<std::string_view>& args) {
     std::optional<std::string> path, out, name, vuDumps;
+    std::vector<std::string> extras;
     bool noVu = false;
     std::string root = ANYPS2_SOURCE_DIR;
     anyps2::analysis::AnalysisOptions aopt;
@@ -454,6 +610,7 @@ int cmdRecomp(const std::vector<std::string_view>& args) {
         else if (a == "--function") aopt.extraFunctions.push_back(parseNumber(next()));
         else if (a == "--vu-dumps") vuDumps = next();
         else if (a == "--no-vu") noVu = true;
+        else if (a == "--extra") extras.push_back(next());
         else if (!path) path = std::string(a);
         else throw Error("argumento inesperado: " + std::string(a));
     }
@@ -469,6 +626,15 @@ int cmdRecomp(const std::vector<std::string_view>& args) {
     gopt.projectName = sanitizeName(name ? *name : std::filesystem::path(*path).stem().string());
     gopt.recompileVu = !noVu;
     if (vuDumps) gopt.vuDumps = listDumps(*vuDumps);
+    std::vector<elf::ElfFile> extraElfs;
+    std::vector<anyps2::analysis::ProgramModel> extraModels;
+    extraElfs.reserve(extras.size());
+    extraModels.reserve(extras.size());
+    for (const auto& x : extras) {
+        extraElfs.push_back(elf::ElfFile::loadFromFile(x));
+        extraModels.push_back(anyps2::analysis::analyze(extraElfs.back(), aopt));
+        gopt.extraCode.push_back({&extraElfs.back(), &extraModels.back()});
+    }
     const auto report = anyps2::codegen::generateProject(f, model, gopt);
 
     std::cout << "Projeto gerado em " << *out << " (alvo '" << gopt.projectName << "')\n";
@@ -523,6 +689,7 @@ int run(int argc, char** argv) {
     if (cmd == "vu") return cmdVu(args);
     if (cmd == "vu-gen") return cmdVuGen(args);
     if (cmd == "disc") return cmdDisc(args);
+    if (cmd == "ram2elf") return cmdRam2Elf(args);
     throw Error("comando desconhecido '" + std::string(cmd) + "' (use --help)");
 }
 

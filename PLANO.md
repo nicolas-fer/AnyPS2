@@ -518,10 +518,40 @@ GS em software) e para no primeiro módulo sem HLE (`mtapman`). Para chegar lá:
   ERET nos dois modos, fileio do SDK 3.0 (cliente escrito a partir do
   protocolo, sem código da Sony), reboot na ordem da Sony, versões e ROMVER.
 
-Próximos passos do GT4: módulos de periféricos ausentes com HLE de "nenhum
-dispositivo" (multitap, USB, EyeToy, rede, volante, impressora), controles
-pelo `dbcman`/libdbc, carregar e recompilar o `CORE.GT4`, PAL, e o IOP
-executando os drivers próprios da Polyphony.
+Marco 2 — o boot termina e o executável principal entra no projeto ✅:
+- ✅ O boot carrega os 5 módulos dele (`sio2man`, `mtapman`, `mcman`,
+  `mcserv`, `padman`), inicializa a libmc, lê o `CORE.GT4`, descomprime e
+  chama `ExecPS2(0x00100008, …, ["cdrom0:\CORE.GT4;1", "hot"])`.
+  - `mtapman` aceito sem servidores (sem multitap conectado; o RPC dele dá o
+    erro de servidor inexistente se alguém o usar).
+  - `Deci2Call` (depurador do kit) falha como num console de varejo;
+    `RemoveSbusIntcHandler` sem handler instalado é no-op.
+  - mcman declara a versão 0x20E (a libmc do SDK 3.0 exige ≥ 0x20E).
+- ✅ **ExecPS2** no kernel: o programa atual termina (todas as threads), o
+  estado do kernel do EE é descartado (threads, semáforos, handlers,
+  alarmes) e o novo programa começa na entrada com gp e argv; memória, IOP
+  e tabela de syscalls ficam. Se a entrada não é código recompilado: erro
+  claro, e com `ANYPS2_EXEC_DUMP=pasta` a RAM inteira é gravada.
+- ✅ **`anyps2 ram2elf`**: ELF sintético (segmentos + seções `.text`/
+  `.data`/`.bss`) a partir da RAM gravada, com várias faixas de código e de
+  dados. **`anyps2 recomp --extra X.elf`**: código que só existe em tempo de
+  execução entra no mesmo projeto (tabela de funções única, checagem de
+  sobreposição), fora da imagem inicial.
+- ✅ O núcleo do GT4: `CORE.GT4` = 256 bytes (assinatura?) + cabeçalho
+  {entrada, endereço de carga, tamanhos} + imagem copiada para
+  0x00100000; texto 0x100000–0x616F20, dados até 0x6D5D98, bss até
+  0x6DDDF0, e uma ilha de código SHA-1 (MMI) em 0x6C5400–0x6C8340 no meio
+  dos dados. Recompilado com o boot: 15.629 funções, 1,38 M instruções,
+  nenhuma instrução sem suporte.
+- ✅ Testes: `e2e_execps2` (boot em 0x01000000 que copia um ELF embutido para
+  a memória e chama ExecPS2; recompilado com `--extra`; o filho recebe argv
+  e encontra o kernel zerado), `e2e_execps2_missing` (sem `--extra`: erro
+  claro) e `cli_ram2elf`. `tests/homebrew/build.sh` aceita `LOADADDR`.
+
+Próximos passos do GT4: rodar o núcleo recompilado e seguir pelos módulos
+que ele carrega (rede, USB, EyeToy, volante, impressora com HLE de "nenhum
+dispositivo"; controles pelo `dbcman`/libdbc), PAL, e o IOP executando os
+drivers próprios da Polyphony.
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

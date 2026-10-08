@@ -13,9 +13,12 @@
 #            EXPECTED_WAV (WAV que o som gerado deve reproduzir byte a byte),
 #            EXPECT_FAIL (regex: o programa deve terminar com erro e o stderr
 #            conter esta expressão; o stdout ainda é comparado).
+#            RECOMP_ARGS (lista: argumentos extras do "anyps2 recomp", ex.:
+#            --extra outro.elf).
 
 string(REPLACE "|" ";" ARGS "${ARGS}")
 string(REPLACE "|" ";" ENV "${ENV}")
+string(REPLACE "|" ";" RECOMP_ARGS "${RECOMP_ARGS}")
 
 function(run_step)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
@@ -25,7 +28,7 @@ function(run_step)
 endfunction()
 
 file(REMOVE_RECURSE ${WORK}/gen/src)
-run_step(${ANYPS2} recomp ${ELF} -o ${WORK}/gen --name ${NAME} --root ${ANYPS2_ROOT})
+run_step(${ANYPS2} recomp ${ELF} -o ${WORK}/gen --name ${NAME} --root ${ANYPS2_ROOT} ${RECOMP_ARGS})
 
 set(configure_args -S ${WORK}/gen -B ${WORK}/build -G ${GENERATOR})
 if(BUILD_TYPE)

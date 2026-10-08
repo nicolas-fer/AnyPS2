@@ -1,5 +1,6 @@
 #include "anyps2/codegen/generator.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <set>
@@ -491,13 +492,42 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
     const std::string imageName = name + ".image";
     writeImage(elf, options.outputDir / imageName);
 
+    // Unidades de código: o ELF principal e os extras (sem sobreposição).
+    struct Unit {
+        const elf::ElfFile* elf;
+        const ProgramModel* model;
+    };
+    std::vector<Unit> units = {{&elf, &model}};
+    for (const auto& x : options.extraCode) {
+        units.push_back({x.elf, x.model});
+        report.warnings.insert(report.warnings.end(), x.model->warnings.begin(), x.model->warnings.end());
+    }
+    struct TableEntry {
+        const Function* f;
+        const elf::ElfFile* elf;
+    };
+    std::vector<TableEntry> table;
+    for (const auto& u : units) {
+        for (const auto& f : u.model->functions) table.push_back({&f, u.elf});
+    }
+    std::sort(table.begin(), table.end(),
+              [](const TableEntry& a, const TableEntry& b) { return a.f->start < b.f->start; });
+    for (std::size_t i = 1; i < table.size(); ++i) {
+        if (table[i].f->start < table[i - 1].f->end) {
+            throw anyps2::Error("o código de " + table[i].elf->name() + " (função em " +
+                                hex32(table[i].f->start) + ") se sobrepõe ao de " + table[i - 1].elf->name() +
+                                " (função " + hex32(table[i - 1].f->start) + ".." + hex32(table[i - 1].f->end) +
+                                "): as unidades de código precisam ocupar faixas distintas");
+        }
+    }
+
     // Declarações.
     {
         std::ostringstream h;
         h << "// Gerado pelo AnyPS2 — não edite.\n#pragma once\n\n"
              "#include \"anyps2/runtime/context.h\"\n\n";
-        for (const auto& f : model.functions) {
-            h << "void " << functionSymbol(f.start) << "(::anyps2::rt::Context* c);\n";
+        for (const auto& t : table) {
+            h << "void " << functionSymbol(t.f->start) << "(::anyps2::rt::Context* c);\n";
         }
         writeFile(src / "functions.h", h.str());
     }
@@ -506,10 +536,11 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
     std::vector<std::string> files;
     std::ostringstream cur;
     std::size_t curInsns = 0;
+    const elf::ElfFile* curElf = &elf;
     auto startFile = [&]() {
         cur.str("");
         cur.clear();
-        cur << "// Gerado pelo AnyPS2 a partir de " << elf.name() << " — não edite.\n"
+        cur << "// Gerado pelo AnyPS2 a partir de " << curElf->name() << " — não edite.\n"
             << "#include \"anyps2/runtime/generated.h\"\n#include \"functions.h\"\n\n"
             << "using namespace ::anyps2::rt;\nusing namespace ::anyps2::rt::ops;\n"
             << "using namespace ::anyps2::rt::gen;\n\n";
@@ -521,23 +552,27 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
         writeFile(src / fname, cur.str());
         files.push_back(fname);
     };
-    startFile();
-    for (const auto& f : model.functions) {
-        const std::size_t before = report.instructions;
-        cur << generateFunction(elf, model, f, report);
-        curInsns += report.instructions - before;
-        ++report.functions;
-        if (curInsns >= options.instructionsPerFile) {
-            flushFile();
-            startFile();
+    for (const auto& u : units) {
+        curElf = u.elf;
+        startFile();
+        for (const auto& f : u.model->functions) {
+            const std::size_t before = report.instructions;
+            cur << generateFunction(*u.elf, *u.model, f, report);
+            curInsns += report.instructions - before;
+            ++report.functions;
+            if (curInsns >= options.instructionsPerFile) {
+                flushFile();
+                startFile();
+            }
         }
+        if (curInsns > 0 || files.empty()) flushFile();
     }
-    if (curInsns > 0 || files.empty()) flushFile();
 
     // Microcódigo dos VUs.
     std::vector<vu::MicroBlob> blobs;
     if (options.recompileVu) {
         blobs = findElfMicrocode(elf);
+        for (const auto& x : options.extraCode) vu::appendUnique(blobs, findElfMicrocode(*x.elf));
         for (const auto& dump : options.vuDumps) vu::appendUnique(blobs, findDumpMicrocode(dump));
     }
     for (const auto& b : blobs) report.vuPairs += b.words.size() / 2;
@@ -557,9 +592,9 @@ GenerationReport generateProject(const elf::ElfFile& elf, const ProgramModel& mo
              "extern const std::size_t kVuProgramsCount;\n\n"
              "namespace {\n"
              "const ::anyps2::rt::FunctionEntry kFunctions[] = {\n";
-        for (const auto& f : model.functions) {
-            p << "    {" << hex32(f.start) << ", " << hex32(f.end) << ", &" << functionSymbol(f.start)
-              << ", " << cString(f.name) << "},\n";
+        for (const auto& t : table) {
+            p << "    {" << hex32(t.f->start) << ", " << hex32(t.f->end) << ", &" << functionSymbol(t.f->start)
+              << ", " << cString(t.f->name) << "},\n";
         }
         p << "};\n"
              "const ::anyps2::rt::ProgramInfo kProgram = {\n"

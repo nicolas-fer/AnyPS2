@@ -201,8 +201,10 @@ std::optional<std::vector<std::uint8_t>> McServ::rpc(std::uint32_t fn, const std
         case INIT: {
             std::vector<std::uint8_t> out(12, 0);
             wr32(out, 0, 0);
+            // Versões declaradas: a libmc da Sony do SDK 3.0 exige mcserv >= 0x20A e
+            // mcman >= 0x20E ("too old release"); a do ps2sdk só checa mínimos menores.
             wr32(out, 4, 0x020A);  // versão do mcserv
-            wr32(out, 8, 0x020B);  // versão do mcman
+            wr32(out, 8, 0x020E);  // versão do mcman
             return out;
         }
         case GET_INFO: {

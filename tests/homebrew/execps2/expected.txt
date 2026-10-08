@@ -1,0 +1,6 @@
+pai: ExecPS2(0x100b20), semaforo 63
+filho: argc=2
+filho: argv[0]=cdrom0:\FILHO.ELF;1
+filho: argv[1]=63
+filho: thread principal = 1
+filho: semaforo 63 do pai ainda existe? nao

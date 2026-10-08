@@ -12,6 +12,15 @@
 
 namespace anyps2::codegen {
 
+// Código que o programa só cria em tempo de execução (ex.: o executável
+// principal de um jogo, descomprimido pelo boot e chamado com ExecPS2):
+// recompilado no mesmo projeto e na mesma tabela de funções, mas fora da
+// imagem carregada no início — o próprio programa o põe na memória.
+struct ExtraCode {
+    const elf::ElfFile* elf = nullptr;
+    const analysis::ProgramModel* model = nullptr;
+};
+
 struct GeneratorOptions {
     std::string projectName;              // nome do executável gerado
     std::filesystem::path outputDir;
@@ -21,6 +30,7 @@ struct GeneratorOptions {
     // no ELF (carregado de arquivos do disco, gerado em tempo de execução).
     std::vector<std::filesystem::path> vuDumps;
     bool recompileVu = true;  // false: só o interpretador de VU
+    std::vector<ExtraCode> extraCode;
 };
 
 struct GenerationReport {

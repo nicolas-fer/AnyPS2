@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/runtime.h"
@@ -184,6 +187,9 @@ void Kernel::hostThreadMain(Thread* t) {
         } catch (const ProgramExit& e) {
             requestShutdown(nullptr, e.code);
             return;
+        } catch (const ExecRequest& e) {
+            requestExec(e);
+            return;
         } catch (...) {
             requestShutdown(std::current_exception(), 0);
             return;
@@ -204,6 +210,85 @@ void Kernel::hostThreadMain(Thread* t) {
     }
 }
 
+void Kernel::requestExec(const ExecRequest& request) {
+    std::lock_guard lk(batonMutex_);
+    if (shutdown_) return;
+    shutdown_ = true;
+    pendingExec_ = request;
+    for (auto& [id, t] : threads_) t->cv.notify_all();
+}
+
+// ExecPS2(entrada, gp, argc, argv): executa um programa que já está na
+// memória (jogos descomprimem o executável principal e saltam para ele).
+// Se a entrada é código recompilado (o programa foi incluído no projeto com
+// "anyps2 recomp --extra"), o programa atual termina e o novo começa. Senão,
+// erro claro — e, com ANYPS2_EXEC_DUMP, a RAM é gravada para gerar o ELF.
+void Kernel::execPs2(Context* c, std::uint32_t pc) {
+    Memory& m = rt_.memory();
+    ExecRequest req;
+    req.entry = c->r[4].uw[0];
+    req.gp = c->r[5].uw[0];
+    const auto argc = static_cast<std::int32_t>(c->r[6].uw[0]);
+    const std::uint32_t argv = c->r[7].uw[0];
+    for (std::int32_t i = 0; i < argc && i < 16; ++i) {
+        req.args.push_back(m.readCString(m.read<std::uint32_t>(argv + 4u * static_cast<std::uint32_t>(i), pc), 256, pc));
+    }
+    if (!rt_.lookup(req.entry)) {
+        std::string where;
+        if (const char* dir = std::getenv("ANYPS2_EXEC_DUMP"); dir && *dir) where = dumpExecImage(dir, req, pc);
+        throw Unimplemented(
+            "ExecPS2(" + anyps2::hex(req.entry) + ", gp " + anyps2::hex(req.gp) + ", " + std::to_string(argc) +
+                " argumento(s)): o programa executa código que ele mesmo carregou na memória e que não foi "
+                "recompilado. " +
+                (where.empty() ? std::string("Grave a memória com ANYPS2_EXEC_DUMP=<pasta> e inclua o código no "
+                                             "projeto (anyps2 ram2elf + anyps2 recomp --extra)")
+                               : "Memória gravada em " + where + "; gere o ELF com \"anyps2 ram2elf " + where +
+                                     " --entry " + anyps2::hex(req.entry) +
+                                     " --text INICIO FIM [--data INICIO FIM] -o programa.elf\" e recompile com --extra programa.elf"),
+            pc);
+    }
+    throw req;
+}
+
+// RAM inteira (32 MB) + um .txt com entrada/gp/argumentos.
+std::string Kernel::dumpExecImage(const std::string& dir, const ExecRequest& req, std::uint32_t pc) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    char base[32];
+    std::snprintf(base, sizeof(base), "exec_%08x", req.entry);
+    const fs::path ram = fs::path(dir) / (std::string(base) + ".ram");
+    std::ofstream out(ram, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(rt_.memory().ram()), Memory::kRamSize);
+    if (!out) throw GuestError("ANYPS2_EXEC_DUMP: não foi possível gravar " + ram.string(), pc);
+    std::ofstream info(fs::path(dir) / (std::string(base) + ".txt"));
+    info << "entrada " << anyps2::hex(req.entry) << "\ngp " << anyps2::hex(req.gp) << "\n";
+    for (const auto& a : req.args) info << "arg " << a << "\n";
+    return ram.string();
+}
+
+// Estado do kernel do EE que um ExecPS2 descarta (as threads do host já
+// terminaram).
+void Kernel::resetForExec() {
+    threads_.clear();
+    nextThreadId_ = 1;
+    current_ = nullptr;
+    for (auto& q : ready_) q.clear();
+    reschedulePending_ = false;
+    shutdown_ = false;
+    exitCode_ = 0;
+    semas_.clear();
+    nextSema_ = 1;
+    intcHandlers_.clear();
+    dmacHandlers_.clear();
+    nextHandlerId_ = 1;
+    intcMask_ = 0;
+    pendingAlarms_.clear();
+    rt_.timing().clearAlarms();
+    interruptDepth_ = 0;
+    heapStart_ = heapEnd_ = stackBottom_ = mainStack_ = mainStackSize_ = 0;
+}
+
 void Kernel::requestShutdown(std::exception_ptr error, int code) {
     std::lock_guard lk(batonMutex_);
     if (shutdown_) return;
@@ -214,6 +299,26 @@ void Kernel::requestShutdown(std::exception_ptr error, int code) {
 }
 
 int Kernel::runMain(std::uint32_t entry) {
+    for (;;) {
+        runProgram(entry);
+        if (fatal_) std::rethrow_exception(fatal_);
+        if (!pendingExec_) return exitCode_;
+        // ExecPS2: o programa novo começa do zero (registradores, threads...).
+        const ExecRequest req = *pendingExec_;
+        pendingExec_.reset();
+        resetForExec();
+        bootArgs_ = req.args;
+        Context& ctx = rt_.context();
+        for (auto& r : ctx.r) r.ud[0] = r.ud[1] = 0;
+        ctx.r[28].sd[0] = static_cast<std::int32_t>(req.gp);
+        if (rt_.options().traceSyscalls) {
+            std::fprintf(stderr, "[exec] ExecPS2 -> %s\n", rt_.describe(req.entry).c_str());
+        }
+        entry = req.entry;
+    }
+}
+
+void Kernel::runProgram(std::uint32_t entry) {
     auto main = std::make_unique<Thread>();
     main->id = nextThreadId_++;
     main->status = THS_RUN;
@@ -248,8 +353,6 @@ int Kernel::runMain(std::uint32_t entry) {
     for (auto& [id, t] : threads_) {
         if (t->host) t->host->join();
     }
-    if (fatal_) std::rethrow_exception(fatal_);
-    return exitCode_;
 }
 
 std::string Kernel::describeThreads() const {

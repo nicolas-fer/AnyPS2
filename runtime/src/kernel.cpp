@@ -340,6 +340,15 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
         case 0x3E: return ret32(static_cast<std::int32_t>(heapEnd_));  // EndOfHeap
         case 0x7F: return Memory::kRamSize;                            // GetMemorySize
         case 0x7D: return 0;                                           // PSMode
+        case 0x0B: case -0x0B:  // RemoveSbusIntcHandler(causa)
+            // O HLE não instala handlers de SBUS (AddSbusIntcHandler dá erro
+            // explícito); remover um que não existe não tem efeito. A
+            // sceSifExitCmd da Sony chama isto ao desligar o SIF.
+            return 0;
+        case 0x7C: case -0x7C:  // Deci2Call(função, parâmetros): depurador do kit de desenvolvimento
+            // Console de varejo: não há gerenciador DECI2 nem PC do kit; toda
+            // função (open/close/send/poll...) falha e a libdeci2 trata o erro.
+            return ret32(-1);
         case 0x7E: return 0;                                           // MachineType
         case 0x61: case 0x62: return 0;                                // Enable/DisableCache
         case 0x64: case -0x68: return 0;                               // FlushCache: não há cache a simular
@@ -635,7 +644,8 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
             return 0;
         case 0x50: case 0x51: case 0x52: case 0x53:
             notImplemented(number, pc, "o kernel do EE não implementa event flags de forma utilizável");
-        case 0x06: case 0x07: case 0x7B: case 0x87:
+        case 0x07: execPs2(c, pc);  // ExecPS2(entrada, gp, argc, argv)
+        case 0x06: case 0x7B: case 0x87:
             notImplemented(number, pc, "carregar outro executável não é suportado");
         default:
             return std::nullopt;

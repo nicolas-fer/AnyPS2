@@ -1,0 +1,1 @@
+pai: ExecPS2(0x100b20), semaforo 63

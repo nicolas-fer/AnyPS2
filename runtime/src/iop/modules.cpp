@@ -32,6 +32,10 @@ const std::vector<ModuleDef>& moduleTable() {
         {"audsrv", {"audsrv"}, {}},
         {"ioman", {"IO/File_Manager", "FILEIO_service"}, {"IOMAN", "FILEIO"}},
         {"eesync", {"SyncEE"}, {"EESYNC"}},
+        // Multitap: sem multitap conectado. Carregar é aceito (jogos carregam o
+        // módulo mesmo sem usá-lo); a RPC dele (libmtap, 0x800009xx) não existe,
+        // então quem tentar usá-la para com o erro de servidor inexistente.
+        {"mtapman", {"multitap_manager"}, {"MTAPMAN", "XMTAPMAN"}},
     };
     return kTable;
 }

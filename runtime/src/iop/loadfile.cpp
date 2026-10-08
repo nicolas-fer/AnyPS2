@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -53,9 +54,23 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
     } else {
         def = hleModuleForIrx(name);
         if (!def) {
+            // Exploração (desenvolvimento): aceita o módulo sem nenhum serviço, com
+            // aviso. Quem usar o RPC dele para no erro de servidor inexistente.
+            static const bool acceptMissing = [] {
+                const char* v = std::getenv("ANYPS2_IOP_ACCEPT_MISSING");
+                return v && *v && std::string(v) != "0";
+            }();
+            if (acceptMissing) {
+                std::fprintf(stderr,
+                             "[aviso] módulo IRX \"%s\" v%s (%s) aceito SEM implementação HLE "
+                             "(ANYPS2_IOP_ACCEPT_MISSING): os serviços dele não existem\n",
+                             name.c_str(), versionText(version).c_str(), origin.c_str());
+                return nextModuleId_++;
+            }
             throw Unimplemented("módulo IRX \"" + name + "\" v" + versionText(version) + " (" + origin +
                                     ") não tem implementação HLE — drivers próprios do jogo exigem "
-                                    "executar o código do IOP, ainda não suportado",
+                                    "executar o código do IOP, ainda não suportado (para explorar além "
+                                    "deste ponto: ANYPS2_IOP_ACCEPT_MISSING=1)",
                                 pc);
         }
     }

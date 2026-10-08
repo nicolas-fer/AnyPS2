@@ -194,6 +194,8 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_SCREENSHOT=arquivo.png` | grava a última imagem exibida ao terminar |
 | `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
+| `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; o RPC deles continua não existindo |
+| `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 
 ### Fase 1 — ELF e decodificador
 
@@ -286,6 +288,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
 | `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release) |
 | `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
+| `e2e_execps2`, `e2e_execps2_missing`, `cli_ram2elf` | boot que copia outro programa para a memória e chama `ExecPS2` (recompilado com `--extra`: argv e kernel zerado; sem `--extra`: erro claro), ELF sintético a partir da RAM |
 | `e2e_kpatch` | o que jogos comerciais fazem no boot: tabela de syscalls do kernel (FindAddress do programa, GetEntryAddress, redirecionamento, chamada por ponteiro), ERET nos dois modos, fileio do SDK 3.0 (cliente escrito a partir do protocolo), reboot do IOP na ordem da Sony, versões e `rom0:ROMVER` |
 | `disc`, `cli_disc` | triagem de discos: o `disc.iso` de teste (BOOT2 sem executável no disco) e um DVD-9 sintético (camada 1, IRX com e sem HLE, imagem IOPRP, executável com IRX embutidos e strings de módulos, overlay na camada 1) |
 | `e2e_pad`, `e2e_pad_rom`, `e2e_memcard`, `e2e_cdvd`, `e2e_cdvd_noiso`, `e2e_audio` | controles por roteiro (dois protocolos, mesma saída), memory card, disco a partir de `disc.iso` (e o erro sem ISO), som via `audsrv.irx` com o **WAV comparado byte a byte** |
@@ -310,7 +313,17 @@ anyps2 disasm-bin dump.bin --base 0x00100000
 anyps2 vu       jogo.elf --disasm        # microcódigo de VU encontrado no ELF
 anyps2 vu       vu1_0123abcd.bin         # ... ou num dump (ANYPS2_VU_DUMP)
 anyps2 disc     meu_dump.iso             # triagem do disco: o que o jogo usa e o que tem HLE
+anyps2 ram2elf  exec_00100008.ram --entry 0x100008 --text 0x100000 0x616f20                 --data 0x616f20 0x6d5d98 -o principal.elf   # programa que só existe na RAM
+anyps2 recomp   boot.elf --extra principal.elf -o saida/     # os dois no mesmo projeto
 ```
+
+Jogos costumam ter um executável de boot que descomprime o programa
+principal na memória e o executa com `ExecPS2`. O runtime executa o
+`ExecPS2` (o kernel recomeça do zero, a memória fica); para que o programa
+principal exista como código recompilado: rode uma vez com
+`ANYPS2_EXEC_DUMP=pasta` (a RAM é gravada no momento do `ExecPS2`), gere o
+ELF com `anyps2 ram2elf` nas faixas de código e dados e recompile o boot
+com `--extra`.
 
 `anyps2 disc` lê a imagem (as duas camadas de um DVD-9) sem extrair nada e
 mostra: o `SYSTEM.CNF` e o executável principal (tamanho, segmentos,
