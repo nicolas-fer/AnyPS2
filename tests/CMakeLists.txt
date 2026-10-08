@@ -11,9 +11,10 @@ add_executable(anyps2_tests
     unit/test_vu_isa.cpp
     unit/test_vu.cpp
     unit/test_iop.cpp
+    unit/test_disc.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
-target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu)
+target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu anyps2_disc)
 target_compile_definitions(anyps2_tests PRIVATE
     ANYPS2_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
     ANYPS2_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
@@ -24,7 +25,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs vu_isa vu iop)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs vu_isa vu iop disc)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
@@ -61,6 +62,8 @@ add_test(NAME vu_diff COMMAND anyps2_vu_diff)
 # Teste de fumaça da CLI.
 add_test(NAME cli_version COMMAND anyps2 --version)
 add_test(NAME cli_info_fixture COMMAND anyps2 info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello_r5900.elf)
+add_test(NAME cli_disc COMMAND anyps2 disc ${CMAKE_CURRENT_SOURCE_DIR}/homebrew/cdvd/disc.iso)
+set_tests_properties(cli_disc PROPERTIES PASS_REGULAR_EXPRESSION "BOOT2 = cdrom0:.AP2_000.00;1")
 add_test(NAME cli_disasm_fixture COMMAND anyps2 disasm ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello_r5900.elf)
 add_test(NAME cli_recomp_missing_output COMMAND anyps2 recomp x)
 set_tests_properties(cli_recomp_missing_output PROPERTIES WILL_FAIL TRUE)

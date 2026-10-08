@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "anyps2/runtime/iop/irx.h"
+
 namespace anyps2::rt {
 
 class Runtime;
@@ -170,13 +172,6 @@ private:
     std::map<std::int32_t, OpenFile> files_;
     std::int32_t nextFd_ = 3;
 };
-
-// Lê o cabeçalho .iopmod de um IRX: nome e versão do módulo.
-struct IrxInfo {
-    std::string name;
-    std::uint16_t version = 0;
-};
-std::optional<IrxInfo> parseIrx(const std::uint8_t* data, std::size_t size);
 
 // Helpers de serialização little-endian usados pelos servidores HLE.
 namespace iopio {

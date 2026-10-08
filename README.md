@@ -247,8 +247,12 @@ As divergências em relação ao binutils são intencionais e documentadas em
 Requisitos: CMake ≥ 3.20, um compilador C/C++20 (MSVC 2022, GCC ≥ 11 ou
 Clang ≥ 14) e **SDL2** (Linux: `libsdl2-dev`; no Windows o CMake baixa e
 compila o SDL2 automaticamente — `-DANYPS2_FETCH_SDL=ON`, padrão lá). Sem SDL:
-`-DANYPS2_WITH_SDL=OFF` (só modo sem janela). O build do Windows/MSVC está no
-CI mas não foi validado localmente.
+`-DANYPS2_WITH_SDL=OFF` (só modo sem janela). No Windows, o Visual Studio
+2022/2026 com a carga "Desenvolvimento para desktop com C++" basta: ele já traz
+o CMake (use o "Developer PowerShell" ou o `cmake.exe` de
+`Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`). Validado
+localmente com o VS Community 2026 (MSVC 14.50, CMake 4.2): build e todos os
+testes passando.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -279,6 +283,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
 | `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release) |
 | `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
+| `disc`, `cli_disc` | triagem de discos: o `disc.iso` de teste (BOOT2 sem executável no disco) e um DVD-9 sintético (camada 1, IRX com e sem HLE, imagem IOPRP, executável com IRX embutidos e strings de módulos, overlay na camada 1) |
 | `e2e_pad`, `e2e_pad_rom`, `e2e_memcard`, `e2e_cdvd`, `e2e_cdvd_noiso`, `e2e_audio` | controles por roteiro (dois protocolos, mesma saída), memory card, disco a partir de `disc.iso` (e o erro sem ISO), som via `audsrv.irx` com o **WAV comparado byte a byte** |
 
 O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
@@ -300,7 +305,17 @@ anyps2 disasm   jogo.elf --range 0x100000 0x100100 --mark-noncanonical
 anyps2 disasm-bin dump.bin --base 0x00100000
 anyps2 vu       jogo.elf --disasm        # microcódigo de VU encontrado no ELF
 anyps2 vu       vu1_0123abcd.bin         # ... ou num dump (ANYPS2_VU_DUMP)
+anyps2 disc     meu_dump.iso             # triagem do disco: o que o jogo usa e o que tem HLE
 ```
+
+`anyps2 disc` lê a imagem (as duas camadas de um DVD-9) sem extrair nada e
+mostra: o `SYSTEM.CNF` e o executável principal (tamanho, segmentos,
+símbolos); as strings `rom0:`/`cdrom0:`/`host:` do executável, cada uma com o
+que é (módulo da ROM com ou sem HLE, IRX do disco, imagem IOPRP, arquivo
+inexistente...); os IRX embutidos nele; cada IRX do disco com nome, versão e
+se tem implementação HLE; as imagens de módulos IOPRP (ROMDIR) com os módulos
+de dentro; outros ELFs do disco (overlays) e os maiores arquivos. É o primeiro
+passo com um jogo novo: diz de antemão quais drivers do IOP faltam.
 
 Exemplo (fixture `tests/fixtures/hello_r5900.elf`):
 

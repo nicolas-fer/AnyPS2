@@ -464,8 +464,19 @@ Limitações (honestas):
 - `mc0:` pelo fileio (fopen) não é suportado — só pelo libmc.
 - Multitap, mouse/teclado USB, rede e HDD não existem (erro claro no bind).
 
-## Fase 7 — Primeiro jogo comercial ⬜
+## Fase 7 — Primeiro jogo comercial 🔜
 
+- ✅ Build MSVC validado localmente (VS Community 2026, MSVC 14.50): compila
+  e todos os testes passam. Corrigido: o teste `codegen.project_files_and_image`
+  apagava a pasta com arquivos ainda abertos (o Windows não deixa).
+- ✅ `anyps2 disc <imagem.iso>`: triagem do disco (SYSTEM.CNF, executável
+  principal, strings `rom0:`/`cdrom0:`/`host:`, IRX embutidos e do disco com
+  nome/versão/HLE, imagens IOPRP, outros ELFs, maiores arquivos). A tabela de
+  módulos com HLE, o ISO 9660 e o cabeçalho IRX viraram uma biblioteca
+  pequena (`anyps2_iopfmt`) que a CLI usa sem puxar o runtime inteiro.
+- ✅ ISO 9660: DVDs de camada dupla (DVD-9) — o volume da camada 1 é achado e
+  seus arquivos têm LSN absoluto. (O `sceCdLayerSearchFile` do libcdvd, que
+  busca na camada 1, ainda não existe no HLE.)
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.
 - ⬜ Lista de compatibilidade (`docs/COMPATIBILIDADE.md`) com status por jogo.

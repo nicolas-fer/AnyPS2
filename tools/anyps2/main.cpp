@@ -2,6 +2,8 @@
 //
 // Fase 1: inspeção de ELF e desmontagem do código R5900.
 // Fase 2+: "anyps2 recomp" gera o projeto C++/CMake a partir do ELF.
+// Fase 7: "anyps2 disc" faz a triagem de um disco (o que o jogo usa e o que
+// disso já tem HLE).
 
 #include <algorithm>
 #include <cctype>
@@ -27,6 +29,7 @@
 #include "anyps2/r5900/disassembler.h"
 #include "anyps2/vu/isa.h"
 #include "anyps2/vu/scan.h"
+#include "disc.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -79,6 +82,13 @@ Uso:
 
   anyps2 vu-gen <arquivo.elf | dump.bin> -o <diretório> [--table NOME]
       Gera só o C++ do microcódigo (vu_NNN.cpp + vu_programs.cpp).
+
+  anyps2 disc <imagem.iso>
+      Triagem de um disco de PS2 (dump próprio): executável principal pelo
+      SYSTEM.CNF (tamanho, segmentos), módulos do IOP que ele referencia
+      (rom0:/cdrom0:/host:) e IRX embutidos, cada IRX e imagem IOPRP do
+      disco com nome, versão e se tem HLE no AnyPS2, e outros ELFs (overlays).
+      Lê as duas camadas de DVDs de camada dupla. Não extrai nada.
 
   anyps2 --version | --help
 )";
@@ -484,6 +494,12 @@ int cmdRecomp(const std::vector<std::string_view>& args) {
     return 0;
 }
 
+int cmdDisc(const std::vector<std::string_view>& args) {
+    if (args.size() != 1) throw Error("uso: anyps2 disc <imagem.iso>");
+    anyps2::disc::print(anyps2::disc::triage(std::string(args[0])), std::cout);
+    return 0;
+}
+
 int run(int argc, char** argv) {
     if (argc < 2) {
         printUsage();
@@ -506,6 +522,7 @@ int run(int argc, char** argv) {
     if (cmd == "recomp") return cmdRecomp(args);
     if (cmd == "vu") return cmdVu(args);
     if (cmd == "vu-gen") return cmdVuGen(args);
+    if (cmd == "disc") return cmdDisc(args);
     throw Error("comando desconhecido '" + std::string(cmd) + "' (use --help)");
 }
 

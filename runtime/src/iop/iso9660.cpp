@@ -1,14 +1,15 @@
 // Leitura de imagens ISO 9660 (ECMA-119): volume primário no setor 16,
 // registros de diretório {len, extlen, lba LE@2, size LE@10, data@18,
-// flags@25, namelen@32, nome@33}.
+// flags@25, namelen@32, nome@33}. DVD-9: segundo volume na camada 1.
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <utility>
 
 #include "anyps2/common/error.h"
-#include "anyps2/runtime/iop/cdvd.h"
+#include "anyps2/runtime/iop/iso9660.h"
 
 namespace anyps2::rt {
 
@@ -91,6 +92,33 @@ void IsoImage::open(const std::string& path) {
     readSectors(16, 1, pvd);
     root_ = parseRecord(pvd + 156);
     root_.name = "\\";
+    volumeId_.assign(reinterpret_cast<const char*>(pvd + 40), 32);
+    while (!volumeId_.empty() && volumeId_.back() == ' ') volumeId_.pop_back();
+    layer1Base_.reset();
+    findLayer1(le32(pvd + 80));
+}
+
+// O volume da camada 0 declara só o tamanho dela (volume space size); se a
+// imagem continua depois disso, procura o descritor primário da camada 1.
+// Discos de PS2 gravam a base da camada 1 16 setores antes do fim do volume
+// 0 (descritor exatamente no fim dele); a outra posição plausível é logo
+// depois. A base só é aceita se o "." da raiz apontar para a própria raiz.
+void IsoImage::findLayer1(std::uint32_t volumeSpace) {
+    if (volumeSpace < 32 || volumeSpace >= sectors_) return;
+    for (const std::uint32_t base : {volumeSpace - 16, volumeSpace}) {
+        std::uint8_t pvd[kSectorSize];
+        if (!readSectors(base + 16, 1, pvd)) continue;
+        if (pvd[0] != 1 || std::memcmp(pvd + 1, "CD001", 5) != 0) continue;
+        Entry r = parseRecord(pvd + 156);
+        std::uint8_t dir[kSectorSize];
+        if (!r.isDir || !readSectors(base + r.lsn, 1, dir) || dir[0] < 34 || le32(dir + 2) != r.lsn) continue;
+        r.lsn += base;
+        r.layer = 1;
+        r.name = "\\";
+        root1_ = r;
+        layer1Base_ = base;
+        return;
+    }
 }
 
 bool IsoImage::readSectors(std::uint32_t lsn, std::uint32_t count, std::uint8_t* dst) {
@@ -139,16 +167,21 @@ std::vector<IsoImage::Entry> IsoImage::list(const Entry& dir) {
             if (len < 34 || off + len > end) break;
             const std::uint8_t namelen = data[off + 32];
             const bool dotEntry = namelen == 1 && (data[off + 33] == 0 || data[off + 33] == 1);
-            if (!dotEntry) out.push_back(parseRecord(data.data() + off));
+            if (!dotEntry) {
+                Entry e = parseRecord(data.data() + off);
+                if (dir.layer == 1) e.lsn += *layer1Base_;
+                e.layer = dir.layer;
+                out.push_back(std::move(e));
+            }
             off += len;
         }
     }
     return out;
 }
 
-std::optional<IsoImage::Entry> IsoImage::lookup(const std::string& path) {
-    if (!fp_) return std::nullopt;
-    Entry cur = root_;
+std::optional<IsoImage::Entry> IsoImage::lookup(const std::string& path, unsigned layer) {
+    if (!fp_ || layer >= layerCount()) return std::nullopt;
+    Entry cur = root(layer);
     std::size_t pos = 0;
     while (pos < path.size()) {
         while (pos < path.size() && (path[pos] == '\\' || path[pos] == '/')) ++pos;

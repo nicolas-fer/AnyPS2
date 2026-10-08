@@ -9,6 +9,21 @@ else()
 endif()
 option(ANYPS2_FETCH_SDL "Baixa e compila o SDL2 se ele não for encontrado no sistema" ${_anyps2_fetch_default})
 
+# Formatos de disco e de módulos do IOP (ISO 9660, cabeçalho IRX, tabela de
+# módulos com HLE), sem o resto do runtime: a CLI ("anyps2 disc") também usa.
+add_library(anyps2_iopfmt STATIC
+    src/iop/iso9660.cpp
+    src/iop/irx.cpp
+    src/iop/modules.cpp
+)
+add_library(anyps2::iopfmt ALIAS anyps2_iopfmt)
+target_include_directories(anyps2_iopfmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(anyps2_iopfmt PUBLIC anyps2::common)
+target_compile_features(anyps2_iopfmt PUBLIC cxx_std_20)
+if(COMMAND anyps2_set_warnings)
+    anyps2_set_warnings(anyps2_iopfmt)
+endif()
+
 add_library(anyps2_runtime STATIC
     src/memory.cpp
     src/ops.cpp
@@ -18,12 +33,10 @@ add_library(anyps2_runtime STATIC
     src/host_thread.cpp
     src/hardware.cpp
     src/iop/iop.cpp
-    src/iop/irx.cpp
     src/iop/loadfile.cpp
     src/iop/pad.cpp
     src/iop/mcserv.cpp
     src/iop/cdvd.cpp
-    src/iop/iso9660.cpp
     src/iop/spu2.cpp
     src/iop/audsrv.cpp
     src/audio.cpp
@@ -40,7 +53,7 @@ add_library(anyps2_runtime STATIC
 )
 add_library(anyps2::runtime ALIAS anyps2_runtime)
 target_include_directories(anyps2_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(anyps2_runtime PUBLIC anyps2::common anyps2::vu)
+target_link_libraries(anyps2_runtime PUBLIC anyps2::common anyps2::vu anyps2::iopfmt)
 target_compile_features(anyps2_runtime PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(anyps2_runtime PUBLIC Threads::Threads)

@@ -1,4 +1,5 @@
-// Servidor loadfile (0x80000006) e a tabela de módulos do IOP em HLE.
+// Servidor loadfile (0x80000006). A tabela de módulos com HLE fica em
+// modules.cpp.
 //
 // SifLoadModule("rom0:PADMAN"), SifLoadModule("host:audsrv.irx") e
 // SifExecModuleBuffer(irx embutido no ELF) chegam aqui. O módulo é
@@ -6,7 +7,6 @@
 // e "carregar" significa registrar os servidores RPC da implementação HLE.
 
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -36,50 +36,6 @@ constexpr std::int32_t kKeUnknownModule = -202;
 constexpr std::int32_t kKeFileError = -203;
 constexpr std::int32_t kKeIllegalObject = -205;
 
-// Implementações HLE. `irx` são os nomes que aparecem no cabeçalho dos IRX
-// (ps2sdk e SCE); `rom` são os arquivos de rom0: do console.
-struct ModuleDef {
-    const char* hle;
-    std::vector<std::string> irx;
-    std::vector<std::string> rom;
-};
-const std::vector<ModuleDef>& moduleTable() {
-    static const std::vector<ModuleDef> kTable = {
-        {"sio2man", {"sio2man"}, {"SIO2MAN", "XSIO2MAN"}},
-        {"padman", {"padman"}, {"XPADMAN"}},
-        {"padman-rom", {}, {"PADMAN"}},
-        {"mcman", {"mcman_cex", "mcman"}, {"MCMAN", "XMCMAN"}},
-        {"mcserv", {"mcserv"}, {"MCSERV", "XMCSERV"}},
-        {"cdvdman", {"cdvd_driver"}, {"CDVDMAN"}},
-        {"cdvdfsv", {"cdvd_ee_driver"}, {"CDVDFSV"}},
-        {"libsd", {"freesd", "libsd"}, {"LIBSD"}},
-        {"clearspu", {"clearspu"}, {"CLEARSPU"}},
-        {"audsrv", {"audsrv"}, {}},
-        {"ioman", {"IO/File_Manager", "FILEIO_service"}, {"IOMAN", "FILEIO"}},
-        {"eesync", {"SyncEE"}, {"EESYNC"}},
-    };
-    return kTable;
-}
-
-const ModuleDef* findByIrxName(const std::string& name) {
-    for (const auto& m : moduleTable()) {
-        for (const auto& n : m.irx) {
-            if (n == name) return &m;
-        }
-    }
-    return nullptr;
-}
-
-// "rom0:XPADMAN" / "rom0:PADMAN.IRX" → "XPADMAN"
-std::string romName(const std::string& path) {
-    std::string n = path.substr(path.find(':') + 1);
-    while (!n.empty() && (n[0] == '/' || n[0] == '\\')) n.erase(0, 1);
-    const auto dot = n.find('.');
-    if (dot != std::string::npos) n.resize(dot);
-    for (char& c : n) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return n;
-}
-
 std::string versionText(std::uint16_t v) {
     return std::to_string(v >> 8) + "." + std::to_string(v & 0xFF);
 }
@@ -88,19 +44,14 @@ std::string versionText(std::uint16_t v) {
 
 std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, const std::string& origin,
                              std::uint32_t pc) {
-    const ModuleDef* def = nullptr;
+    const char* def = nullptr;
     if (origin.rfind("rom0:", 0) == 0 || origin.rfind("rom1:", 0) == 0) {
-        const std::string rom = romName(origin);
-        for (const auto& m : moduleTable()) {
-            for (const auto& r : m.rom) {
-                if (r == rom) def = &m;
-            }
-        }
+        def = hleModuleForRom(origin);
         if (!def) {
             throw Unimplemented("módulo do IOP " + origin + " (ROM do console) não tem implementação HLE", pc);
         }
     } else {
-        def = findByIrxName(name);
+        def = hleModuleForIrx(name);
         if (!def) {
             throw Unimplemented("módulo IRX \"" + name + "\" v" + versionText(version) + " (" + origin +
                                     ") não tem implementação HLE — drivers próprios do jogo exigem "
@@ -108,7 +59,7 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
                                 pc);
         }
     }
-    const std::string hle = def->hle;
+    const std::string hle = def;
     if (rt_.options().traceIop) {
         std::fprintf(stderr, "[iop] módulo %s (%s) → HLE %s\n", name.c_str(), origin.c_str(), hle.c_str());
     }
@@ -150,7 +101,7 @@ void Iop::registerLoadfile() {
             case LF_F_MG_MOD_LOAD: {  // _lf_module_load_arg: {arg_len, modres, path[252], args[252]}
                 const std::string path = cstr(in, 8, 252);
                 if (path.rfind("rom0:", 0) == 0 || path.rfind("rom1:", 0) == 0) {
-                    return reply(loadModule(romName(path), 0, path, pc), 0);
+                    return reply(loadModule(romModuleName(path), 0, path, pc), 0);
                 }
                 const auto data = readDeviceFile(path, pc);
                 if (!data) return reply(kKeFileError, 0);
@@ -172,8 +123,8 @@ void Iop::registerLoadfile() {
             }
             case LF_F_SEARCH_MOD_BY_NAME: {  // {id, dummy, name[252], ...}
                 const std::string name = cstr(in, 8, 252);
-                const ModuleDef* def = findByIrxName(name);
-                const bool found = def && loaded_.count(def->hle);
+                const char* def = hleModuleForIrx(name);
+                const bool found = def && loaded_.count(def);
                 wr32(out, 0, static_cast<std::uint32_t>(found ? 1 : kKeUnknownModule));
                 return out;
             }

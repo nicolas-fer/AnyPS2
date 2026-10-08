@@ -6,9 +6,9 @@
 // `moduleinfo` aponta (endereços relativos à base 0 do módulo).
 
 #include <cstring>
+#include <vector>
 
-#include "anyps2/common/bytes.h"
-#include "anyps2/runtime/iop/iop.h"
+#include "anyps2/runtime/iop/irx.h"
 
 namespace anyps2::rt {
 
