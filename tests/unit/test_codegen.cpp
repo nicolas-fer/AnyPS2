@@ -131,6 +131,9 @@ TEST_CASE(codegen, project_files_and_image) {
     std::string programCpp((std::istreambuf_iterator<char>(prog)), std::istreambuf_iterator<char>());
     CHECK(contains(programCpp, "\"strlen_simple\""));
     CHECK(contains(programCpp, "runProgram(kProgram, argc, argv)"));
+    // No Windows não dá para apagar arquivos ainda abertos.
+    in.close();
+    prog.close();
     fs::remove_all(out);
 }
 

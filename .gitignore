@@ -6,3 +6,6 @@
 CMakeUserPresets.json
 *.swp
 __pycache__/
+
+# dumps e saídas de jogos do usuário — nunca versionar
+/jogos/
