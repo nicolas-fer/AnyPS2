@@ -201,8 +201,9 @@ SetGsCrt com modo PAL relevante).
   comandos BCLR, FDEC, SETIQ, SETVQ e SETTH; comando sem dados suficientes
   fica ocupado e continua quando o FIFO recebe mais. DMA toIPU (normal e
   chain) sob demanda: enche o FIFO e pausa com STR ligado; cada quadword
-  consumido puxa mais. Faltam IDEC/BDEC/VDEC/CSC/PACK (decodificação
-  MPEG-2), o FIFO de saída e o DMA fromIPU.
+  consumido puxa mais. VDEC (as 4 tabelas) e BDEC (macrobloco em RAW16)
+  reiniciáveis; FIFO de saída e DMA fromIPU. Faltam IDEC, CSC e PACK, e o
+  MPEG-1 no BDEC.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -255,7 +256,7 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, decodificação do IPU e o DMA fromIPU, espera de PATH3 mascarado,
+  interleave, IDEC/CSC/PACK do IPU, espera de PATH3 mascarado,
   `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
@@ -668,10 +669,28 @@ Marco 7 — o vídeo de abertura (em andamento):
   cabeçalhos (sequence/GOP/picture) com FDEC e pede o primeiro **VDEC**
   (tipo de macrobloco): o caminho é VDEC + BDEC por macrobloco, com a
   compensação de movimento em software no EE.
-- Próximos passos: VDEC (as 4 tabelas), BDEC (VLC dos coeficientes,
-  quantização inversa, IDCT, saída RAW16), FIFO de saída e DMA fromIPU;
-  depois CSC/IDEC se o jogo pedir. O som continua mudo (pdispu2/rt_ac
-  exigem executar o código do IOP).
+- ✅ IPU, etapa 3: **VDEC e BDEC**. Tabelas de comprimento variável do
+  anexo B escritas da norma, como os códigos aparecem nela, e conferidas
+  entrada por entrada contra outra implementação (todas batem); consulta
+  direta por tabela. VDEC devolve valor | (bits << 16) com as
+  particularidades do IPU (escape/stuffing do MBAI = 0x23/0x22, tipo de
+  macrobloco com frame_motion_type = quadro, sinal do motion_code
+  engolindo o comprimento). BDEC: DC com predição (DCR), coeficientes
+  pelas tabelas zero/um, escape de 12 bits, quantização inversa como o IPU
+  (matriz indexada pela posição na varredura, saturação em ±2048, sem
+  mismatch control), varredura zigue-zague ou alternada, DCT de quadro ou
+  de campo, IDCT de referência em precisão dupla; saída RAW16 (intra
+  0–255, não intra o resíduo); depois do macrobloco, start code à frente
+  liga SCD. Comandos reiniciáveis: sem dados no meio, voltam ao começo e
+  devolvem os quadwords ao FIFO. Saída numa fila (OFC até 8; o comando
+  só termina quando o resto cabe no FIFO) e **DMA fromIPU** (modo normal,
+  pausa até haver saída). Testes `ipu.mpeg_*`, `ipu.vdec_tables_and_top`
+  e `ipu.bdec_*`.
+- Onde o GT4 está: decodifica a primeira imagem do vídeo (VDEC + BDEC por
+  macrobloco, compensação de movimento no EE) e pede o **CSC**
+  (YCbCr → RGB32 de 768 macroblocos).
+- Próximos passos: CSC (e PACK/IDEC se o jogo pedir). O som continua mudo
+  (pdispu2/rt_ac exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

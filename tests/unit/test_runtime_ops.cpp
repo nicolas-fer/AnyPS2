@@ -352,8 +352,8 @@ TEST_CASE(runtime_ops, hardware_registers) {
     // Desconhecido: erro com endereço
     CHECK_THROWS_WITH(m.read<std::uint32_t>(0x1000A700, 0x500), "desconhecido 0x1000A700");
     CHECK_THROWS_WITH(m.write<std::uint32_t>(0x1000F7F0, 1, 0x504), "0x1000F7F0");
-    // DMA em canal ainda não suportado (IPU): erro dizendo o canal
-    CHECK_THROWS_WITH(m.write<std::uint32_t>(0x1000B000, 0x100, 0x508), "fromIPU");
+    // DMA em canal ainda não suportado (SIF2 por registradores): erro dizendo o canal
+    CHECK_THROWS_WITH(m.write<std::uint32_t>(0x1000C800, 0x100, 0x508), "SIF2");
     // Espelho uncached dos registradores (0xB0000000 = kseg1)
     CHECK_EQ(m.read<std::uint32_t>(0xB2001010, 0), 0x7F00u);
 }

@@ -17,7 +17,7 @@ class Runtime;
 //
 // Suportado: modo normal e chain de origem (refe/cnt/next/ref/refs/call/
 // ret/end, com TTE para os VIFs, IRQ+TIE, pilha ASR0/ASR1) nos canais VIF0,
-// VIF1, GIF, toIPU e toSPR; modo normal no fromSPR. fromIPU, SIF por
+// VIF1, GIF, toIPU e toSPR; modo normal no fromSPR e no fromIPU. SIF por
 // registradores, MFIFO, interleave e VIF1→memória lançam erro dizendo o que
 // faltou.
 //
@@ -25,7 +25,8 @@ class Runtime;
 // canal pausa no ponto exato (MADR/QWC/TADR, STR continua ligado) e só
 // continua quando o VIF for liberado (resumeChannel, chamado pelo VIF). O
 // toIPU (normal e chain) é sob demanda: enche o FIFO do IPU e pausa; o IPU
-// chama resumeChannel a cada quadword que consome.
+// chama resumeChannel a cada quadword que consome. O fromIPU leva o que o IPU
+// já produziu e pausa até ele produzir mais.
 class Dmac {
 public:
     static constexpr unsigned kChannels = 10;

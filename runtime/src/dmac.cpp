@@ -17,7 +17,7 @@ namespace {
 
 constexpr std::uint32_t kBase[Dmac::kChannels] = {0x10008000, 0x10009000, 0x1000A000, 0x1000B000, 0x1000B400,
                                                   0x1000C000, 0x1000C400, 0x1000C800, 0x1000D000, 0x1000D400};
-constexpr unsigned kVif0 = 0, kVif1 = 1, kGif = 2, kToIpu = 4, kFromSpr = 8, kToSpr = 9;
+constexpr unsigned kVif0 = 0, kVif1 = 1, kGif = 2, kFromIpu = 3, kToIpu = 4, kFromSpr = 8, kToSpr = 9;
 
 constexpr std::uint32_t kChcrDir = 1u << 0, kChcrTte = 1u << 6, kChcrTie = 1u << 7, kChcrStr = 1u << 8;
 constexpr unsigned kIntcDmac = 1;
@@ -272,9 +272,12 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
         case kFromSpr:
             if (mod != 0) throw Unimplemented("DMA fromSPR em modo chain/interleave ainda não suportado", pc);
             break;
+        case kFromIpu:
+            if (mod != 0) throw Unimplemented("DMA fromIPU em modo chain/interleave (o hardware só tem o normal)", pc);
+            break;
         default:
             throw Unimplemented(std::string("DMA no canal ") + channelName(ch) +
-                                    " (os programas do ps2sdk usam as syscalls de SIF; IPU chega com MPEG)",
+                                    " (os programas do ps2sdk usam as syscalls de SIF)",
                                 pc);
     }
     // Começo (não retomada) de uma cadeia com QWC já escrito: o tag em CHCR
@@ -307,6 +310,18 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
 
 bool Dmac::runNormal(unsigned ch, std::uint32_t pc) {
     Channel& c = ch_[ch];
+    if (ch == kFromIpu) {
+        // Leva o que o IPU já produziu; com QWC sobrando, o canal fica pausado
+        // até o IPU produzir mais (ele chama resumeChannel).
+        while (c.qwc > 0 && rt_.ipu().outputCount() > 0) {
+            std::uint8_t qw[16];
+            rt_.ipu().fifoRead(qw, pc);
+            std::memcpy(hostAddress(c.madr, 1, ch, pc), qw, 16);
+            c.madr += 16;
+            --c.qwc;
+        }
+        return c.qwc == 0;
+    }
     if (ch == kFromSpr) {
         if (c.sadr + c.qwc * 16 > Memory::kScratchpadSize) {
             throw GuestError("DMA fromSPR passa do fim do scratchpad (SADR " + anyps2::hex(c.sadr) + ")", pc);
