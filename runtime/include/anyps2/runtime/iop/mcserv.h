@@ -14,7 +14,8 @@ class Iop;
 
 // mcman/mcserv em HLE (libmc: RPC 0x80000400, numeração XMCSERV e a do
 // MCSERV antigo). Os memory cards são diretórios do host:
-//   $ANYPS2_MC_DIR/mc0 e mc1 (padrão: $ANYPS2_HOST_DIR/memcard)
+//   <pasta>/mc0 e mc1, com <pasta> = ANYPS2_MC_DIR ou [memcard] dir do
+//   arquivo de configuração (padrão: $ANYPS2_HOST_DIR/memcard)
 // O sistema de arquivos do cartão (FAT próprio da Sony, clusters de 1 KB,
 // 8 MB) não é emulado em nível de bloco: arquivos e pastas do cartão são
 // arquivos e pastas do host. O espaço livre é calculado como no cartão de

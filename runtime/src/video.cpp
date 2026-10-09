@@ -202,7 +202,7 @@ std::unique_ptr<Video> createVideo(const RuntimeOptions& options, const std::str
         throw anyps2::Error("ANYPS2_VIDEO='" + options.video + "' inválido (use sdl ou none)");
     }
     std::string error;
-    if (auto v = createSdlVideo(title, options.video.empty(), input, error)) return v;
+    if (auto v = createSdlVideo(options, title, input, error)) return v;
     if (options.video == "sdl") throw anyps2::Error("não foi possível abrir a janela: " + error);
     return std::make_unique<HeadlessVideo>();
 }

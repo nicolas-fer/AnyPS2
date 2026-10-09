@@ -204,6 +204,78 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
 | `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes no fim; também mede o tempo do host por parte (EE, GIF, GS, VU0, VU1, IPU — exclusivo: um desenho disparado pelo VU1 conta para o GS) e imprime, a cada 500 VBlanks, a velocidade, a divisão do tempo e os pares de VU compilados × interpretados |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
+| `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
+| `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |
+| `ANYPS2_MC_DIR=dir` | pasta dos memory cards `mc0` e `mc1` (padrão: `$ANYPS2_HOST_DIR/memcard`) |
+| `ANYPS2_ISO=arquivo` | imagem do disco (ver Fase 6) |
+| `ANYPS2_AUDIO=sdl|none` e `ANYPS2_AUDIO_WAV=arquivo.wav` | saída de som (ver Fase 6) |
+
+### Arquivo de configuração (anyps2.ini)
+
+Teclado, controle, memory card, disco, vídeo e som podem ficar num arquivo
+INI, sem depender de variáveis de ambiente. A prioridade é: **variável de
+ambiente > arquivo > padrão**; sem arquivo, vale o padrão de sempre. O
+arquivo é `ANYPS2_CONFIG` ou, sem ela, `anyps2.ini` ao lado do executável (não do
+diretório atual: assim um `anyps2.ini` solto em outra pasta não muda nada; se
+`ANYPS2_CONFIG` apontar para um arquivo que não existe, é erro). Caminhos são
+relativos ao diretório atual e `~` não é expandido. Linhas com `#` ou `;`
+são comentários.
+
+```ini
+[memcard]
+dir = C:cartoes          # mc0 e mc1 dentro desta pasta
+
+[disc]
+iso = C:jogosgt4.iso
+
+[video]
+mode = sdl                 # sdl, none ou auto (janela se houver display)
+scale = 2                  # 1 a 4
+
+[audio]
+mode = auto                # sdl, none ou auto
+wav =                      # vazio = sem gravação em WAV
+
+[keyboard.1]               # teclado da porta 1: botão = tecla do SDL
+cross = Z
+start = Return
+
+[gamepad.1]                # controle da porta 1: botão ou eixo do SDL
+cross = a
+l2 = lefttrigger
+lx = leftx                 # analógicos: lx ly rx ry (só no controle)
+
+[gamepad.2]                # porta 2: só o controle (o teclado é por seção
+                           # [keyboard.2], vazia por padrão)
+```
+
+Os botões são `select l3 r3 start up right down left l2 r2 l1 r1 triangle
+circle cross square`. As teclas são os nomes do SDL (`Z`, `Up`, `Return`,
+`Left Shift`, `1`); os botões do controle, os nomes de `SDL_GameControllerButton`
+(`a`, `b`, `x`, `y`, `back`, `start`, `leftstick`, `dpup`, `leftshoulder`…) e os
+eixos (`leftx`, `lefty`, `rightx`, `righty`, `lefttrigger`, `righttrigger`). Um
+gatilho ligado a um botão vira digital acima de um limiar. Um eixo ligado a um
+botão digital aceita sentido: `+leftx` (só para a direita/cima) ou `-leftx`
+(só para a esquerda/baixo); sem sinal, aciona nos dois sentidos. Analógicos não
+aceitam sinal. Valor vazio desliga a
+ligação. Nome de tecla, botão ou eixo desconhecido é erro com arquivo, linha, seção e
+chave, como qualquer erro de sintaxe (o programa para antes de abrir a janela),
+por exemplo `anyps2.ini:3: valor inválido para [video] scale: 9 (use um número de 1 a 4)`.
+
+#### Menu de configuração (F1)
+
+Dentro da janela, **F1** abre o menu (Dear ImGui): as ligações de teclado e de
+controle de cada porta (clique numa ligação e aperte a tecla ou o botão; Esc
+cancela; "Limpar" desliga), janela e som, pasta dos cartões e imagem do disco.
+Com o menu aberto o jogo recebe o controle neutro. **Salvar anyps2.ini** grava
+o arquivo usado (`ANYPS2_CONFIG` ou o `anyps2.ini` ao lado do executável; se
+nenhum existir, cria o ao lado do executável). Janela e som só valem na próxima
+execução. Os nomes gravados são os do SDL, então o arquivo pode ser editado à
+mão depois.
+
+Dear ImGui é baixado pelo CMake com a versão fixada (`ANYPS2_FETCH_IMGUI`,
+padrão ligado no Windows) ou vem de `-DANYPS2_IMGUI_DIR=<pasta>`. Só existe com
+`ANYPS2_WITH_SDL=ON`.
 
 ### Fase 1 — ELF e decodificador
 

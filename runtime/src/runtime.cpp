@@ -10,6 +10,7 @@
 
 #include "anyps2/common/bytes.h"
 #include "anyps2/runtime/audio.h"
+#include "anyps2/runtime/config.h"
 #include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/generated.h"
@@ -34,29 +35,7 @@
 namespace anyps2::rt {
 
 RuntimeOptions RuntimeOptions::fromEnvironment() {
-    RuntimeOptions o;
-    if (const char* t = std::getenv("ANYPS2_TRACE")) {
-        const std::string s(t);
-        o.traceSyscalls = s.find("syscall") != std::string::npos || s == "all";
-        o.traceCalls = s.find("call") != std::string::npos || s == "all";
-        o.traceHardware = s.find("hw") != std::string::npos || s == "all";
-        o.traceIop = s.find("iop") != std::string::npos || s == "all";
-        o.traceGs = s.find("gs") != std::string::npos || s == "all";
-        o.traceThreads = s.find("threads") != std::string::npos || s == "all";
-    }
-    if (const char* clock = std::getenv("ANYPS2_CLOCK")) o.virtualClock = std::string(clock) == "virtual";
-    if (const char* p = std::getenv("ANYPS2_PROFILE")) o.profile = *p && std::string(p) != "0";
-    if (const char* v = std::getenv("ANYPS2_VIDEO")) o.video = v;
-    if (const char* shot = std::getenv("ANYPS2_SCREENSHOT")) o.screenshot = shot;
-    if (const char* n = std::getenv("ANYPS2_SCREENSHOT_EVERY")) o.screenshotEvery = std::strtoull(n, nullptr, 10);
-    if (const char* v = std::getenv("ANYPS2_VU")) o.vuMode = v;
-    if (const char* d = std::getenv("ANYPS2_VU_DUMP")) o.vuDumpDir = d;
-    if (const char* n = std::getenv("ANYPS2_FRAMES")) o.frames = std::strtoull(n, nullptr, 10);
-    if (const char* v = std::getenv("ANYPS2_ISO")) o.iso = v;
-    if (const char* v = std::getenv("ANYPS2_PAD_SCRIPT")) o.padScript = v;
-    if (const char* v = std::getenv("ANYPS2_AUDIO")) o.audio = v;
-    if (const char* v = std::getenv("ANYPS2_AUDIO_WAV")) o.audioWav = v;
-    return o;
+    return resolveOptions([](const char* name) -> const char* { return std::getenv(name); }, defaultConfigPath());
 }
 
 Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
