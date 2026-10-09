@@ -270,7 +270,7 @@ void registerPdiStr(Iop& iop) {
                     }
                     if (size && toSpu) {
                         if (!iop.spu2().writeRam(dest, buf.data(), size)) {
-                            throw GuestError("pdistr: " + std::to_string(size) + " bytes para o endereço 0x" +
+                            throw GuestError("pdistr: " + std::to_string(size) + " bytes para o endereço " +
                                                  anyps2::hex(dest) + " passam dos 2 MB da RAM do SPU2",
                                              pc);
                         }

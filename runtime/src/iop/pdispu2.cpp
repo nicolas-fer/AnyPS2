@@ -223,7 +223,7 @@ void registerPdiSpu2(Iop& iop) {
             case 2: {  // {endereço no SPU2, endereço no EE, bytes}
                 const std::uint32_t spuAddr = rd32(in, 0), eeAddr = rd32(in, 4), size = rd32(in, 8);
                 if (std::uint64_t{spuAddr} + size > Spu2::kRamSize) {
-                    throw GuestError("pdispu2: transferência de " + std::to_string(size) + " bytes no endereço 0x" +
+                    throw GuestError("pdispu2: transferência de " + std::to_string(size) + " bytes no endereço " +
                                          anyps2::hex(spuAddr) + " passa dos 2 MB da RAM do SPU2",
                                      pc);
                 }

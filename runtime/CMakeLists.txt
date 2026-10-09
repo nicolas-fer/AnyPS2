@@ -96,7 +96,8 @@ if(ANYPS2_WITH_SDL)
             set(SDL_STATIC ON CACHE BOOL "" FORCE)
             set(SDL_TEST OFF CACHE BOOL "" FORCE)
             FetchContent_Declare(anyps2_sdl2
-                URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz)
+                URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz
+                URL_HASH SHA256=24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4)
             FetchContent_MakeAvailable(anyps2_sdl2)
         else()
             message(FATAL_ERROR
@@ -122,7 +123,8 @@ if(ANYPS2_WITH_SDL)
     elseif(ANYPS2_FETCH_IMGUI)
         include(FetchContent)
         FetchContent_Declare(anyps2_imgui
-            URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.9.tar.gz)
+            URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.9.tar.gz
+            URL_HASH SHA256=04943919721e874ac75a2f45e6eb6c0224395034667bf508923388afda5a50bf)
         FetchContent_MakeAvailable(anyps2_imgui)
         set(_anyps2_imgui_src ${anyps2_imgui_SOURCE_DIR})
     else()
@@ -138,7 +140,7 @@ if(ANYPS2_WITH_SDL)
         ${_anyps2_imgui_src}/backends/imgui_impl_sdl2.cpp
         ${_anyps2_imgui_src}/backends/imgui_impl_sdlrenderer2.cpp)
     # SYSTEM: os avisos de estilo (-Wold-style-cast etc.) são do ImGui, não nossos.
-target_include_directories(anyps2_imgui SYSTEM PUBLIC ${_anyps2_imgui_src} ${_anyps2_imgui_src}/backends)
+    target_include_directories(anyps2_imgui SYSTEM PUBLIC ${_anyps2_imgui_src} ${_anyps2_imgui_src}/backends)
     target_link_libraries(anyps2_imgui PUBLIC ${_anyps2_sdl_target})
     target_link_libraries(anyps2_runtime PRIVATE anyps2_imgui)
 else()
