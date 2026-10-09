@@ -62,6 +62,7 @@ private:
     void command(std::uint32_t w, std::uint32_t pc);
     void unpackWord(std::uint32_t w, std::uint32_t pc);
     void writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t pc);
+    void writeFillVectors(std::uint32_t pc);
     std::uint8_t* dataMem() const;
     std::uint32_t dataSize() const;
     std::uint8_t* microMem() const;
@@ -74,6 +75,9 @@ private:
 
     State state_ = State::Idle;
     std::uint32_t code_ = 0;
+    // Últimos VIFcodes aceitos, para a mensagem de VIFcode inválido.
+    std::uint32_t history_[8] = {};
+    unsigned historyPos_ = 0;
     bool irqPending_ = false;           // comando corrente tem o bit I
     std::vector<std::uint8_t> fifo_;    // dados recebidos e ainda não processados (parado)
     void stallOnIrq();
@@ -89,7 +93,10 @@ private:
     unsigned upVn_ = 0, upVl_ = 0;
     bool upMask_ = false, upUsn_ = false;
     std::uint32_t upAddr_ = 0;     // quadword de destino base
-    std::uint32_t upNum_ = 0;      // vetores restantes
+    std::uint32_t upNum_ = 0;      // vetores restantes a gravar
+    std::uint32_t upReadLeft_ = 0;  // vetores restantes a ler do stream
+    bool upFill_ = false;          // escrita de preenchimento (CL < WL)
+    unsigned upCl_ = 0, upWl_ = 0;
     std::uint32_t upIndex_ = 0;    // vetores já escritos
     std::uint32_t upComp_[4] = {};  // componentes já lidos do vetor corrente
     unsigned upNbits_ = 0;

@@ -174,7 +174,7 @@ if(ANYPS2_E2E_TESTS)
     anyps2_e2e(vu1draw ENV ANYPS2_VU=compiled)
     anyps2_e2e(vu1draw NAME vu1draw_interp ENV ANYPS2_VU=interp)
     anyps2_e2e(sdk_cube ENV ANYPS2_FRAMES=60)
-    anyps2_e2e(sdk_teapot ENV ANYPS2_FRAMES=8)
+    anyps2_e2e(sdk_teapot ENV ANYPS2_FRAMES=8 ANYPS2_SCREENSHOT_EVERY=4)
     anyps2_e2e(sdk_texture ENV ANYPS2_FRAMES=8)
     anyps2_e2e(sdk_vu1 ENV ANYPS2_FRAMES=8 ANYPS2_VU=compiled)
     # Fase 6: IOP em HLE. Módulos (rom0: e IRX embutido; sem HLE = erro

@@ -23,8 +23,9 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > Gran Turismo 4 (dump do usuário) recompilado desenha a tela de copyright,
 > descomprime e executa o programa principal (também recompilado: 1,4 M
 > instruções), inicializa controles e memory card, lê os dados do disco
-> pelos drivers da Polyphony (em HLE, sem som) e mostra a primeira tela do
-> jogo, a seleção de idioma. Jogos
+> pelos drivers da Polyphony (em HLE, sem som) e, guiado por um roteiro de
+> controle, passa pela seleção de idioma, cria o save no memory card, recebe
+> o nome do jogador e chega ao vídeo de abertura (o IPU ainda falta). Jogos
 > comerciais ainda não são jogáveis: eles trazem drivers próprios para o
 > IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
 > [PLANO.md](PLANO.md) para o roteiro completo.
@@ -194,6 +195,7 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_CLOCK=virtual` | relógio determinístico (padrão: `real`) |
 | `ANYPS2_VIDEO=sdl\|none` | janela ou sem janela (padrão: janela se houver display) |
 | `ANYPS2_SCREENSHOT=arquivo.png` | grava a última imagem exibida ao terminar |
+| `ANYPS2_SCREENSHOT_EVERY=N` | também grava `arquivo_<vblank>.png` a cada N VBlanks (acompanhar um roteiro de controle) |
 | `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |

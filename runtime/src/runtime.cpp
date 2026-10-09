@@ -45,6 +45,7 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
     if (const char* p = std::getenv("ANYPS2_PROFILE")) o.profile = *p && std::string(p) != "0";
     if (const char* v = std::getenv("ANYPS2_VIDEO")) o.video = v;
     if (const char* shot = std::getenv("ANYPS2_SCREENSHOT")) o.screenshot = shot;
+    if (const char* n = std::getenv("ANYPS2_SCREENSHOT_EVERY")) o.screenshotEvery = std::strtoull(n, nullptr, 10);
     if (const char* v = std::getenv("ANYPS2_VU")) o.vuMode = v;
     if (const char* d = std::getenv("ANYPS2_VU_DUMP")) o.vuDumpDir = d;
     if (const char* n = std::getenv("ANYPS2_FRAMES")) o.frames = std::strtoull(n, nullptr, 10);
@@ -106,6 +107,14 @@ Runtime::~Runtime() {
 void Runtime::onVblank(std::uint32_t pc) {
     ++vblanks_;
     iop_->vblank(pc);
+    if (options_.screenshotEvery && !options_.screenshot.empty() && vblanks_ % options_.screenshotEvery == 0 &&
+        gs_->displayEnabled()) {
+        std::string base = options_.screenshot;
+        if (base.size() > 4 && base.compare(base.size() - 4, 4, ".png") == 0) base.resize(base.size() - 4);
+        char suffix[32];
+        std::snprintf(suffix, sizeof suffix, "_%06llu.png", static_cast<unsigned long long>(vblanks_));
+        writePng(base + suffix, gs_->display());
+    }
     if (options_.frames && vblanks_ >= options_.frames) throw ProgramExit{0};
     if (!video_) return;
     if (gs_->displayEnabled()) video_->present(gs_->display());

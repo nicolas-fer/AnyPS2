@@ -92,7 +92,9 @@ std::uint32_t Dmac::read(std::uint32_t addr, std::uint32_t pc) {
             case 0x1000E040: return rbsr_;
             case 0x1000E050: return rbor_;
             case 0x1000E060: return stadr_;
-            case 0x1000F520: return enable_;
+            case 0x1000F520:  // D_ENABLER
+            case 0x1000F590:  // D_ENABLEW: lido de volta, o último valor escrito
+                return enable_;
             default: break;
         }
     }

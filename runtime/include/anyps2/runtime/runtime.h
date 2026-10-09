@@ -76,6 +76,9 @@ struct RuntimeOptions {
     std::string video;
     // ANYPS2_SCREENSHOT: grava a última imagem exibida (PNG) ao terminar.
     std::string screenshot;
+    // ANYPS2_SCREENSHOT_EVERY=N: também grava, a cada N VBlanks, a imagem
+    // exibida em <screenshot sem .png>_<vblank>.png (acompanhar menus).
+    std::uint64_t screenshotEvery = 0;
     // ANYPS2_FRAMES=N: encerra o programa (código 0) no N-ésimo VBlank. Para
     // testar programas que desenham em laço infinito.
     std::uint64_t frames = 0;

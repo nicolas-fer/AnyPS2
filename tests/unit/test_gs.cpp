@@ -635,6 +635,11 @@ TEST_CASE(gs, vif_unpack_and_direct) {
         std::memcpy(&v, vu.data1.get() + qw * 16 + c * 4, 4);
         return v;
     };
+    // CYCLE nunca escrito (CL=WL=0): escrita normal, não preenchimento
+    run({0x6C020008u, 1, 2, 3, 4, 5, 6, 7, 8});
+    CHECK(vif.idle());
+    CHECK_EQ(vu1(0x08, 0), 1u);
+    CHECK_EQ(vu1(0x09, 3), 8u);
     // STCYCL 1,1; UNPACK V4-32 de 2 vetores em 0x10
     run({0x01000101u, 0x6C020010u, 1, 2, 3, 4, 5, 6, 7, 8});
     CHECK_EQ(vu1(0x10, 0), 1u);
@@ -681,6 +686,26 @@ TEST_CASE(gs, vif_unpack_and_direct) {
     CHECK_EQ(vu1(0x60, 0), 1u);
     CHECK_EQ(vu1(0x61, 0), 0u);
     CHECK_EQ(vu1(0x62, 0), 2u);
+    // Escrita de preenchimento, CL=0 WL=4 (GT4): NUM=4 vetores só da máscara
+    // (todos ROW), sem ler nada; o STCYCL seguinte é comando.
+    run({0x30000000u, 11, 12, 13, 14,          // STROW
+         0x20000000u, 0x55555555u,             // STMASK: tudo ROW
+         0x01000400u, 0x7C040070u,             // STCYCL CL=0 WL=4; UNPACK V4-32 m NUM=4
+         0x01000101u});                        // STCYCL 1,1
+    CHECK(vif.idle());
+    CHECK_EQ(vu1(0x70, 0), 11u);
+    CHECK_EQ(vu1(0x73, 3), 14u);
+    // CL=1 WL=3, NUM=5: lê 2 vetores (posições 0 e 3) e grava 5 seguidos;
+    // as posições preenchidas, com máscara de linha 1-2 = ROW, vêm do ROW.
+    run({0x20000000u, 0x00555500u,             // linha 0 dado; linhas 1-2 ROW
+         0x01000301u, 0x7C050080u, 1, 2, 3, 4, 5, 6, 7, 8,
+         0x01000101u});
+    CHECK(vif.idle());
+    CHECK_EQ(vu1(0x80, 0), 1u);
+    CHECK_EQ(vu1(0x81, 0), 11u);
+    CHECK_EQ(vu1(0x82, 3), 14u);
+    CHECK_EQ(vu1(0x83, 0), 5u);
+    CHECK_EQ(vu1(0x84, 1), 12u);
     // MPG
     run({0x4A020004u, 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u});
     std::uint32_t m;
@@ -739,6 +764,10 @@ TEST_CASE(gs, dmac_chain_to_gif) {
     // Escrever 1 limpa o CIS; escrever 1 nos bits altos inverte o CIM
     m.write<std::uint32_t>(0x1000E010, 4 | (4u << 16), 0);
     CHECK_EQ(m.read<std::uint32_t>(0x1000E010, 0), 4u << 16);
+    // D_ENABLEW (escrita) é lido de volta como o D_ENABLER (o GT4 lê os dois)
+    m.write<std::uint32_t>(0x1000F590, 0x1201, 0);
+    CHECK_EQ(m.read<std::uint32_t>(0x1000F590, 0), 0x1201u);
+    CHECK_EQ(m.read<std::uint32_t>(0x1000F520, 0), 0x1201u);
     // Modo normal
     rt.gs().writePrivileged(0x12001000, 2, 0);
     m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);

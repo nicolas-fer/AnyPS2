@@ -179,6 +179,7 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
     if (rt_ && rt_->options().traceGs) {
         std::fprintf(stderr, "[vif%u] %s (0x%08x)\n", unit_, cmdName(cmd).c_str(), w);
     }
+    history_[historyPos_++ % 8] = w;
     if ((cmd & 0x80) && !(err_ & kErrMii)) irqPending_ = true;
     const bool vif1 = unit_ == 1;
     switch (cmd & 0x7F) {
@@ -247,27 +248,42 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
                 upNum_ = num == 0 ? 256 : num;
                 upIndex_ = 0;
                 upNbits_ = 0;
-                const unsigned cl = cycle_ & 0xFF, wl = (cycle_ >> 8) & 0xFF;
-                if ((wl == 0 ? 256u : wl) > (cl == 0 ? 256u : cl)) {
-                    throw Unimplemented(unitName + ": UNPACK com escrita de preenchimento (STCYCL CL=" +
-                                            std::to_string(cl) + " < WL=" + std::to_string(wl) +
-                                            ") ainda não suportado",
-                                        pc);
+                // NUM conta os vetores gravados. Escrita de pulo (CL >= WL):
+                // lê NUM vetores e pula CL-WL quadwords a cada WL. Escrita de
+                // preenchimento (CL < WL): lê só os CL primeiros de cada WL
+                // (CL=0: nenhum) e grava os WL em quadwords seguidos.
+                // Compara os valores crus: CYCLE=0 (nunca escrito) é escrita
+                // normal; CL=0 com WL>0 é preenchimento sem leitura.
+                upCl_ = cycle_ & 0xFF;
+                upWl_ = (cycle_ >> 8) & 0xFF;
+                upFill_ = upWl_ > upCl_;
+                if (upFill_) {
+                    upReadLeft_ = upCl_ * (upNum_ / upWl_) + std::min<std::uint32_t>(upNum_ % upWl_, upCl_);
+                } else {
+                    if (upCl_ == 0) upCl_ = 256;
+                    if (upWl_ == 0) upWl_ = 256;
+                    upReadLeft_ = upNum_;
                 }
                 const unsigned vbits = (upVn_ == 3 && upVl_ == 3) ? 16 : (upVn_ + 1) * (32u >> upVl_);
-                upWordsLeft_ = (upNum_ * vbits + 31) / 32;
-                state_ = State::Unpack;
+                upWordsLeft_ = (upReadLeft_ * vbits + 31) / 32;
+                writeFillVectors(pc);
+                if (upWordsLeft_ > 0) state_ = State::Unpack;
                 return;
             }
             break;
     }
-    throw Unimplemented(unitName + ": VIFcode inválido " + anyps2::hex(w), pc);
+    std::string recent;
+    for (unsigned i = 0; i < 8; ++i) {
+        const std::uint32_t h = history_[(historyPos_ + i) % 8];
+        if (h) recent += " " + cmdName(h >> 24) + "(" + anyps2::hex(h) + ")";
+    }
+    throw Unimplemented(unitName + ": VIFcode inválido " + anyps2::hex(w) + "; anteriores:" + recent, pc);
 }
 
 void Vif::unpackWord(std::uint32_t w, std::uint32_t pc) {
     const unsigned ebits = (upVn_ == 3 && upVl_ == 3) ? 16 : (32u >> upVl_);
     const unsigned comps = (upVn_ == 3 && upVl_ == 3) ? 1 : upVn_ + 1;
-    for (unsigned off = 0; off < 32 && upNum_ > 0; off += ebits) {
+    for (unsigned off = 0; off < 32 && upReadLeft_ > 0; off += ebits) {
         std::uint32_t e = ebits == 32 ? w : (w >> off) & ((1u << ebits) - 1);
         if (!upUsn_ && ebits == 16 && !(upVn_ == 3 && upVl_ == 3)) {
             e = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(e)));
@@ -300,17 +316,29 @@ void Vif::unpackWord(std::uint32_t w, std::uint32_t pc) {
             upNbits_ = 0;
             writeUnpackedVector(v, pc);
             --upNum_;
+            --upReadLeft_;
+            writeFillVectors(pc);
         }
     }
     if (--upWordsLeft_ == 0) state_ = State::Idle;
 }
 
+// Preenchimento: nas posições CL..WL-1 de cada ciclo nada é lido; o valor
+// vem da máscara (ROW/COL). Com máscara 0 o dado é indefinido no hardware;
+// aqui é zero (somado a ROW nos modos de offset).
+void Vif::writeFillVectors(std::uint32_t pc) {
+    if (!upFill_) return;
+    static constexpr std::uint32_t zero[4] = {0, 0, 0, 0};
+    while (upNum_ > 0 && upIndex_ % upWl_ >= upCl_) {
+        writeUnpackedVector(zero, pc);
+        --upNum_;
+    }
+}
+
 void Vif::writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t) {
-    const unsigned cl = (cycle_ & 0xFF) == 0 ? 256 : (cycle_ & 0xFF);
-    const unsigned wl = ((cycle_ >> 8) & 0xFF) == 0 ? 256 : ((cycle_ >> 8) & 0xFF);
     const std::uint32_t i = upIndex_++;
-    const std::uint32_t cyclePos = i % wl;
-    const std::uint32_t qw = upAddr_ + (i / wl) * cl + cyclePos;
+    const std::uint32_t cyclePos = i % upWl_;
+    const std::uint32_t qw = upFill_ ? upAddr_ + i : upAddr_ + (i / upWl_) * upCl_ + cyclePos;
     const std::uint32_t qwords = dataSize() / 16;
     std::uint8_t* dst = dataMem() + (qw % qwords) * 16;
     const unsigned maskRow = std::min<std::uint32_t>(cyclePos, 3);

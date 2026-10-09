@@ -194,7 +194,7 @@ SetGsCrt com modo PAL relevante).
 - ✅ VIF0/VIF1: NOP, STCYCL, OFFSET, BASE, ITOP, STMOD, MSKPATH3, MARK,
   FLUSH*, STMASK, STROW, STCOL, MPG, DIRECT/DIRECTHL, UNPACK (S/V2/V3/V4 de
   32/16/8 bits, V4-5, sinal/USN, TOPS, máscara, modos offset/difference,
-  escrita com salto CL ≥ WL). Memórias dos VUs mapeadas no EE
+  escrita com salto CL ≥ WL e de preenchimento CL < WL). Memórias dos VUs mapeadas no EE
   (0x1100_0000). `MSCAL/MSCALF/MSCNT` chegaram na Fase 5.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
@@ -248,8 +248,7 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, IPU, escrita de preenchimento do VIF (CL < WL), interrupção/
-  parada por bit `i` dos VIFcodes, espera de PATH3 mascarado, `TEX1.MTBA`.
+  interleave, IPU, espera de PATH3 mascarado, `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
   comportar diferente.
@@ -621,13 +620,25 @@ Marco 5 — a primeira tela do jogo: seleção de idioma ✅ (sem som):
   quadword, ERR.MII), `gs.finish_real_clock_one_at_a_time` e o modo campo
   em `gs.display_output`.
 
-Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para som, USB e
-rede, que respondem zeros): a tela de seleção de idioma (ENGLISH,
-FRANÇAIS, DEUTSCH, ITALIANO, ESPAÑOL), esperando o controle.
+Marco 6 — dos menus iniciais ao vídeo de abertura ✅ (sem som):
+- ✅ **UNPACK com escrita de preenchimento** (STCYCL CL < WL): NUM conta os
+  vetores gravados, só os CL primeiros de cada ciclo de WL são lidos do
+  stream e os WL vão para quadwords seguidos; os demais vêm da máscara
+  (ROW/COL). O GT4 usa CL=0 WL=4 com máscara toda ROW (nenhum dado lido);
+  antes o VIF consumia 16 palavras e lia um float como VIFcode. Os valores
+  de CL/WL são comparados crus: CYCLE=0 (nunca escrito) é escrita normal.
+- ✅ VIFcode inválido mostra os últimos comandos aceitos (diagnóstico).
+- ✅ D_ENABLEW (0x1000F590) lido de volta, como o D_ENABLER.
+- ✅ `ANYPS2_SCREENSHOT_EVERY=N`: capturas periódicas para acompanhar um
+  roteiro de controle; `jogos/run_gt4.sh` aceita `MC_DIR` (cartão limpo).
+- ✅ Com um roteiro de controle o GT4 passa pela seleção de idioma, cria os
+  dados no memory card, recebe o nome na tela "Welcome to GT World", grava
+  o save e mostra a introdução; ao escolher "Start" para no **IPU**
+  (`sceMpegInit`: SETIQ pelo FIFO de entrada) — o vídeo de abertura.
 
-Próximos passos do GT4: avançar pelos menus com o roteiro de controle e
-tratar o que aparecer; o som continua mudo (pdispu2/rt_ac exigem executar
-o código do IOP).
+Próximos passos do GT4: o IPU (comandos BCLR/IDEC/BDEC/VDEC/FDEC/SETIQ/
+SETVQ/CSC/PACK/SETTH, decodificação MPEG-2 e DMA toIPU/fromIPU); o som
+continua mudo (pdispu2/rt_ac exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.
