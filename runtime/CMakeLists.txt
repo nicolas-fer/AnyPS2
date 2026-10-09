@@ -135,7 +135,8 @@ if(ANYPS2_WITH_SDL)
         ${_anyps2_imgui_src}/imgui_widgets.cpp
         ${_anyps2_imgui_src}/backends/imgui_impl_sdl2.cpp
         ${_anyps2_imgui_src}/backends/imgui_impl_sdlrenderer2.cpp)
-    target_include_directories(anyps2_imgui PUBLIC ${_anyps2_imgui_src} ${_anyps2_imgui_src}/backends)
+    # SYSTEM: os avisos de estilo (-Wold-style-cast etc.) são do ImGui, não nossos.
+target_include_directories(anyps2_imgui SYSTEM PUBLIC ${_anyps2_imgui_src} ${_anyps2_imgui_src}/backends)
     target_link_libraries(anyps2_imgui PUBLIC ${_anyps2_sdl_target})
     target_link_libraries(anyps2_runtime PRIVATE anyps2_imgui)
 else()
