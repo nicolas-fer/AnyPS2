@@ -164,7 +164,7 @@ TEST_CASE(ipu, ctrl_reset_and_unsupported) {
     CHECK_EQ(f.ctrl(), 0x01B10000u);
     CHECK(f.ipuIrq());
     CHECK_EQ(f.bp(), 0u);
-    CHECK_THROWS_WITH(f.cmd(0x10000000), "IDEC");
+    CHECK_THROWS_WITH(f.cmd(0x80000000), "PACK");
 }
 
 namespace {
@@ -677,4 +677,103 @@ TEST_CASE(ipu, csc_waits_between_macroblocks) {
     CHECK_EQ(f.m.read<std::uint32_t>(0x1000B000, 0) & 0x100, 0u);
     CHECK_EQ(pixel(f.m, 0x00300000, 1, 8, 8), rgba(255, 37, 128, 0x80));
     CHECK_EQ(pixel(f.m, 0x00300000, 1, 15, 0), rgba(0, 15, 0, 0x80));
+}
+
+// ---- Etapa 5: IDEC ------------------------------------------------------------
+
+namespace {
+
+// Fatia intra de 3 macroblocos (Y, Cb, Cr de 8 bits; matriz intra 16):
+//   MB1: intra, todos os DC +0 → Y = 128.
+//   MBAI 1 (sem pular: a predição continua).
+//   MB2: intra+quant (código 2 → escala 4); Y0: DC +3 (→ 131) e um AC por
+//        escape (level 10 em u=1 → 10·4·16>>4 = 40); Y1–Y3 +0 (→ 131).
+//   MBAI 2 (um macrobloco pulado: a predição volta a 128).
+//   MB3: intra, todos +0 → Y = 128 de novo.
+// Depois, um start code alinhado.
+BitWriter idecSlice() {
+    BitWriter w;
+    for (unsigned i = 0; i < 64; ++i) w.put(16, 8);  // matriz intra
+    auto flatBlocks = [&] {
+        for (unsigned b = 0; b < 4; ++b) w.code("100 10");  // DC luma +0, EOB
+        for (unsigned b = 0; b < 2; ++b) w.code("00 10");   // DC croma +0, EOB
+    };
+    w.code("1");  // MB1: intra
+    flatBlocks();
+    w.code("1");  // MBAI 1
+    w.code("01");  // MB2: intra + quant
+    w.put(2, 5);
+    w.code("01 11");  // Y0: tamanho 2, +3
+    w.code("0000 01");
+    w.put(0, 6);
+    w.put(10, 12);
+    w.code("10");
+    for (unsigned b = 1; b < 4; ++b) w.code("100 10");
+    for (unsigned b = 0; b < 2; ++b) w.code("00 10");
+    w.code("011");  // MBAI 2
+    w.code("1");  // MB3
+    flatBlocks();
+    w.alignByte();
+    w.put(0x000001B3u, 32);
+    return w;
+}
+
+}  // namespace
+
+TEST_CASE(ipu, idec_slice_to_rgb32) {
+    Fixture f;
+    f.cmd(0x00000000);
+    feed(f, idecSlice());
+    f.cmd(0x50000000);  // SETIQ
+    f.ipuIrq();
+    drainTo(f, 0x00300000, 3 * 64);
+    f.cmd(0x10010000);  // IDEC: QSC=1 (escala 2), RGB32
+    CHECK_EQ(f.ctrl() >> 31, 0u);
+    CHECK(f.ipuIrq());
+    CHECK_EQ(f.m.read<std::uint32_t>(0x1000B000, 0) & 0x100, 0u);  // as 3 saíram
+    Memory& m = f.m;
+    CHECK_EQ(pixel(m, 0x00300000, 0, 0, 0), rgba(130, 130, 130, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 0, 15, 15), rgba(130, 130, 130, 0x80));
+    // MB2: o DC continuou de 128 (+3 = 131); o AC usa a escala nova (4).
+    const unsigned y0[8] = {142, 141, 139, 135, 133, 129, 127, 126};
+    for (unsigned x = 0; x < 8; ++x) CHECK_EQ(pixel(m, 0x00300000, 1, 3, x), rgba(y0[x], y0[x], y0[x], 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 1, 0, 8), rgba(134, 134, 134, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 1, 15, 15), rgba(134, 134, 134, 0x80));
+    // MB3: depois do macrobloco pulado a predição voltou a 128.
+    CHECK_EQ(pixel(m, 0x00300000, 2, 0, 0), rgba(130, 130, 130, 0x80));
+    // CTRL: imagem I, CBP 0x3F, start code à frente; TOP nele.
+    CHECK_EQ((f.ctrl() >> 24) & 7, 1u);
+    CHECK_EQ((f.ctrl() >> 8) & 0x3F, 0x3Fu);
+    CHECK_EQ(f.ctrl() & (3u << 14), 1u << 15);
+    CHECK_EQ(f.m.read<std::uint64_t>(kTop, 0), 0x000001B3ull);
+    // RGB16 (OFM) ainda não existe.
+    CHECK_THROWS_WITH(f.cmd(0x18010000), "RGB16");
+}
+
+// Os dados da fatia chegam aos poucos: o que já saiu fica; o resto vem
+// quando o DMA continua, com o mesmo resultado.
+TEST_CASE(ipu, idec_waits_between_macroblocks) {
+    const BitWriter w = idecSlice();
+    std::vector<std::uint8_t> all = w.bytes;
+    all.resize((all.size() + 15) & ~std::size_t{15}, 0);
+    const auto total = static_cast<std::uint32_t>(all.size() / 16);
+    Fixture f;
+    f.cmd(0x00000000);
+    f.m.copyToGuest(0x00100000, all.data(), static_cast<std::uint32_t>(all.size()), 0);
+    f.m.write<std::uint32_t>(kD4Madr, 0x00100000, 0);
+    f.m.write<std::uint32_t>(kD4Qwc, 5, 0);  // matriz + 128 bits: MB1 e MB2 cabem, o MB3 não
+    f.m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
+    f.cmd(0x50000000);
+    drainTo(f, 0x00300000, 3 * 64);
+    f.cmd(0x10010000);
+    CHECK_EQ(f.ctrl() >> 31, 1u);
+    CHECK_EQ(f.ctrl() & 0xF, 0u);  // esperando: FIFO vazio
+    CHECK_EQ(f.m.read<std::uint32_t>(0x1000B020, 0), 64u);  // MB1 e MB2 saíram
+    CHECK_EQ(pixel(f.m, 0x00300000, 0, 0, 0), rgba(130, 130, 130, 0x80));
+    CHECK_EQ(pixel(f.m, 0x00300000, 1, 0, 8), rgba(134, 134, 134, 0x80));
+    f.m.write<std::uint32_t>(kD4Qwc, total - 5, 0);
+    f.m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
+    CHECK_EQ(f.ctrl() >> 31, 0u);
+    CHECK_EQ(pixel(f.m, 0x00300000, 1, 3, 0), rgba(142, 142, 142, 0x80));
+    CHECK_EQ(pixel(f.m, 0x00300000, 2, 0, 0), rgba(130, 130, 130, 0x80));
 }

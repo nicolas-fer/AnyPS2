@@ -25,8 +25,9 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > instruções), inicializa controles e memory card, lê os dados do disco
 > pelos drivers da Polyphony (em HLE, sem som) e, guiado por um roteiro de
 > controle, passa pela seleção de idioma, cria o save no memory card, recebe
-> o nome do jogador e toca o começo do vídeo de abertura (MPEG-2
-> decodificado pelo IPU emulado), até o primeiro IDEC, que ainda falta. Jogos
+> o nome do jogador, toca o vídeo de abertura (MPEG-2 decodificado pelo IPU
+> emulado) e chega ao modo Arcade: menu com fundos em vídeo, seleção de
+> carro e a vitrine 3D do carro escolhido. Jogos
 > comerciais ainda não são jogáveis: eles trazem drivers próprios para o
 > IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
 > [PLANO.md](PLANO.md) para o roteiro completo.
@@ -284,16 +285,16 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `elf`, `fixture` | parser de ELF, 20 mil mutações, fixture real |
 | `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
 | `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
-| `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes |
+| `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes (e os números das syscalls de alarme de cada libkernel) |
 | `gs` | 22 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR) |
 | `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio`, `e2e_timers`, `e2e_timers_real` | homebrews do ps2dev recompilados, compilados e executados; saída comparada (relógio virtual, e `timers` também no real) |
 | `e2e_gfx2d`, `e2e_cube3d`, `e2e_gskit` | homebrews gráficos; saída de texto **e imagem final** (PNG) comparadas byte a byte com `expected.png` |
-| `ipu` | registradores do IPU, FIFO de entrada e ponteiro de bits (BP/FP/IFC), FDEC atravessando quadwords, comandos esperando dados, SETIQ/SETVQ/SETTH, CTRL.RST, DMA toIPU sob demanda (normal, chain, acréscimo de tags com o canal pausado), tabelas VLC e IDCT do MPEG-2, VDEC, BDEC intra/não intra (RAW16, SCD), FIFO de saída e fromIPU, comando que recomeça quando os dados chegam, CSC (RGB32, limiares do SETTH) |
+| `ipu` | registradores do IPU, FIFO de entrada e ponteiro de bits (BP/FP/IFC), FDEC atravessando quadwords, comandos esperando dados, SETIQ/SETVQ/SETTH, CTRL.RST, DMA toIPU sob demanda (normal, chain, acréscimo de tags com o canal pausado), tabelas VLC e IDCT do MPEG-2, VDEC, BDEC intra/não intra (RAW16, SCD), FIFO de saída e fromIPU, comando que recomeça quando os dados chegam, CSC (RGB32, limiares do SETTH), IDEC (fatia intra, predição do DC entre macroblocos, MBAI) |
 | `vu_isa` | decodificador/disassembler do microcódigo contra 12 mil pares do `dvp-objdump` |
 | `vu` | 12 casos do núcleo do VU com valores calculados à mão (truncamento, flags, latências, stalls, Q/P, upper/lower em paralelo, bit E, desvios, EFU, XGKICK, MSCAL com double buffering) |
 | `vu_diff` | **diferencial** interpretador × microcódigo recompilado: 16 microprogramas aleatórios × 48 estados; também realocado para outra base e com um par alterado na micro memória |
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
-| `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release), leitor de vídeos do MPG1 (Program Stream e fatias para o EE) |
+| `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release), leitor de vídeos do MPG1 (Program Stream, repetição e fatias para o EE) |
 | `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
 | `e2e_dbcpad` | controles do SDK 3.0 (dbcman/libdbc/libpad2) com roteiro de controle, `sceMcGetSlotMax` |
 | `e2e_execps2`, `e2e_execps2_missing`, `cli_ram2elf` | boot que copia outro programa para a memória e chama `ExecPS2` (recompilado com `--extra`: argv e kernel zerado; sem `--extra`: erro claro), ELF sintético a partir da RAM |

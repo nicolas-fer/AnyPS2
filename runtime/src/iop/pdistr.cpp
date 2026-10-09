@@ -18,8 +18,8 @@
 // ao EE e o áudio (stream privado 0xBD) ao SPU2 — mudo aqui, só pulado.
 // Levantado do código do IRX (PDISTR.IRX) e do cliente no EE (GT4):
 //   fn 1 (abrir): {flags, LSN, setores, nome em [12]}; sem nome, um trecho do
-//   disco. flags: 0x10 repete o vídeo, 0x20/0x40 ligam os dois canais de
-//   áudio.
+//   disco. flags: 0x10 repete o vídeo (no fim, o leitor volta ao começo),
+//   0x20/0x40 ligam os dois canais de áudio.
 //   fn 2 (ler, síncrono): {destino no EE, tamanho}: cada fatia de 5120 bytes
 //   recebe um pacote de vídeo em registros de 16 bytes {bytes, desalinhamento
 //   (0–3), bytes que faltam do pacote, 0} seguidos dos dados (múltiplo de 16),
@@ -74,7 +74,14 @@ bool ProgramStream::nextVideo(std::vector<std::uint8_t>& payload, std::uint32_t 
         }
         payload.resize(len);
         if (!read(len, payload.data())) break;
+        videoThisPass_ = true;
         return true;
+    }
+    if (loop_ && videoThisPass_ && !ended_) {
+        // Fim de uma passada de um vídeo em repetição: de volta ao começo.
+        pos_ = 0;
+        videoThisPass_ = false;
+        return nextVideo(payload, pc);
     }
     ended_ = true;
     return false;
@@ -133,11 +140,6 @@ void registerMovie(Iop& iop, std::uint32_t sid, const char* name) {
                         throw Unimplemented(std::string(name) + ": abrir vídeo pelo caminho ainda não implementado",
                                             pc);
                     }
-                    if (flags & 0x10) {
-                        throw Unimplemented(std::string(name) + ": vídeo em repetição (flags " + anyps2::hex(flags) +
-                                                ") ainda não implementado",
-                                            pc);
-                    }
                     const std::uint32_t lsn = rd32(in, 4);
                     const std::uint64_t size = std::uint64_t{rd32(in, 8)} * IsoImage::kSectorSize;
                     IsoImage& iso = iop.cdvd().image(std::string(name) + ": abrir vídeo", pc);
@@ -146,7 +148,7 @@ void registerMovie(Iop& iop, std::uint32_t sid, const char* name) {
                         [&iso, lsn](std::uint64_t pos, std::uint32_t n, std::uint8_t* dst) {
                             return iso.readBytes(lsn, pos, n, dst);
                         },
-                        size);
+                        size, (flags & 0x10) != 0);
                     if (trace) {
                         std::fprintf(stderr, "[iop] %s: vídeo no setor %u, %llu bytes (flags 0x%x)\n", name, lsn,
                                      static_cast<unsigned long long>(size), flags);

@@ -274,6 +274,24 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
             th_[1] = static_cast<std::uint16_t>((cmd >> 16) & 0x1FF);
             finishCommand();
             return;
+        case IDEC: {
+            if (cmd & (1u << 27)) {
+                throw Unimplemented("IPU: IDEC com saída RGB16 (OFM, " + anyps2::hex(cmd) + ") ainda não suportado",
+                                    pc);
+            }
+            if (ctrl_ & kCtrlMp1) throw Unimplemented("IPU: IDEC de MPEG-1 (CTRL.MP1) ainda não suportado", pc);
+            // Imagem I; preditores de DC do começo da fatia; escala do QSC.
+            ctrl_ = (ctrl_ & ~(7u << 24)) | (1u << 24);
+            const unsigned idp = (ctrl_ >> 16) & 3, qsc = (cmd >> 16) & 0x1F;
+            for (int& p : dcPred_) p = 128 << idp;
+            idecQuantizerScale_ =
+                (ctrl_ & kCtrlQst) ? mpeg::kNonLinearQuantizerScale[qsc] : static_cast<int>(qsc * 2);
+            idecEnded_ = false;
+            top_ = 0;
+            busy_ = true;
+            run(pc);
+            return;
+        }
         case CSC:
             if (cmd & (1u << 27)) {
                 throw Unimplemented("IPU: CSC com saída RGB16 (OFM, " + anyps2::hex(cmd) + ") ainda não suportado",
@@ -304,6 +322,8 @@ bool Ipu::attempt(Body&& body) {
     snap_.fp = fp_;
     std::copy(std::begin(dcPred_), std::end(dcPred_), snap_.dcPred);
     snap_.ctrl = ctrl_;
+    snap_.idecQuantizerScale = idecQuantizerScale_;
+    snap_.idecEnded = idecEnded_;
     popped_.clear();
     restartable_ = true;
     starved_ = false;
@@ -317,6 +337,8 @@ bool Ipu::attempt(Body&& body) {
         fp_ = snap_.fp;
         std::copy(std::begin(snap_.dcPred), std::end(snap_.dcPred), dcPred_);
         ctrl_ = snap_.ctrl;
+        idecQuantizerScale_ = snap_.idecQuantizerScale;
+        idecEnded_ = snap_.idecEnded;
         fifo_.insert(fifo_.begin(), popped_.begin(), popped_.end());
         popped_.clear();
         return false;
@@ -388,6 +410,25 @@ void Ipu::run(std::uint32_t pc) {
                 done = !waitingOutput_;
             }
             break;
+        case IDEC: {
+            // Um macrobloco (e o MBAI seguinte) por tentativa; depois da fatia,
+            // o start code à frente e o TOP.
+            if (waitingOutput_) break;
+            bool ok = true;
+            while (ok && !idecEnded_) {
+                ok = attempt([&] { idecMacroblock(); });
+                if (ok) ++pos_;
+            }
+            if (ok && attempt([&] {
+                    checkStartCode();
+                    top_ = show(32);
+                })) {
+                ctrl_ = (ctrl_ & ~kCtrlCbp) | (0x3Fu << 8);
+                waitingOutput_ = out_.size() > kFifoQw;
+                done = !waitingOutput_;
+            }
+            break;
+        }
         case CSC: {
             // Um macrobloco por tentativa: o que já saiu não se refaz.
             if (waitingOutput_) break;
@@ -638,6 +679,11 @@ void Ipu::runCscMacroblock() {
         for (unsigned k = 0; k < 4; ++k) in[i + k] = static_cast<std::uint8_t>(w >> (24 - 8 * k));
     }
     std::uint8_t px[1024];
+    yuvToRgb32(in, px, false);
+    pushOutput(px, 64);
+}
+
+void Ipu::yuvToRgb32(const std::uint8_t (&in)[384], std::uint8_t (&px)[1024], bool sgn) const {
     for (unsigned y = 0; y < 16; ++y) {
         for (unsigned x = 0; x < 16; ++x) {
             const int lum = (0x95 * std::max(0, in[y * 16 + x] - 16)) >> 6;
@@ -657,9 +703,77 @@ void Ipu::runCscMacroblock() {
             } else if (below(th_[1])) {
                 p[3] = 0x40;
             }
+            if (sgn) {
+                for (unsigned k = 0; k < 3; ++k) p[k] ^= 0x80;
+            }
         }
     }
-    pushOutput(px, 64);
+}
+
+// ---- IDEC -------------------------------------------------------------------
+
+void Ipu::decodeIntraMacroblock(bool fieldDct, int quantizerScale, std::uint8_t (&mb)[384]) {
+    for (unsigned b = 0; b < 6; ++b) {
+        std::int32_t coef[64] = {}, pix[64];
+        intraBlock(b < 4 ? 0 : b - 3, coef, quantizerScale);
+        mpeg::idct(coef, pix);
+        for (unsigned r = 0; r < 8; ++r) {
+            std::uint8_t* row;
+            if (b < 4) {
+                const unsigned line = fieldDct ? (b >> 1) + 2 * r : (b >> 1) * 8 + r;
+                row = mb + line * 16 + (b & 1) * 8;
+            } else {
+                row = mb + 256 + (b - 4) * 64 + r * 8;
+            }
+            for (unsigned x = 0; x < 8; ++x) row[x] = static_cast<std::uint8_t>(std::clamp(pix[r * 8 + x], 0, 255));
+        }
+    }
+}
+
+// Um macrobloco de uma fatia intra: macroblock_type (I), dct_type se DTD,
+// quantiser_scale_code se o tipo pedir, os 6 blocos, CSC; depois o MBAI do
+// próximo — macroblocos pulados zeram a predição do DC, e um código que não
+// é MBAI (o start code seguinte) encerra a fatia.
+void Ipu::idecMacroblock() {
+    const mpeg::Vlc type = mpeg::decode(mpeg::Table::MbTypeI, show(16) << 16);
+    if (type.len == 0) {  // nem intra nem intra+quant: fatia corrompida
+        ctrl_ |= kCtrlEcd;
+        idecEnded_ = true;
+        return;
+    }
+    skip(type.len);
+    const bool fieldDct = (cmd_ & (1u << 24)) != 0 && get(1) != 0;  // DTD: o dct_type vem no fluxo
+    if (type.value & mpeg::kMbQuant) {
+        const unsigned qsc = get(5);
+        idecQuantizerScale_ =
+            (ctrl_ & kCtrlQst) ? mpeg::kNonLinearQuantizerScale[qsc] : static_cast<int>(qsc * 2);
+    }
+    std::uint8_t mb[384];
+    decodeIntraMacroblock(fieldDct, idecQuantizerScale_, mb);
+    std::uint8_t px[1024];
+    yuvToRgb32(mb, px, (cmd_ & (1u << 25)) != 0);
+    // O MBAI seguinte (escapes somam 33; stuffing é ignorado).
+    unsigned increment = 0;
+    for (;;) {
+        const mpeg::Vlc v = mpeg::decode(mpeg::Table::Mbai, show(16) << 16);
+        if (v.len == 0) {
+            idecEnded_ = true;
+            break;
+        }
+        skip(v.len);
+        if (v.value == mpeg::kMbaiEscape) {
+            increment += 33;
+            continue;
+        }
+        if (v.value == mpeg::kMbaiStuffing) continue;
+        increment += static_cast<unsigned>(v.value);
+        if (increment > 1) {
+            const unsigned idp = (ctrl_ >> 16) & 3;
+            for (int& p : dcPred_) p = 128 << idp;
+        }
+        break;
+    }
+    pushOutput(px, 64);  // por último: depois disto nada mais pode faltar
 }
 
 }  // namespace anyps2::rt

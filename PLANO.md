@@ -202,8 +202,9 @@ SetGsCrt com modo PAL relevante).
   fica ocupado e continua quando o FIFO recebe mais. DMA toIPU (normal e
   chain) sob demanda: enche o FIFO e pausa com STR ligado; cada quadword
   consumido puxa mais. VDEC (as 4 tabelas) e BDEC (macrobloco em RAW16)
-  reiniciáveis; CSC (RGB32); FIFO de saída e DMA fromIPU. Faltam IDEC,
-  PACK, o CSC com saída RGB16 e o MPEG-1 no BDEC.
+  reiniciáveis; IDEC (fatia intra até RGB32) e CSC (RGB32), reiniciáveis
+  por macrobloco; FIFO de saída e DMA fromIPU. Faltam PACK, a saída RGB16
+  (IDEC/CSC com OFM) e o MPEG-1 no IDEC/BDEC.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -256,7 +257,7 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, IDEC/PACK do IPU, espera de PATH3 mascarado,
+  interleave, PACK e saída RGB16 do IPU, espera de PATH3 mascarado,
   `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
@@ -697,14 +698,33 @@ Marco 7 — o vídeo de abertura (em andamento):
   anel e reinicia o DMA (achado com o relatório de threads abaixo).
 - ✅ `ANYPS2_TRACE=threads`: ao encerrar por `ANYPS2_FRAMES`, o estado das
   threads do EE e de onde as bloqueadas chamaram a espera.
-- Onde o GT4 está: **o vídeo de abertura toca** — fade do preto para o
-  branco (os quadros batem com os de um decodificador de referência; o
-  vídeo guarda os dois campos empilhados e o jogo os entrelaça na saída)
-  com o logo da Polyphony Digital desenhado por cima pelo jogo — e depois
-  o jogo pede um **IDEC**. No fundo branco sobram padrões de 3 níveis
-  (251 × 254), provavelmente arredondamento acumulado nos quadros P/B.
-- Próximos passos: IDEC; investigar os padrões tênues. O som continua
-  mudo (pdispu2/rt_ac exigem executar o código do IOP).
+- Com isso **o vídeo de abertura toca** — fade do preto para o branco (os
+  quadros batem com os de um decodificador de referência; o vídeo guarda
+  os dois campos empilhados e o jogo os entrelaça na saída) com o logo da
+  Polyphony Digital desenhado por cima pelo jogo. No fundo branco sobram
+  padrões de 3 níveis (251 × 254), provavelmente arredondamento acumulado
+  nos quadros P/B.
+- ✅ IPU, etapa 5: **IDEC** — uma fatia intra inteira até RGB32:
+  macroblock_type (I), dct_type com DTD, quantiser_scale_code quando o
+  tipo pede, os 6 blocos com a predição do DC seguindo de um macrobloco ao
+  outro (macrobloco pulado a zera), CSC com SGN, e o MBAI seguinte; um
+  código que não é MBAI (o start code) encerra a fatia (SCD, TOP, CBP,
+  CTRL.PCT = I). Reiniciável por macrobloco. Testes `ipu.idec_*`.
+- ✅ Syscalls 0xFD/0xFF: a libkernel do SDK 3.0 chama `iSetAlarm`/
+  `iReleaseAlarm` com o número positivo (teste
+  `timing.alarm_syscall_numbers`).
+- ✅ MPG1: vídeo em repetição (flag 0x10) — no fim do stream o leitor volta
+  ao começo (como o IRX); uma passada sem nenhum pacote de vídeo encerra
+  (teste `iop.movie_program_stream_loop`).
+- Onde o GT4 está: com o roteiro de controle, depois da abertura entra no
+  modo Arcade — **menu "Single Race" com os quatro fundos em vídeo**
+  (World Circuits, Original Circuits, City Courses, Dirt & Snow; três
+  vídeos em repetição decodificados pelo IPU), **Car Selection** (mapa dos
+  fabricantes) e a **vitrine 3D de um carro (Lotus Elise)** — e para numa
+  transferência **LOCAL→HOST do GS** (TRXDIR=1, ler a VRAM).
+- Próximos passos: a transferência LOCAL→HOST do GS; as listras nos
+  vídeos de fundo (mistura de campos?) e os padrões tênues no branco. O
+  som continua mudo (pdispu2/rt_ac exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

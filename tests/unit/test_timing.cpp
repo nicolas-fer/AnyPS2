@@ -1,6 +1,7 @@
 // Testes do relógio do EE, timers T0–T3, VBlank e alarmes (Timing), no modo
 // virtual (determinístico).
 
+#include "anyps2/runtime/context.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/memory.h"
 #include "anyps2/runtime/runtime.h"
@@ -121,6 +122,32 @@ TEST_CASE(timing, alarms) {
     CHECK_EQ(v.t.cyclesUntilNextEvent(), 10 * Timing::kCyclesPerLine);
     for (int i = 0; i < 64; ++i) v.t.setAlarm(1000, 0x00100000, 0, 0);
     CHECK_EQ(v.t.setAlarm(1, 0x00100000, 0, 0), -1);  // limite de 64 alarmes
+}
+
+// As syscalls de alarme pelos números de todas as libkernels: as do ps2sdk
+// (0xFC/0xFE e -0xFD/-0xFF para interrupção) e as do SDK 3.0, que chama as
+// de interrupção com o número positivo (0xFD/0xFF; o GT4 usa).
+TEST_CASE(timing, alarm_syscall_numbers) {
+    VirtualRuntime v;
+    Context& c = v.rt.context();
+    auto call = [&](std::int32_t number, std::uint32_t a0, std::uint32_t a1 = 0, std::uint32_t a2 = 0) {
+        c.r[3].ud[0] = static_cast<std::uint64_t>(static_cast<std::int64_t>(number));
+        c.r[4].ud[0] = a0;
+        c.r[5].ud[0] = a1;
+        c.r[6].ud[0] = a2;
+        v.rt.syscall(&c, 0x00100000);
+        return static_cast<std::int32_t>(c.r[2].uw[0]);
+    };
+    for (const std::int32_t set : {0xFC, 0xFD, -0xFD}) {
+        const std::int32_t id = call(set, 7, 0x00100000, 0);
+        CHECK(id > 0);
+        // A syscall em si gasta alguns ciclos: o alarme vence em pouco menos de 7 linhas.
+        CHECK(v.t.cyclesUntilNextEvent() <= 7 * Timing::kCyclesPerLine);
+        CHECK(v.t.cyclesUntilNextEvent() > 6 * Timing::kCyclesPerLine);
+        const std::int32_t release = set == 0xFC ? 0xFE : set == 0xFD ? 0xFF : -0xFF;
+        CHECK_EQ(call(release, static_cast<std::uint32_t>(id)), id);
+        CHECK_EQ(call(release, static_cast<std::uint32_t>(id)), -1);
+    }
 }
 
 TEST_CASE(timing, real_clock_moves) {

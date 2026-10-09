@@ -69,6 +69,9 @@ constexpr SyscallInfo kSyscalls[] = {
     {0x82, "_InitTLB"}, {0x83, "FindAddress"}, {0x85, "SetMemoryMode"}, {0x86, "GetMemoryMode"},
     {0x87, "ExecPSX"}, {0xFC, "SetAlarm"}, {0xFE, "ReleaseAlarm"}, {-0xFD, "iSetAlarm"},
     {-0xFF, "iReleaseAlarm"},
+    // A libkernel do SDK 3.0 (GT4) chama as versões de interrupção com o número
+    // positivo.
+    {0xFD, "iSetAlarm"}, {0xFF, "iReleaseAlarm"},
 };
 
 std::uint32_t arg(Context* c, unsigned i) {
@@ -655,10 +658,10 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
         case 0x6B: return 0;  // sceSifStopDma
 
         // ---- Alarmes (unidade: linhas HSYNC) e VSync -------------------------------
-        case 0x18: case -0x1E: case 0xFC: case -0xFD:  // SetAlarm(time, handler, arg)
+        case 0x18: case -0x1E: case 0xFC: case 0xFD: case -0xFD:  // SetAlarm(time, handler, arg)
             return ret32(rt_.timing().setAlarm(static_cast<std::uint16_t>(arg(c, 0)), arg(c, 1), arg(c, 2),
                                                c->r[28].uw[0]));
-        case 0x19: case -0x1F: case 0xFE: case -0xFF:  // ReleaseAlarm(id)
+        case 0x19: case -0x1F: case 0xFE: case 0xFF: case -0xFF:  // ReleaseAlarm(id)
             return ret32(rt_.timing().releaseAlarm(sarg(0)) ? sarg(0) : -1);
         case 0x73:  // SetVSyncFlag(u32* flag, u64* csr)
             rt_.timing().setVSyncFlag(arg(c, 0), arg(c, 1));

@@ -13,7 +13,10 @@ class ProgramStream {
 public:
     // Lê `n` bytes a partir de `pos` (relativo ao início do stream).
     using Reader = std::function<bool(std::uint64_t pos, std::uint32_t n, std::uint8_t* dst)>;
-    ProgramStream(Reader read, std::uint64_t size) : read_(std::move(read)), size_(size) {}
+    // loop: no fim, volta ao começo (vídeos de fundo, flag 0x10 do MPG1) — a
+    // não ser que a passada inteira não tenha tido nenhum pacote de vídeo.
+    ProgramStream(Reader read, std::uint64_t size, bool loop = false)
+        : read_(std::move(read)), size_(size), loop_(loop) {}
 
     // Próximo pacote de vídeo: o que vem depois do campo de tamanho do
     // cabeçalho PES (extensão do cabeçalho + dados). false no fim do stream
@@ -28,7 +31,9 @@ private:
     Reader read_;
     std::uint64_t size_;
     std::uint64_t pos_ = 0;
+    bool loop_;
     bool ended_ = false;
+    bool videoThisPass_ = false;
 };
 
 // Tamanho da fatia que o fn 2 do MPG1 enche com um pacote de vídeo.

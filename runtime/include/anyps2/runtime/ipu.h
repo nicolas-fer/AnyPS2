@@ -35,10 +35,10 @@ class Runtime;
 // fromIPU (canal 3) ou leituras de 0x1000_7000 a esvaziam. O comando só deixa
 // de estar ocupado quando o que sobra cabe no FIFO de saída (8 quadwords).
 //
-// Implementado: BCLR, VDEC, BDEC (saída RAW16), FDEC, SETIQ, SETVQ, CSC
-// (saída RGB32, reiniciável por macrobloco) e SETTH. IDEC, PACK e o CSC com
-// saída RGB16 lançam erro dizendo o que falta; MPEG-1 (CTRL.MP1) no BDEC
-// também.
+// Implementado: BCLR, IDEC (fatia intra até RGB32, reiniciável por
+// macrobloco), BDEC (saída RAW16), VDEC, FDEC, SETIQ, SETVQ, CSC (RGB32,
+// reiniciável por macrobloco) e SETTH. PACK e a saída RGB16 (IDEC/CSC com
+// OFM) lançam erro dizendo o que falta; MPEG-1 (CTRL.MP1) no IDEC/BDEC também.
 class Ipu {
 public:
     explicit Ipu(Runtime* rt);
@@ -103,6 +103,13 @@ private:
     // Depois de um macrobloco: start code à frente liga SCD (outro dado, ECD).
     void checkStartCode();
     void runCscMacroblock();
+    // IDEC: um macrobloco e o MBAI seguinte (que pode encerrar a fatia).
+    void idecMacroblock();
+    // RAW8 (Y 16×16, Cb 8×8, Cr 8×8) → RGB32 com os limiares do SETTH; sgn
+    // subtrai 128 de cada componente (saída com sinal).
+    void yuvToRgb32(const std::uint8_t (&in)[384], std::uint8_t (&px)[1024], bool sgn) const;
+    // Os 6 blocos intra de um macrobloco em RAW8 (0–255).
+    void decodeIntraMacroblock(bool fieldDct, int quantizerScale, std::uint8_t (&mb)[384]);
     // Executa um trecho reiniciável: sem dados no meio, desfaz e retorna false.
     template <typename Body>
     bool attempt(Body&& body);
@@ -123,6 +130,8 @@ private:
         unsigned bp, fp;
         int dcPred[3];
         std::uint32_t ctrl;  // ECD/SCD/CBP só valem quando o comando termina
+        int idecQuantizerScale;
+        bool idecEnded;
     };
     Snapshot snap_{};
     std::deque<Qword> popped_;
@@ -138,6 +147,9 @@ private:
     bool waitingOutput_ = false;  // decodificado; esperando a saída caber no FIFO
     unsigned pos_ = 0;            // progresso do comando corrente (FDEC/SETIQ/SETVQ)
     int dcPred_[3] = {};
+    // IDEC: escala de quantização corrente e se a fatia já acabou.
+    int idecQuantizerScale_ = 0;
+    bool idecEnded_ = false;
 
     std::array<std::uint8_t, 64> iq_{};
     std::array<std::uint8_t, 64> niq_{};

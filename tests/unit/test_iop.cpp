@@ -250,14 +250,14 @@ void pack(std::vector<std::uint8_t>& s, unsigned stuffing, std::uint8_t marker =
     for (unsigned i = 0; i < stuffing; ++i) s.push_back(0xFF);
 }
 
-movie::ProgramStream streamOf(const std::vector<std::uint8_t>& s) {
+movie::ProgramStream streamOf(const std::vector<std::uint8_t>& s, bool loop = false) {
     return movie::ProgramStream(
         [&s](std::uint64_t pos, std::uint32_t n, std::uint8_t* dst) {
             if (pos + n > s.size()) return false;
             std::memcpy(dst, s.data() + pos, n);
             return true;
         },
-        s.size());
+        s.size(), loop);
 }
 
 }  // namespace
@@ -328,4 +328,29 @@ TEST_CASE(iop, movie_slot_layout) {
     // Pacote grande demais para a fatia.
     std::vector<std::uint8_t> big(5100);
     CHECK_THROWS_WITH(movie::buildSlot(&big, slot, 0), "não cabe");
+}
+
+// Vídeo em repetição (flag 0x10 do MPG1): no fim volta ao começo; sem nenhum
+// pacote de vídeo numa passada, acaba em vez de girar para sempre.
+TEST_CASE(iop, movie_program_stream_loop) {
+    std::vector<std::uint8_t> s;
+    pack(s, 0);
+    pes(s, 0xE0, {1, 2, 3});
+    pes(s, 0xE0, {4, 5});
+    s.insert(s.end(), {0, 0, 1, 0xB9});
+    auto ps = streamOf(s, true);
+    std::vector<std::uint8_t> got;
+    for (unsigned pass = 0; pass < 3; ++pass) {
+        REQUIRE(ps.nextVideo(got, 0));
+        CHECK_EQ(got.size(), 3u);
+        REQUIRE(ps.nextVideo(got, 0));
+        CHECK_EQ(got.size(), 2u);
+    }
+    CHECK(!ps.ended());
+    std::vector<std::uint8_t> silent;
+    pack(silent, 0);
+    pes(silent, 0xBD, {9, 9});
+    auto ps2 = streamOf(silent, true);
+    CHECK(!ps2.nextVideo(got, 0));
+    CHECK(ps2.ended());
 }
