@@ -8,6 +8,11 @@ else()
     set(_anyps2_fetch_default OFF)
 endif()
 option(ANYPS2_FETCH_SDL "Baixa e compila o SDL2 se ele não for encontrado no sistema" ${_anyps2_fetch_default})
+# Dear ImGui (menu de configuração dentro da janela): com ANYPS2_IMGUI_DIR usa
+# uma cópia local; senão baixa a versão fixada abaixo, se ANYPS2_FETCH_IMGUI.
+# Só existe com ANYPS2_WITH_SDL=ON.
+set(ANYPS2_IMGUI_DIR "" CACHE PATH "Pasta do Dear ImGui (vazio: baixar)")
+option(ANYPS2_FETCH_IMGUI "Baixa o Dear ImGui se ANYPS2_IMGUI_DIR não for dado" ${_anyps2_fetch_default})
 
 # Formatos de disco e de módulos do IOP (ISO 9660, cabeçalho IRX, tabela de
 # módulos com HLE), sem o resto do runtime: a CLI ("anyps2 disc") também usa.
@@ -101,12 +106,38 @@ if(ANYPS2_WITH_SDL)
     set_property(GLOBAL PROPERTY ANYPS2_SDL_ORIGIN ${_anyps2_sdl_origin})
     # Os nomes do arquivo de configuração são conferidos com o SDL (config.h).
     target_compile_definitions(anyps2_runtime PUBLIC ANYPS2_SDL_NAMES=1)
-    target_sources(anyps2_runtime PRIVATE src/video_sdl.cpp src/audio_sdl.cpp)
+    target_sources(anyps2_runtime PRIVATE src/video_sdl.cpp src/audio_sdl.cpp src/video_menu.cpp)
     if(TARGET SDL2::SDL2-static)
-        target_link_libraries(anyps2_runtime PRIVATE SDL2::SDL2-static)
+        set(_anyps2_sdl_target SDL2::SDL2-static)
     else()
-        target_link_libraries(anyps2_runtime PRIVATE SDL2::SDL2)
+        set(_anyps2_sdl_target SDL2::SDL2)
     endif()
+    target_link_libraries(anyps2_runtime PRIVATE ${_anyps2_sdl_target})
+
+    # Dear ImGui sem warnings próprios: é código de terceiros, fora de anyps2_set_warnings.
+    if(ANYPS2_IMGUI_DIR)
+        set(_anyps2_imgui_src ${ANYPS2_IMGUI_DIR})
+    elseif(ANYPS2_FETCH_IMGUI)
+        include(FetchContent)
+        FetchContent_Declare(anyps2_imgui
+            URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.9.tar.gz)
+        FetchContent_MakeAvailable(anyps2_imgui)
+        set(_anyps2_imgui_src ${anyps2_imgui_SOURCE_DIR})
+    else()
+        message(FATAL_ERROR
+            "Dear ImGui não informado: use -DANYPS2_IMGUI_DIR=<pasta>, ou -DANYPS2_FETCH_IMGUI=ON para "
+            "baixá-lo, ou -DANYPS2_WITH_SDL=OFF para compilar só o modo sem janela.")
+    endif()
+    add_library(anyps2_imgui STATIC
+        ${_anyps2_imgui_src}/imgui.cpp
+        ${_anyps2_imgui_src}/imgui_draw.cpp
+        ${_anyps2_imgui_src}/imgui_tables.cpp
+        ${_anyps2_imgui_src}/imgui_widgets.cpp
+        ${_anyps2_imgui_src}/backends/imgui_impl_sdl2.cpp
+        ${_anyps2_imgui_src}/backends/imgui_impl_sdlrenderer2.cpp)
+    target_include_directories(anyps2_imgui PUBLIC ${_anyps2_imgui_src} ${_anyps2_imgui_src}/backends)
+    target_link_libraries(anyps2_imgui PUBLIC ${_anyps2_sdl_target})
+    target_link_libraries(anyps2_runtime PRIVATE anyps2_imgui)
 else()
     set_property(GLOBAL PROPERTY ANYPS2_SDL_ORIGIN none)
     target_sources(anyps2_runtime PRIVATE src/video_nosdl.cpp src/audio_nosdl.cpp)

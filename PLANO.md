@@ -756,7 +756,9 @@ sem arquivo o comportamento é o de sempre.
   (esta última antes lida direto no memory card).
 - ✅ Testes: leitura e comentários, erros com linha, prioridade
   env > arquivo > padrão, e padrões iguais ao mapeamento fixo (`config.*`).
-- ⬜ Interface gráfica de menus dentro da janela (proposta em avaliação: Dear
-  ImGui sobre SDL2; depende de aprovar a nova dependência).
-- ⬜ Gravar a configuração pela própria interface, com "aguardando tecla"
-  para remapear, e escolher a ISO e a pasta dos cartões por diálogo.
+- ✅ Menu dentro da janela (F1, Dear ImGui 1.90.9 via CMake: `ANYPS2_FETCH_IMGUI`
+  ou `ANYPS2_IMGUI_DIR`; só com SDL): ligações por porta com "aperte a tecla ou
+  o botão" (Esc cancela), janela e som, cartões, disco e "Salvar anyps2.ini".
+  Com o menu aberto o jogo recebe controle neutro. A gravação é testada (ler →
+  gravar → ler); a janela em si precisa de teste manual.
+- ⬜ Escolher a ISO e a pasta dos cartões por diálogo de arquivos (hoje é digitação).

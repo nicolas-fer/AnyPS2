@@ -261,6 +261,21 @@ ligação. Nome de tecla, botão ou eixo desconhecido é erro com arquivo, linha
 chave, como qualquer erro de sintaxe (o programa para antes de abrir a janela),
 por exemplo `anyps2.ini:3: valor inválido para [video] scale: 9 (use um número de 1 a 4)`.
 
+#### Menu de configuração (F1)
+
+Dentro da janela, **F1** abre o menu (Dear ImGui): as ligações de teclado e de
+controle de cada porta (clique numa ligação e aperte a tecla ou o botão; Esc
+cancela; "Limpar" desliga), janela e som, pasta dos cartões e imagem do disco.
+Com o menu aberto o jogo recebe o controle neutro. **Salvar anyps2.ini** grava
+o arquivo usado (`ANYPS2_CONFIG` ou o `anyps2.ini` ao lado do executável; se
+nenhum existir, cria o ao lado do executável). Janela e som só valem na próxima
+execução. Os nomes gravados são os do SDL, então o arquivo pode ser editado à
+mão depois.
+
+Dear ImGui é baixado pelo CMake com a versão fixada (`ANYPS2_FETCH_IMGUI`,
+padrão ligado no Windows) ou vem de `-DANYPS2_IMGUI_DIR=<pasta>`. Só existe com
+`ANYPS2_WITH_SDL=ON`.
+
 ### Fase 1 — ELF e decodificador
 
 - **Parser de ELF32** (MIPS little-endian): cabeçalho, program headers,

@@ -260,3 +260,46 @@ TEST_CASE(config, unknown_names_are_errors_with_line_and_section) {
     applyConfigText(o, "[keyboard.1]\ncross = Left Shift\n[gamepad.1]\ncross = a\n", "anyps2.ini");
 }
 #endif
+
+TEST_CASE(config, text_round_trip_keeps_every_option) {
+    RuntimeOptions a;
+    applyConfigText(a,
+                    "[memcard]\ndir = C:\\cartoes\n"
+                    "[disc]\niso = C:\\jogos\\gt4.iso\n"
+                    "[video]\nmode = none\nscale = 3\n"
+                    "[audio]\nmode = auto\nwav = som.wav\n"
+                    "[keyboard.2]\ncross = Space\nup =\n"
+                    "[gamepad.1]\nl2 = +lefttrigger\nlx = leftx\n",
+                    "x.ini");
+    const std::string text = configText(a);
+    RuntimeOptions b;
+    applyConfigText(b, text, "gravado.ini");
+    // ler → gravar → ler dá o mesmo texto e as mesmas opções.
+    CHECK_EQ(configText(b), text);
+    CHECK_EQ(b.memcardDir, std::string("C:\\cartoes"));
+    CHECK_EQ(b.iso, std::string("C:\\jogos\\gt4.iso"));
+    CHECK_EQ(b.video, std::string("none"));
+    CHECK_EQ(b.videoScale, 3);
+    CHECK_EQ(b.audio, std::string(""));
+    CHECK_EQ(b.audioWav, std::string("som.wav"));
+    CHECK_EQ(b.pad.key[1][padButtonIndex("cross")], std::string("Space"));
+    // Ligação desligada ("up =") continua desligada depois de gravar.
+    CHECK_EQ(b.pad.key[1][padButtonIndex("up")], std::string(""));
+    CHECK_EQ(b.pad.button[0][padButtonIndex("l2")], std::string("+lefttrigger"));
+    CHECK_EQ(b.pad.analog[0][0], std::string("leftx"));
+}
+
+TEST_CASE(config, save_file_then_read_it_back) {
+    RuntimeOptions a;
+    a.memcardDir = "cartoes_gravados";
+    a.videoScale = 2;
+    a.pad.key[0][padButtonIndex("start")] = "";
+    const std::string path = (std::filesystem::temp_directory_path() / "anyps2_test_gravar.ini").string();
+    saveConfigFile(a, path);
+    const RuntimeOptions c = resolveOptions(envOf(Vars{{"ANYPS2_CONFIG", path}}), kNoFile);
+    CHECK_EQ(c.memcardDir, std::string("cartoes_gravados"));
+    CHECK_EQ(c.videoScale, 2);
+    CHECK_EQ(c.pad.key[0][padButtonIndex("start")], std::string(""));
+    CHECK_EQ(c.configPath, path);
+    std::filesystem::remove(path);
+}

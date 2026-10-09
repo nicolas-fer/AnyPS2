@@ -7,6 +7,10 @@
 // (arquivo de configuração; padrões: setas, Z ✕, X ○, A □, S △, Q/W = L1/R1,
 // 1/2 = L2/R2, Enter = START, Backspace = SELECT no teclado da porta 1, e o
 // controle SDL: 1º controle = porta 1, 2º = porta 2).
+//
+// F1 abre o menu de configuração (video_menu.cpp, Dear ImGui). Com o menu
+// aberto o jogo recebe o controle neutro; a captura de uma nova ligação
+// consome a próxima tecla, botão ou eixo.
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -15,6 +19,7 @@
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -24,6 +29,10 @@
 #include "anyps2/runtime/input.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/video.h"
+#include "backends/imgui_impl_sdl2.h"
+#include "backends/imgui_impl_sdlrenderer2.h"
+#include "imgui.h"
+#include "video_menu.h"
 
 namespace anyps2::rt {
 
@@ -51,6 +60,11 @@ std::uint8_t& analogField(PadInput& s, int index) {
     }
 }
 
+// Gatilhos são eixos que só dão valores positivos: a captura não põe sinal neles.
+bool isTriggerAxis(int axis) {
+    return axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+}
+
 class SdlVideo final : public Video {
 public:
     SdlVideo(const RuntimeOptions& options, std::string title, Input* input)
@@ -58,7 +72,8 @@ public:
           requireDisplay_(options.video.empty()),
           scale_(options.videoScale < 1 ? 1 : options.videoScale),
           input_(input) {
-        bind(options.pad);
+        menu_.edit = options;
+        bind(menu_.edit.pad);
     }
 
     bool start(std::string& error) {
@@ -108,17 +123,22 @@ private:
         std::uint16_t bit;
     };
     // Um eixo do controle: analog >= 0 é o analógico (0..3); senão o eixo
-    // aciona o botão digital bit acima do limiar.
+    // aciona o botão digital bit conforme o sentido dir (padAxisPressed).
     struct AxisBind {
         SDL_GameControllerAxis axis;
         unsigned port;
         int analog;
         std::uint16_t bit;
-        int dir;  // botão digital: 0 = os dois sentidos, +1, -1 (padAxisPressed)
+        int dir;  // 0 = os dois sentidos, +1, -1
+    };
+    struct Pad {
+        SDL_GameController* handle = nullptr;
+        SDL_JoystickID id = -1;
+        PadInput state;
     };
 
-    // Resolve os nomes da configuração para códigos do SDL. Nome desconhecido
-    // vira aviso e a ligação é ignorada (a janela continua funcionando).
+    // Resolve os nomes da configuração para códigos do SDL. O arquivo já foi
+    // conferido ao ser lido (config.cpp); o que não resolve aqui é ignorado.
     void bind(const PadBindings& pad) {
         for (unsigned port = 0; port < 2; ++port) {
             for (unsigned i = 0; i < 16; ++i) {
@@ -127,8 +147,6 @@ private:
                 if (!key.empty()) {
                     if (const SDL_Keycode k = keycodeFromName(key); k != SDLK_UNKNOWN) {
                         keyBinds_.push_back({k, port, bit});
-                    } else {
-                        warn("tecla", key, port, i);
                     }
                 }
                 const std::string& button = pad.button[port][i];
@@ -141,8 +159,6 @@ private:
                     } else if (const SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(name.c_str());
                                a != SDL_CONTROLLER_AXIS_INVALID) {
                         axisBinds_.push_back({a, port, -1, bit, dir});
-                    } else {
-                        warn("botão do controle", button, port, i);
                     }
                 }
             }
@@ -152,17 +168,69 @@ private:
                 if (const SDL_GameControllerAxis s = SDL_GameControllerGetAxisFromString(axis.c_str());
                     s != SDL_CONTROLLER_AXIS_INVALID) {
                     axisBinds_.push_back({s, port, a, 0, 0});
-                } else {
-                    std::cerr << "anyps2: aviso: eixo do controle desconhecido '" << axis << "' (porta "
-                              << port + 1 << ", " << kPadAnalogNames[a] << "), ignorado\n";
                 }
             }
         }
     }
 
-    void warn(const char* what, const std::string& name, unsigned port, unsigned button) {
-        std::cerr << "anyps2: aviso: " << what << " desconhecido '" << name << "' (porta " << port + 1 << ", "
-                  << kPadButtonNames[button] << "), ignorado\n";
+    // Refaz as ligações depois de uma mudança no menu.
+    void rebind() {
+        keyBinds_.clear();
+        buttonBinds_.clear();
+        axisBinds_.clear();
+        bind(menu_.edit.pad);
+    }
+
+    // Captura de uma nova ligação: a próxima tecla, botão ou eixo do tipo
+    // pedido vira a ligação; Esc cancela. Devolve true se consumiu o evento.
+    bool capture(const SDL_Event& ev) {
+        ConfigMenu& m = menu_;
+        const unsigned port = static_cast<unsigned>(m.listenPort);
+        const int slot = m.listenSlot;
+        std::string name;
+        switch (ev.type) {
+            case SDL_KEYDOWN:
+                if (ev.key.repeat) return true;
+                if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                    m.listenPort = -1;
+                    m.status = "Cancelado.";
+                    return true;
+                }
+                if (m.listenKind == ConfigMenu::Kind::Key) name = SDL_GetKeyName(ev.key.keysym.sym);
+                break;
+            case SDL_CONTROLLERBUTTONDOWN:
+                if (m.listenKind != ConfigMenu::Kind::Key) {
+                    const char* b = SDL_GameControllerGetStringForButton(
+                        static_cast<SDL_GameControllerButton>(ev.cbutton.button));
+                    if (b && m.listenKind == ConfigMenu::Kind::Pad) name = b;
+                }
+                break;
+            case SDL_CONTROLLERAXISMOTION:
+                if (m.listenKind != ConfigMenu::Kind::Key && std::abs(static_cast<int>(ev.caxis.value)) > 16000) {
+                    const char* a = SDL_GameControllerGetStringForAxis(
+                        static_cast<SDL_GameControllerAxis>(ev.caxis.axis));
+                    if (a) {
+                        name = a;
+                        // Botão digital com eixo guarda o sentido: "+leftx" ou "-leftx".
+                        if (m.listenKind == ConfigMenu::Kind::Pad && !isTriggerAxis(ev.caxis.axis)) {
+                            name = (ev.caxis.value < 0 ? "-" : "+") + name;
+                        }
+                    }
+                }
+                break;
+            default:
+                return false;
+        }
+        if (name.empty() || name == "Unknown") return true;  // não serve: continua esperando
+        switch (m.listenKind) {
+            case ConfigMenu::Kind::Key: m.edit.pad.key[port][slot] = name; break;
+            case ConfigMenu::Kind::Pad: m.edit.pad.button[port][slot] = name; break;
+            case ConfigMenu::Kind::Analog: m.edit.pad.analog[port][slot] = name; break;
+        }
+        m.listenPort = -1;
+        m.changed = true;
+        m.status = "Ligação alterada. Clique em Salvar para gravar o arquivo.";
+        return true;
     }
 
     void fail(const std::string& what) {
@@ -206,6 +274,13 @@ private:
         // Controles: falha aqui só deixa sem gamepad (teclado continua).
         const bool controllers = SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
         SDL_RenderSetLogicalSize(renderer, 640, 480);  // proporção 4:3 da TV
+        // Menu de configuração: o ImGui trabalha em coordenadas lógicas (640x480).
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;  // sem imgui.ini
+        ImGui::StyleColorsDark();
+        ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
+        ImGui_ImplSDLRenderer2_Init(renderer);
         {
             std::lock_guard lock(mutex_);
             started_ = true;
@@ -233,22 +308,27 @@ private:
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) closed_ = true;
+                if (menu_.open) ImGui_ImplSDL2_ProcessEvent(&ev);
                 handleInput(ev);
             }
-            if (!draw) continue;
-            if (!texture || texW != local.width || texH != local.height) {
-                if (texture) SDL_DestroyTexture(texture);
-                texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
-                                            static_cast<int>(local.width), static_cast<int>(local.height));
-                texW = local.width;
-                texH = local.height;
+            if (draw) {
+                if (!texture || texW != local.width || texH != local.height) {
+                    if (texture) SDL_DestroyTexture(texture);
+                    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
+                                                static_cast<int>(local.width), static_cast<int>(local.height));
+                    texW = local.width;
+                    texH = local.height;
+                }
+                if (texture) SDL_UpdateTexture(texture, nullptr, local.pixels.data(), static_cast<int>(local.width * 4));
             }
-            if (!texture) continue;
-            SDL_UpdateTexture(texture, nullptr, local.pixels.data(), static_cast<int>(local.width * 4));
             SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            if (texture) SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            if (menu_.open) drawMenu(renderer);
             SDL_RenderPresent(renderer);
         }
+        ImGui_ImplSDLRenderer2_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
         if (texture) SDL_DestroyTexture(texture);
         for (auto& c : pads_) {
             if (c.handle) SDL_GameControllerClose(c.handle);
@@ -259,12 +339,34 @@ private:
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
     }
 
+    // Um quadro do menu por cima da imagem do jogo.
+    void drawMenu(SDL_Renderer* renderer) {
+        ImGui_ImplSDLRenderer2_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::GetIO().DisplaySize = ImVec2(640, 480);
+        ImGui::NewFrame();
+        drawConfigMenu(menu_);
+        ImGui::Render();
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+        if (menu_.changed) {
+            menu_.changed = false;
+            rebind();
+        }
+    }
+
     void handleInput(const SDL_Event& ev) {
         if (!input_) return;
+        if (menu_.listenPort >= 0 && capture(ev)) return;
         bool changed = false;
         switch (ev.type) {
             case SDL_KEYDOWN:
             case SDL_KEYUP:
+                if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F1 && !ev.key.repeat) {
+                    menu_.open = !menu_.open;
+                    menu_.listenPort = -1;
+                    changed = true;
+                    break;
+                }
                 for (const KeyBind& kb : keyBinds_) {
                     if (kb.key != ev.key.keysym.sym) continue;
                     if (ev.type == SDL_KEYDOWN) keys_[kb.port] |= kb.bit;
@@ -326,26 +428,26 @@ private:
             default:
                 break;
         }
-        if (!changed) return;
+        if (changed) flush();
+    }
+
+    // Manda o estado das duas portas para o padman. Com o menu aberto, o jogo
+    // recebe o controle neutro.
+    void flush() {
         for (unsigned p = 0; p < 2; ++p) {
-            PadInput s = pads_[p].state;
-            s.buttons |= keys_[p];
+            PadInput s = menu_.open ? PadInput{} : pads_[p].state;
+            if (!menu_.open) s.buttons |= keys_[p];
             // A porta 1 existe sempre (o teclado a usa); a 2 só com controle.
             s.connected = p == 0 || pads_[p].handle != nullptr;
             input_->setHost(p, s);
         }
     }
 
-    struct Pad {
-        SDL_GameController* handle = nullptr;
-        SDL_JoystickID id = -1;
-        PadInput state;
-    };
-
     std::string title_;
     bool requireDisplay_;
     int scale_;
     Input* input_;
+    ConfigMenu menu_;  // cópia editável das opções: as ligações saem daqui
     std::vector<KeyBind> keyBinds_;
     std::vector<ButtonBind> buttonBinds_;
     std::vector<AxisBind> axisBinds_;

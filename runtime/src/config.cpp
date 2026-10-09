@@ -219,6 +219,36 @@ void applyEnvironment(RuntimeOptions& o, const std::function<const char*(const c
 
 }  // namespace
 
+std::string configText(const RuntimeOptions& o) {
+    std::ostringstream out;
+    out << "# anyps2.ini: gravado pelo menu de configuração (F1 na janela).\n"
+        << "# Variáveis de ambiente, quando definidas, continuam valendo por cima.\n\n";
+    out << "[memcard]\ndir = " << o.memcardDir << "\n\n";
+    out << "[disc]\niso = " << o.iso << "\n\n";
+    out << "[video]\nmode = " << (o.video.empty() ? "auto" : o.video) << "\nscale = " << o.videoScale << "\n\n";
+    out << "[audio]\nmode = " << (o.audio.empty() ? "auto" : o.audio) << "\nwav = " << o.audioWav << "\n\n";
+    for (unsigned port = 0; port < 2; ++port) {
+        out << "[keyboard." << port + 1 << "]\n";
+        for (int i = 0; i < 16; ++i) out << kPadButtonNames[i] << " = " << o.pad.key[port][i] << "\n";
+        out << "\n";
+    }
+    for (unsigned port = 0; port < 2; ++port) {
+        out << "[gamepad." << port + 1 << "]\n";
+        for (int i = 0; i < 16; ++i) out << kPadButtonNames[i] << " = " << o.pad.button[port][i] << "\n";
+        for (int a = 0; a < 4; ++a) out << kPadAnalogNames[a] << " = " << o.pad.analog[port][a] << "\n";
+        out << "\n";
+    }
+    return out.str();
+}
+
+void saveConfigFile(const RuntimeOptions& o, const std::string& path) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) throw anyps2::Error("não foi possível gravar " + path);
+    f << configText(o);
+    f.close();
+    if (!f) throw anyps2::Error("erro ao gravar " + path);
+}
+
 std::string defaultConfigPath() {
     return (executableDir() / kDefaultConfigFile).string();
 }

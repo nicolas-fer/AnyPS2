@@ -32,4 +32,11 @@ RuntimeOptions resolveOptions(const std::function<const char*(const char*)>& env
 // primeira linha inválida.
 void applyConfigText(RuntimeOptions& o, const std::string& text, const std::string& source);
 
+// Texto do anyps2.ini para estas opções: todas as seções e todas as ligações (as
+// vazias como "chave =", para que desligar uma tecla padrão fique gravado).
+// Ler o texto de volta (applyConfigText) dá as mesmas opções.
+std::string configText(const RuntimeOptions& o);
+// Grava configText(o) em path. Lança anyps2::Error se não conseguir.
+void saveConfigFile(const RuntimeOptions& o, const std::string& path);
+
 }  // namespace anyps2::rt
