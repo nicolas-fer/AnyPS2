@@ -199,8 +199,10 @@ SetGsCrt com modo PAL relevante).
 - 🟡 IPU (Fase 7): registradores CMD/CTRL/BP/TOP, FIFO de entrada com o
   buffer interno de 2 quadwords (BP/FP/IFC como no hardware), CTRL.RST e os
   comandos BCLR, FDEC, SETIQ, SETVQ e SETTH; comando sem dados suficientes
-  fica ocupado e continua quando o FIFO recebe mais. Faltam IDEC/BDEC/VDEC/
-  CSC/PACK (decodificação MPEG-2), o FIFO de saída e o DMA toIPU/fromIPU.
+  fica ocupado e continua quando o FIFO recebe mais. DMA toIPU (normal e
+  chain) sob demanda: enche o FIFO e pausa com STR ligado; cada quadword
+  consumido puxa mais. Faltam IDEC/BDEC/VDEC/CSC/PACK (decodificação
+  MPEG-2), o FIFO de saída e o DMA fromIPU.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -253,7 +255,7 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, decodificação do IPU e seu DMA, espera de PATH3 mascarado,
+  interleave, decodificação do IPU e o DMA fromIPU, espera de PATH3 mascarado,
   `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
@@ -646,16 +648,30 @@ Marco 7 — o vídeo de abertura (em andamento):
 - ✅ IPU, etapa 1: registradores, FIFO de entrada e ponteiro de bits, BCLR,
   FDEC, SETIQ, SETVQ e SETTH (testes em `ipu`). O `sceMpegInit` do GT4
   passa (matrizes de quantização pelo FIFO).
-- Onde o GT4 está: depois do `sceMpegInit` a tela fica preta. O vídeo vem
-  do servidor RPC **MPG1** do IOP (registrado junto de PBGM/VOIC/MPG2 pelo
-  PDISPU2.IRX), que ainda responde zeros: fn 1 abre o vídeo ({0x40,
-  0x239CE4, LSN 0x1F849 dentro do GT4.VOL, nome}) e fn 2 ({destino no EE,
-  0xA000}) enche blocos de 5120 bytes que o EE transforma em pacotes PES
-  de vídeo (`00 00 01 E0`). Os setores no disco não têm cara de MPEG puro
-  (cifrados ou comprimidos): o HLE do MPG1 exige levantar o que o IRX faz.
-- Próximos passos: o HLE do MPG1; depois IDEC/BDEC/VDEC/CSC, o FIFO de
-  saída e o DMA toIPU/fromIPU. O som continua mudo (pdispu2/rt_ac exigem
-  executar o código do IOP).
+- ✅ **Servidores MPG1/MPG2 em HLE** (leitor de vídeos do PDISTR.IRX,
+  levantado do código do IRX): fn 1 abre um MPEG-2 Program Stream no disco
+  ({flags, LSN, setores, nome}; o vídeo de abertura fica no LSN 0x239CE4,
+  fora do sistema de arquivos, na área da segunda camada), fn 2 enche
+  fatias de 5120 bytes, uma por pacote de vídeo (0xE0), em registros
+  {bytes, desalinhamento, bytes que faltam, 0} + dados + registro zerado; o
+  EE remonta os pacotes PES. O áudio (0xBD) seria do SPU2 e é pulado (som
+  mudo). Testes `iop.movie_program_stream_video_packets` e
+  `iop.movie_slot_layout`.
+- ✅ IPU, etapa 2: **DMA toIPU sob demanda** (normal e chain), como no
+  hardware: o canal enche o FIFO de 8 quadwords e pausa com STR ligado;
+  cada quadword que o IPU tira do FIFO puxa mais um, então MADR/QWC/TADR +
+  IFC/FP/BP mostram exatamente quanto foi consumido. Reescrever o CHCR com
+  o canal pausado reavalia o tag corrente (a libmpeg troca refe por ref ao
+  acrescentar tags ao anel). Testes `ipu.dma_to_ipu_normal_on_demand` e
+  `ipu.dma_to_ipu_chain_and_append`.
+- Onde o GT4 está: o vídeo chega ao IPU pelo DMA, a libmpeg lê os
+  cabeçalhos (sequence/GOP/picture) com FDEC e pede o primeiro **VDEC**
+  (tipo de macrobloco): o caminho é VDEC + BDEC por macrobloco, com a
+  compensação de movimento em software no EE.
+- Próximos passos: VDEC (as 4 tabelas), BDEC (VLC dos coeficientes,
+  quantização inversa, IDCT, saída RAW16), FIFO de saída e DMA fromIPU;
+  depois CSC/IDEC se o jogo pedir. O som continua mudo (pdispu2/rt_ac
+  exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

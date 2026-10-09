@@ -17,12 +17,15 @@ class Runtime;
 //
 // Suportado: modo normal e chain de origem (refe/cnt/next/ref/refs/call/
 // ret/end, com TTE para os VIFs, IRQ+TIE, pilha ASR0/ASR1) nos canais VIF0,
-// VIF1, GIF e toSPR; modo normal no fromSPR. IPU, SIF por registradores,
-// MFIFO, interleave e VIF1→memória lançam erro dizendo o que faltou.
+// VIF1, GIF, toIPU e toSPR; modo normal no fromSPR. fromIPU, SIF por
+// registradores, MFIFO, interleave e VIF1→memória lançam erro dizendo o que
+// faltou.
 //
 // Exceção à transferência instantânea: se o VIF para (VIFcode com bit I), o
 // canal pausa no ponto exato (MADR/QWC/TADR, STR continua ligado) e só
-// continua quando o VIF for liberado (resumeChannel, chamado pelo VIF).
+// continua quando o VIF for liberado (resumeChannel, chamado pelo VIF). O
+// toIPU (normal e chain) é sob demanda: enche o FIFO do IPU e pausa; o IPU
+// chama resumeChannel a cada quadword que consome.
 class Dmac {
 public:
     static constexpr unsigned kChannels = 10;
@@ -47,7 +50,8 @@ public:
     bool cpcond0() const { return ((~pcr_ | stat_) & 0x3FFu) == 0x3FFu; }
     // ResetEE(DMAC)
     void reset();
-    // O VIF do canal (0 ou 1) saiu da parada: o DMA pausado continua.
+    // O destino do canal pausado aceita mais (VIF saiu da parada, FIFO do
+    // IPU com espaço): o DMA continua.
     void resumeChannel(unsigned ch, std::uint32_t pc);
 
 private:

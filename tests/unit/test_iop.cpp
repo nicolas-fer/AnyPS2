@@ -1,5 +1,6 @@
 // IOP em HLE (Fase 6): cabeçalho de IRX, roteiro dos controles, leitura de
-// ISO 9660, decodificação ADPCM e envelope/mixagem do SPU2.
+// ISO 9660, decodificação ADPCM e envelope/mixagem do SPU2; o leitor de
+// vídeos (Program Stream) do MPG1.
 
 #include <algorithm>
 #include <cstdio>
@@ -9,9 +10,11 @@
 #include <vector>
 
 #include "anyps2/common/error.h"
+#include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/input.h"
 #include "anyps2/runtime/iop/cdvd.h"
 #include "anyps2/runtime/iop/iop.h"
+#include "anyps2/runtime/iop/movie.h"
 #include "anyps2/runtime/iop/spu2.h"
 #include "irx_builder.h"
 #include "minitest.h"
@@ -231,4 +234,98 @@ TEST_CASE(iop, spu2_key_off_releases) {
     spu.render(mix.data(), 2000);
     CHECK(!spu.active(0));
     CHECK_EQ(mix[2 * 1999], 0);
+}
+
+namespace {
+
+// Pacote PES: start code 00 00 01 id, tamanho (16 bits) e os dados.
+void pes(std::vector<std::uint8_t>& s, std::uint8_t id, const std::vector<std::uint8_t>& data) {
+    const auto n = static_cast<unsigned>(data.size());
+    s.insert(s.end(), {0, 0, 1, id, static_cast<std::uint8_t>(n >> 8), static_cast<std::uint8_t>(n)});
+    s.insert(s.end(), data.begin(), data.end());
+}
+// Pack header do MPEG-2 (marcador '01' no primeiro byte) com `stuffing` bytes.
+void pack(std::vector<std::uint8_t>& s, unsigned stuffing, std::uint8_t marker = 0x44) {
+    s.insert(s.end(), {0, 0, 1, 0xBA, marker, 0, 4, 0, 4, 1, 1, 0x9A, 0xEF, static_cast<std::uint8_t>(0xF8 | stuffing)});
+    for (unsigned i = 0; i < stuffing; ++i) s.push_back(0xFF);
+}
+
+movie::ProgramStream streamOf(const std::vector<std::uint8_t>& s) {
+    return movie::ProgramStream(
+        [&s](std::uint64_t pos, std::uint32_t n, std::uint8_t* dst) {
+            if (pos + n > s.size()) return false;
+            std::memcpy(dst, s.data() + pos, n);
+            return true;
+        },
+        s.size());
+}
+
+}  // namespace
+
+// Só os pacotes de vídeo (0xE0) saem; pack headers (com enchimento), system
+// header, áudio privado e padding são pulados; 0x1B9 encerra.
+TEST_CASE(iop, movie_program_stream_video_packets) {
+    std::vector<std::uint8_t> s;
+    const std::vector<std::uint8_t> v1 = {0x81, 0x80, 5, 1, 2, 3, 4, 5, 0, 0, 1, 0xB3};
+    std::vector<std::uint8_t> v2(300);
+    for (unsigned i = 0; i < v2.size(); ++i) v2[i] = static_cast<std::uint8_t>(i * 7);
+    pack(s, 2);
+    pes(s, 0xBB, {0x80, 1, 2, 3, 4, 5});  // system header
+    pes(s, 0xE0, v1);
+    pack(s, 0);
+    pes(s, 0xBD, {0xA0, 9, 9});  // áudio
+    pes(s, 0xBE, std::vector<std::uint8_t>(17, 0xFF));  // padding
+    pes(s, 0xE0, v2);
+    s.insert(s.end(), {0, 0, 1, 0xB9});
+    pes(s, 0xE0, v1);  // depois do fim: não é lido
+    auto ps = streamOf(s);
+    std::vector<std::uint8_t> got;
+    REQUIRE(ps.nextVideo(got, 0));
+    CHECK(got == v1);
+    REQUIRE(ps.nextVideo(got, 0));
+    CHECK(got == v2);
+    CHECK(!ps.nextVideo(got, 0));
+    CHECK(ps.ended());
+    CHECK(!ps.nextVideo(got, 0));
+    // Dados que acabam no meio de um pacote também encerram.
+    std::vector<std::uint8_t> cut;
+    pes(cut, 0xE0, v2);
+    cut.resize(100);
+    auto ps2 = streamOf(cut);
+    CHECK(!ps2.nextVideo(got, 0));
+    // Pack header de MPEG-1 é recusado com erro claro.
+    std::vector<std::uint8_t> mpeg1;
+    pack(mpeg1, 0, 0x21);
+    auto ps3 = streamOf(mpeg1);
+    CHECK_THROWS_WITH(ps3.nextVideo(got, 0), "MPEG-1");
+}
+
+// A fatia de 5120 bytes que o EE recebe: registro {bytes, 0, bytes, 0}, os
+// dados completados até múltiplo de 16 e um registro zerado.
+TEST_CASE(iop, movie_slot_layout) {
+    std::uint8_t slot[movie::kSlotSize];
+    std::memset(slot, 0xCC, sizeof slot);
+    std::vector<std::uint8_t> v(4090);
+    for (unsigned i = 0; i < v.size(); ++i) v[i] = static_cast<std::uint8_t>(i + 1);
+    CHECK_EQ(movie::buildSlot(&v, slot, 0), 32u + 4096u);
+    std::uint32_t w[4];
+    std::memcpy(w, slot, 16);
+    CHECK_EQ(w[0], 4090u);
+    CHECK_EQ(w[1], 0u);
+    CHECK_EQ(w[2], 4090u);
+    CHECK_EQ(w[3], 0u);
+    CHECK(std::memcmp(slot + 16, v.data(), v.size()) == 0);
+    CHECK_EQ(slot[16 + 4090], 0u);  // enchimento
+    CHECK_EQ(slot[16 + 4095], 0u);
+    for (unsigned i = 0; i < 16; ++i) CHECK_EQ(slot[16 + 4096 + i], 0u);  // registro de fim
+    CHECK_EQ(slot[16 + 4096 + 16], 0xCCu);                                // o resto fica
+    // Fim do stream: só o registro zerado.
+    std::memset(slot, 0xCC, sizeof slot);
+    CHECK_EQ(movie::buildSlot(nullptr, slot, 0), 16u);
+    CHECK_EQ(slot[0], 0u);
+    CHECK_EQ(slot[15], 0u);
+    CHECK_EQ(slot[16], 0xCCu);
+    // Pacote grande demais para a fatia.
+    std::vector<std::uint8_t> big(5100);
+    CHECK_THROWS_WITH(movie::buildSlot(&big, slot, 0), "não cabe");
 }

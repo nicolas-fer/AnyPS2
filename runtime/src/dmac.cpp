@@ -6,6 +6,7 @@
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vif.h"
@@ -16,7 +17,7 @@ namespace {
 
 constexpr std::uint32_t kBase[Dmac::kChannels] = {0x10008000, 0x10009000, 0x1000A000, 0x1000B000, 0x1000B400,
                                                   0x1000C000, 0x1000C400, 0x1000C800, 0x1000D000, 0x1000D400};
-constexpr unsigned kVif0 = 0, kVif1 = 1, kGif = 2, kFromSpr = 8, kToSpr = 9;
+constexpr unsigned kVif0 = 0, kVif1 = 1, kGif = 2, kToIpu = 4, kFromSpr = 8, kToSpr = 9;
 
 constexpr std::uint32_t kChcrDir = 1u << 0, kChcrTte = 1u << 6, kChcrTie = 1u << 7, kChcrStr = 1u << 8;
 constexpr unsigned kIntcDmac = 1;
@@ -109,6 +110,15 @@ void Dmac::write(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
             case 0x00:
                 c.chcr = value;
                 if (!(value & kChcrStr)) c.paused = false;
+                if (c.paused) {
+                    // Canal pausado com STR reescrito: o tag em CHCR (que o
+                    // programa pode ter trocado — a libmpeg troca refe por ref
+                    // ao acrescentar tags) decide se a cadeia acaba depois dos
+                    // dados correntes.
+                    const unsigned id = (value >> 28) & 7;
+                    const bool emptyRet = id == 6 && ((value >> 4) & 3) == 0;
+                    c.tagEnds = id == 0 || id == 7 || emptyRet || ((value >> 31) && (value & kChcrTie));
+                }
                 if (value & kChcrStr) start(static_cast<unsigned>(ch), pc);
                 return;
             case 0x10: c.madr = value & 0xFFFFFFF0u; return;
@@ -200,6 +210,8 @@ std::uint32_t Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t 
             }
             rt_.gif().transfer(3, src, qwc, pc);
             return qwc;
+        case kToIpu:
+            return rt_.ipu().dmaWrite(src, qwc);
         case kToSpr: {
             Channel& c = ch_[ch];
             if (c.sadr + qwc * 16 > Memory::kScratchpadSize) {
@@ -251,7 +263,7 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
                      c.qwc, c.tadr);
     }
     switch (ch) {
-        case kVif0: case kGif: case kToSpr: break;
+        case kVif0: case kGif: case kToSpr: case kToIpu: break;
         case kVif1:
             if (!(c.chcr & kChcrDir)) {
                 throw Unimplemented("DMA VIF1→memória (leitura de dados do GS) ainda não suportado", pc);
@@ -285,10 +297,12 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
     } else {
         c.paused = true;
         if (rt_.options().traceGs) {
-            std::fprintf(stderr, "[dma] %s pausado (VIF parado) em MADR=%08x QWC=%u TADR=%08x\n", channelName(ch),
-                         c.madr, c.qwc, c.tadr);
+            std::fprintf(stderr, "[dma] %s pausado (destino parado ou cheio) em MADR=%08x QWC=%u TADR=%08x\n",
+                         channelName(ch), c.madr, c.qwc, c.tadr);
         }
     }
+    // O IPU pode ter recebido os dados que um comando esperava.
+    if (ch == kToIpu) rt_.ipu().kick(pc);
 }
 
 bool Dmac::runNormal(unsigned ch, std::uint32_t pc) {

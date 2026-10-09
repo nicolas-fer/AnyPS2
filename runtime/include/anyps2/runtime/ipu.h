@@ -21,6 +21,11 @@ class Runtime;
 // continua quando chegam mais; ao terminar, pede a interrupção do IPU no
 // INTC (8).
 //
+// DMA toIPU (canal 4): sob demanda, como no hardware. O canal só enche o
+// FIFO (8 quadwords) e fica pausado com STR ligado; cada quadword que o IPU
+// tira do FIFO puxa mais do canal. Assim MADR/QWC/TADR + IFC/FP/BP dizem
+// exatamente quanto do fluxo foi consumido (a libmpeg usa isso).
+//
 // Implementado: BCLR, FDEC, SETIQ, SETVQ e SETTH. IDEC, BDEC, VDEC, CSC e
 // PACK lançam erro dizendo o que falta.
 class Ipu {
@@ -35,6 +40,11 @@ public:
     bool fifoWrite(const std::uint8_t (&qw)[16], std::uint32_t pc);
     // Leitura de um quadword do FIFO de saída (0x1000_7000).
     void fifoRead(std::uint8_t (&qw)[16], std::uint32_t pc);
+    // DMA toIPU: aceita até o FIFO encher; retorna quantos quadwords entraram.
+    // Não executa comandos (o DMAC chama kick() ao fim da transferência).
+    std::uint32_t dmaWrite(const std::uint8_t* data, std::uint32_t qwc);
+    // Continua o comando que esperava dados, se houver.
+    void kick(std::uint32_t pc);
     void reset();
 
     bool busy() const { return busy_; }
@@ -55,6 +65,8 @@ private:
     // Consome `bits` (exige fill(bits)).
     void advance(unsigned bits);
     bool popFifo(std::uint8_t (&qw)[16]);
+    // O FIFO tem espaço: o DMA toIPU pausado continua.
+    void requestData();
 
     void startCommand(std::uint32_t cmd, std::uint32_t pc);
     // Avança o comando corrente o quanto os dados permitirem.
@@ -63,6 +75,7 @@ private:
     void softReset();
 
     Runtime* rt_;
+    std::uint32_t pc_ = 0;  // PC do acesso corrente (erros do DMA puxado pelo IPU)
 
     std::uint8_t internal_[32] = {};  // 2 quadwords seguidos
     unsigned bp_ = 0;  // 0..127 no primeiro quadword

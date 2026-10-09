@@ -5,6 +5,7 @@
 #include <string>
 
 #include "anyps2/common/error.h"
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
@@ -14,6 +15,7 @@ namespace anyps2::rt {
 namespace {
 
 constexpr unsigned kIntcIpu = 8;
+constexpr unsigned kDmaToIpu = 4;
 
 enum Command : unsigned { BCLR, IDEC, BDEC, VDEC, FDEC, SETIQ, SETVQ, CSC, PACK, SETTH };
 
@@ -51,6 +53,7 @@ void Ipu::softReset() {
     busy_ = false;
     pos_ = 0;
     if (rt_) rt_->kernel().raiseIntc(kIntcIpu);
+    requestData();
 }
 
 // ---- Fluxo de bits ----------------------------------------------------------
@@ -60,7 +63,12 @@ bool Ipu::popFifo(std::uint8_t (&qw)[16]) {
     std::memcpy(qw, fifo_[fifoRead_], 16);
     fifoRead_ = (fifoRead_ + 1) % kFifoQw;
     --ifc_;
+    requestData();
     return true;
+}
+
+void Ipu::requestData() {
+    if (rt_) rt_->dmac().resumeChannel(kDmaToIpu, pc_);
 }
 
 bool Ipu::fill(unsigned bits) {
@@ -104,11 +112,22 @@ void Ipu::advance(unsigned bits) {
 // ---- FIFOs ------------------------------------------------------------------
 
 bool Ipu::fifoWrite(const std::uint8_t (&qw)[16], std::uint32_t pc) {
-    if (ifc_ == kFifoQw) return false;
-    std::memcpy(fifo_[(fifoRead_ + ifc_) % kFifoQw], qw, 16);
-    ++ifc_;
-    if (busy_ && !running_) run(pc);
+    if (dmaWrite(qw, 1) == 0) return false;
+    kick(pc);
     return true;
+}
+
+std::uint32_t Ipu::dmaWrite(const std::uint8_t* data, std::uint32_t qwc) {
+    std::uint32_t n = 0;
+    for (; n < qwc && ifc_ < kFifoQw; ++n, ++ifc_) {
+        std::memcpy(fifo_[(fifoRead_ + ifc_) % kFifoQw], data + 16 * n, 16);
+    }
+    return n;
+}
+
+void Ipu::kick(std::uint32_t pc) {
+    pc_ = pc;
+    if (busy_ && !running_) run(pc);
 }
 
 void Ipu::fifoRead(std::uint8_t (&qw)[16], std::uint32_t) {
@@ -123,7 +142,8 @@ void Ipu::fifoRead(std::uint8_t (&qw)[16], std::uint32_t) {
 
 // ---- Registradores ----------------------------------------------------------
 
-std::uint64_t Ipu::readRegister(std::uint32_t addr, std::uint32_t) {
+std::uint64_t Ipu::readRegister(std::uint32_t addr, std::uint32_t pc) {
+    pc_ = pc;
     const unsigned cmd = cmd_ >> 28;
     switch (addr & 0xF0) {
         case 0x00: {  // IPU_CMD: DATA (31..0), BUSY (63)
@@ -147,6 +167,7 @@ std::uint64_t Ipu::readRegister(std::uint32_t addr, std::uint32_t) {
 }
 
 void Ipu::writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
+    pc_ = pc;
     switch (addr & 0xF0) {
         case 0x00:
             startCommand(value, pc);
@@ -182,6 +203,7 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
             fifoRead_ = ifc_ = 0;
             bp_ = cmd & 0x7F;
             finishCommand();
+            requestData();  // FIFO vazio: o DMA toIPU volta a enchê-lo
             return;
         case SETTH:
             th_[0] = static_cast<std::uint16_t>(cmd & 0x1FF);
@@ -201,7 +223,8 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
     }
 }
 
-void Ipu::run(std::uint32_t) {
+void Ipu::run(std::uint32_t pc) {
+    pc_ = pc;
     running_ = true;
     const unsigned c = cmd_ >> 28;
     // FB (bits 5..0): bits pulados antes do comando (FDEC e SETIQ).

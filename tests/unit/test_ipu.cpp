@@ -165,3 +165,119 @@ TEST_CASE(ipu, ctrl_reset_and_unsupported) {
     CHECK_EQ(f.bp(), 0u);
     CHECK_THROWS_WITH(f.cmd(0x10000000), "IDEC");
 }
+
+namespace {
+
+constexpr std::uint32_t kD4Chcr = 0x1000B400, kD4Madr = 0x1000B410, kD4Qwc = 0x1000B420, kD4Tadr = 0x1000B430;
+constexpr std::uint32_t kDStat = 0x1000E010;
+
+// Quadwords com bytes que dizem de onde vieram: q[i] = (tag << 4) | i.
+void fillQw(Memory& m, std::uint32_t addr, unsigned count, std::uint8_t tag) {
+    for (unsigned q = 0; q < count; ++q) {
+        std::uint8_t b[16];
+        for (unsigned i = 0; i < 16; ++i) b[i] = static_cast<std::uint8_t>((unsigned{tag} << 4) | (q & 0xF));
+        m.copyToGuest(addr + q * 16, b, 16, 0);
+    }
+}
+void dmaTag(Memory& m, std::uint32_t at, std::uint64_t qwc, std::uint64_t id, std::uint64_t addr) {
+    const std::uint64_t t[2] = {qwc | (id << 28) | (addr << 32), 0};
+    m.copyToGuest(at, t, 16, 0);
+}
+// Consome 32 bits por FDEC e devolve os primeiros 4 bytes de cada quadword
+// consumido (o FDEC devolve o que vem depois do pulo).
+std::uint32_t nextWord(Fixture& f) {
+    f.cmd(0x40000020);
+    return static_cast<std::uint32_t>(f.cmd64());
+}
+
+}  // namespace
+
+// Modo normal: o canal enche o FIFO (8 quadwords) e pausa com STR ligado;
+// cada quadword que o IPU consome puxa mais um; no fim, STR desliga e o
+// D_STAT.CIS4 é marcado.
+TEST_CASE(ipu, dma_to_ipu_normal_on_demand) {
+    Fixture f;
+    Memory& m = f.m;
+    std::uint8_t data[20 * 16];
+    for (unsigned i = 0; i < sizeof data; ++i) data[i] = static_cast<std::uint8_t>(i);
+    m.copyToGuest(0x00100000, data, sizeof data, 0);
+    f.cmd(0x00000000);  // BCLR
+    m.write<std::uint32_t>(kD4Madr, 0x00100000, 0);
+    m.write<std::uint32_t>(kD4Qwc, 20, 0);
+    m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Chcr, 0) & 0x100, 0x100u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Qwc, 0), 12u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Madr, 0), 0x00100080u);
+    CHECK_EQ(f.ctrl() & 0xF, 8u);
+    // FDEC: o primeiro quadword vai para o buffer interno e o DMA repõe.
+    f.cmd(0x40000000);
+    CHECK_EQ(f.cmd64(), 0x00010203ull);
+    CHECK_EQ(f.ctrl() & 0xF, 8u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Qwc, 0), 11u);
+    // SETIQ: 64 bytes (quadwords 0–3); o 4 já entra no buffer interno.
+    f.cmd(0x50000000);
+    for (unsigned i = 0; i < 64; ++i) CHECK_EQ(f.rt.ipu().intraQuant()[i], data[i]);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Qwc, 0), 7u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Madr, 0), 0x00100000u + 13 * 16);
+    CHECK_EQ(f.bp(), (8u << 8) | (1u << 16));
+    // Consome o resto, 32 bits por vez, conferindo a ordem.
+    for (unsigned w = 17; w < 80; ++w) {
+        std::uint32_t expect = 0;
+        for (unsigned i = 0; i < 4; ++i) expect = (expect << 8) | ((w * 4 + i) & 0xFF);
+        CHECK_EQ(nextWord(f), expect);
+        if (w == 24) CHECK_EQ(m.read<std::uint32_t>(kD4Chcr, 0) & 0x100, 0x100u);
+    }
+    CHECK_EQ(m.read<std::uint32_t>(kD4Chcr, 0) & 0x100, 0u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Qwc, 0), 0u);
+    CHECK_EQ(m.read<std::uint32_t>(kDStat, 0) & (1u << 4), 1u << 4);
+    // Dados acabaram: o próximo FDEC espera.
+    f.cmd(0x40000020);
+    CHECK_EQ(f.ctrl() >> 31, 1u);
+}
+
+// Chain (ref/refe) maior que o FIFO; e o padrão da libmpeg: com o canal
+// pausado no último tag (refe), o programa acrescenta um tag e reescreve o
+// CHCR com ID=ref — a cadeia continua em vez de terminar.
+TEST_CASE(ipu, dma_to_ipu_chain_and_append) {
+    Fixture f;
+    Memory& m = f.m;
+    fillQw(m, 0x00200000, 8, 0xA);
+    fillQw(m, 0x00210000, 4, 0xB);
+    fillQw(m, 0x00220000, 1, 0xC);
+    dmaTag(m, 0x00100000, 8, 3, 0x00200000);  // ref: 8 de A
+    dmaTag(m, 0x00100010, 4, 0, 0x00210000);  // refe: 4 de B
+    f.cmd(0x00000000);
+    m.write<std::uint32_t>(kD4Tadr, 0x00100000, 0);
+    m.write<std::uint32_t>(kD4Qwc, 0, 0);
+    m.write<std::uint32_t>(kD4Chcr, 0x105, 0);  // chain, STR
+    // A encheu o FIFO; o canal pausou já no tag de B (QWC=4).
+    CHECK_EQ(f.ctrl() & 0xF, 8u);
+    const std::uint32_t chcr = m.read<std::uint32_t>(kD4Chcr, 0);
+    CHECK_EQ(chcr & 0x100, 0x100u);
+    CHECK_EQ(chcr >> 28, 0u);  // tag corrente: refe
+    CHECK_EQ(m.read<std::uint32_t>(kD4Qwc, 0), 4u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Tadr, 0), 0x00100020u);
+    // Acrescenta C (refe) depois de B e troca o tag corrente para ref.
+    dmaTag(m, 0x00100020, 1, 0, 0x00220000);
+    m.write<std::uint32_t>(0x1000F590, 0x1201 | 0x10000, 0);  // D_ENABLEW: suspende
+    m.write<std::uint32_t>(kD4Chcr, (chcr & 0x0FFFFFFFu) | 0x30000000u, 0);
+    m.write<std::uint32_t>(0x1000F590, 0x1201, 0);
+    // Lê tudo: 8 quadwords de A, 4 de B e 1 de C, nessa ordem.
+    for (unsigned q = 0; q < 13; ++q) {
+        const unsigned tag = q < 8 ? 0xA : q < 12 ? 0xB : 0xC;
+        const unsigned idx = q < 8 ? q : q < 12 ? q - 8 : 0;
+        const std::uint32_t b = (tag << 4) | idx;
+        const std::uint32_t expect = b * 0x01010101u;
+        for (unsigned w = 0; w < 4; ++w) {
+            if (q == 0 && w == 0) {
+                f.cmd(0x40000000);
+                CHECK_EQ(static_cast<std::uint32_t>(f.cmd64()), expect);
+            } else {
+                CHECK_EQ(nextWord(f), expect);
+            }
+        }
+    }
+    CHECK_EQ(m.read<std::uint32_t>(kD4Chcr, 0) & 0x100, 0u);
+    CHECK_EQ(m.read<std::uint32_t>(kD4Tadr, 0), 0x00100030u);
+    CHECK_EQ(m.read<std::uint32_t>(kDStat, 0) & (1u << 4), 1u << 4);
+}
