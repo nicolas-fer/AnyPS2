@@ -19,6 +19,7 @@ class Timing;
 class Dmac;
 class Gif;
 class Vif;
+class Ipu;
 struct VuMemory;
 class Video;
 class Input;
@@ -133,6 +134,7 @@ public:
     Vif& vif0() { return *vif0_; }
     Vif& vif1() { return *vif1_; }
     Dmac& dmac() { return *dmac_; }
+    Ipu& ipu() { return *ipu_; }
     VuMemory& vu() { return *vu_; }
     Vu& vu0() { return *vu0_; }
     Vu& vu1() { return *vu1_; }
@@ -170,6 +172,7 @@ private:
     std::unique_ptr<Gif> gif_;
     std::unique_ptr<Vif> vif0_, vif1_;
     std::unique_ptr<Dmac> dmac_;
+    std::unique_ptr<Ipu> ipu_;
     struct Vu1Regs {
         Reg128 vf[32];
         std::uint32_t vi[32];

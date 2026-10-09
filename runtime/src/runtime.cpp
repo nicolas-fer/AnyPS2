@@ -17,6 +17,7 @@
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/hardware.h"
 #include "anyps2/runtime/input.h"
+#include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
@@ -83,6 +84,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     vif0_ = std::make_unique<Vif>(this, 0, *vu_, gif_.get());
     vif1_ = std::make_unique<Vif>(this, 1, *vu_, gif_.get());
     dmac_ = std::make_unique<Dmac>(*this);
+    ipu_ = std::make_unique<Ipu>(this);
     vu1Regs_ = std::make_unique<Vu1Regs>();
     std::memset(static_cast<void*>(vu1Regs_.get()), 0, sizeof(Vu1Regs));
     vu0_ = std::make_unique<Vu>(this, 0, vucore::Regs{ctx_->vf, ctx_->vi, &ctx_->vacc}, vu_->data0.get(),

@@ -10,6 +10,7 @@
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/hardware.h"
 #include "anyps2/runtime/iop/iop.h"
+#include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/ops.h"
 #include "anyps2/runtime/runtime.h"
 #include "kernel_internal.h"
@@ -345,6 +346,7 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
             if (init & 0x04) rt_.vif1().reset();
             if (init & 0x08) rt_.gif().reset();
             if (init & 0x20) rt_.vif0().reset();
+            if (init & 0x40) rt_.ipu().reset();
             return 0;
         }
         case 0x02: rt_.gs().setCrt(arg(c, 0), arg(c, 1), arg(c, 2)); return 0;

@@ -32,6 +32,7 @@ add_library(anyps2_runtime STATIC
     src/kernel_threads.cpp
     src/host_thread.cpp
     src/hardware.cpp
+    src/ipu.cpp
     src/iop/iop.cpp
     src/iop/loadfile.cpp
     src/iop/pad.cpp

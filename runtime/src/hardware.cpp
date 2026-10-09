@@ -8,6 +8,7 @@
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/iop/iop.h"
+#include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
@@ -102,6 +103,7 @@ std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t 
         return rt_.gs().readPrivileged(reg, pc);
     }
     if (Dmac::handles(reg)) return rt_.dmac().read(reg, pc);
+    if (reg >= 0x10002000u && reg < 0x10003000u) return rt_.ipu().readRegister(reg, pc);
     if (reg >= 0x10003000u && reg < 0x10003800u) return rt_.gif().readRegister(reg, pc);
     if (reg >= 0x10003800u && reg < 0x10003C00u) return rt_.vif0().readRegister(reg, pc);
     if (reg >= 0x10003C00u && reg < 0x10004000u) return rt_.vif1().readRegister(reg, pc);
@@ -145,6 +147,10 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         rt_.dmac().write(reg, static_cast<std::uint32_t>(value), pc);
         return;
     }
+    if (reg >= 0x10002000u && reg < 0x10003000u) {
+        rt_.ipu().writeRegister(reg, static_cast<std::uint32_t>(value), pc);
+        return;
+    }
     if (reg >= 0x10003000u && reg < 0x10003800u) {
         rt_.gif().writeRegister(reg, static_cast<std::uint32_t>(value), pc);
         return;
@@ -179,6 +185,12 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
 }
 
 void Hardware::read(std::uint32_t addr, void* out, unsigned size, std::uint32_t pc) {
+    if (size == 16 && (addr & ~0xFu) == 0x10007000u) {  // IPU_out_FIFO
+        std::uint8_t qw[16];
+        rt_.ipu().fifoRead(qw, pc);
+        std::memcpy(out, qw, 16);
+        return;
+    }
     if (size == 16) {
         const std::uint64_t lo = read64(addr, 8, pc);
         std::memcpy(out, &lo, 8);
@@ -202,7 +214,13 @@ void Hardware::write(std::uint32_t addr, const void* in, unsigned size, std::uin
                 rt_.gif().transfer(3, data, 1, pc);
                 return;
             default:
-                throw Unimplemented("escrita no FIFO do IPU (" + anyps2::hex(addr) + ") — IPU/MPEG ainda não suportado; em " +
+                if ((addr & ~0xFu) == 0x10007010u) {  // IPU_in_FIFO
+                    std::uint8_t qw[16];
+                    std::memcpy(qw, data, 16);
+                    rt_.ipu().fifoWrite(qw, pc);
+                    return;
+                }
+                throw Unimplemented("escrita no FIFO de saída do IPU (" + anyps2::hex(addr) + ") em " +
                                         rt_.describe(pc),
                                     pc);
         }

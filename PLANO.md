@@ -196,6 +196,11 @@ SetGsCrt com modo PAL relevante).
   32/16/8 bits, V4-5, sinal/USN, TOPS, máscara, modos offset/difference,
   escrita com salto CL ≥ WL e de preenchimento CL < WL). Memórias dos VUs mapeadas no EE
   (0x1100_0000). `MSCAL/MSCALF/MSCNT` chegaram na Fase 5.
+- 🟡 IPU (Fase 7): registradores CMD/CTRL/BP/TOP, FIFO de entrada com o
+  buffer interno de 2 quadwords (BP/FP/IFC como no hardware), CTRL.RST e os
+  comandos BCLR, FDEC, SETIQ, SETVQ e SETTH; comando sem dados suficientes
+  fica ocupado e continua quando o FIFO recebe mais. Faltam IDEC/BDEC/VDEC/
+  CSC/PACK (decodificação MPEG-2), o FIFO de saída e o DMA toIPU/fromIPU.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -248,7 +253,8 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, IPU, espera de PATH3 mascarado, `TEX1.MTBA`.
+  interleave, decodificação do IPU e seu DMA, espera de PATH3 mascarado,
+  `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
   comportar diferente.
@@ -636,9 +642,20 @@ Marco 6 — dos menus iniciais ao vídeo de abertura ✅ (sem som):
   o save e mostra a introdução; ao escolher "Start" para no **IPU**
   (`sceMpegInit`: SETIQ pelo FIFO de entrada) — o vídeo de abertura.
 
-Próximos passos do GT4: o IPU (comandos BCLR/IDEC/BDEC/VDEC/FDEC/SETIQ/
-SETVQ/CSC/PACK/SETTH, decodificação MPEG-2 e DMA toIPU/fromIPU); o som
-continua mudo (pdispu2/rt_ac exigem executar o código do IOP).
+Marco 7 — o vídeo de abertura (em andamento):
+- ✅ IPU, etapa 1: registradores, FIFO de entrada e ponteiro de bits, BCLR,
+  FDEC, SETIQ, SETVQ e SETTH (testes em `ipu`). O `sceMpegInit` do GT4
+  passa (matrizes de quantização pelo FIFO).
+- Onde o GT4 está: depois do `sceMpegInit` a tela fica preta. O vídeo vem
+  do servidor RPC **MPG1** do IOP (registrado junto de PBGM/VOIC/MPG2 pelo
+  PDISPU2.IRX), que ainda responde zeros: fn 1 abre o vídeo ({0x40,
+  0x239CE4, LSN 0x1F849 dentro do GT4.VOL, nome}) e fn 2 ({destino no EE,
+  0xA000}) enche blocos de 5120 bytes que o EE transforma em pacotes PES
+  de vídeo (`00 00 01 E0`). Os setores no disco não têm cara de MPEG puro
+  (cifrados ou comprimidos): o HLE do MPG1 exige levantar o que o IRX faz.
+- Próximos passos: o HLE do MPG1; depois IDEC/BDEC/VDEC/CSC, o FIFO de
+  saída e o DMA toIPU/fromIPU. O som continua mudo (pdispu2/rt_ac exigem
+  executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.
