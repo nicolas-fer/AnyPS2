@@ -12,7 +12,7 @@ option(ANYPS2_FETCH_SDL "Baixa e compila o SDL2 se ele não for encontrado no si
 # uma cópia local; senão baixa a versão fixada abaixo, se ANYPS2_FETCH_IMGUI.
 # Só existe com ANYPS2_WITH_SDL=ON.
 set(ANYPS2_IMGUI_DIR "" CACHE PATH "Pasta do Dear ImGui (vazio: baixar)")
-option(ANYPS2_FETCH_IMGUI "Baixa o Dear ImGui se ANYPS2_IMGUI_DIR não for dado" ${_anyps2_fetch_default})
+option(ANYPS2_FETCH_IMGUI "Baixa o Dear ImGui se ANYPS2_IMGUI_DIR não for dado" ON)
 
 # Formatos de disco e de módulos do IOP (ISO 9660, cabeçalho IRX, tabela de
 # módulos com HLE), sem o resto do runtime: a CLI ("anyps2 disc") também usa.
