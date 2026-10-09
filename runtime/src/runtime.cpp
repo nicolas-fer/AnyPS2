@@ -41,6 +41,7 @@ RuntimeOptions RuntimeOptions::fromEnvironment() {
         o.traceHardware = s.find("hw") != std::string::npos || s == "all";
         o.traceIop = s.find("iop") != std::string::npos || s == "all";
         o.traceGs = s.find("gs") != std::string::npos || s == "all";
+        o.traceThreads = s.find("threads") != std::string::npos || s == "all";
     }
     if (const char* clock = std::getenv("ANYPS2_CLOCK")) o.virtualClock = std::string(clock) == "virtual";
     if (const char* p = std::getenv("ANYPS2_PROFILE")) o.profile = *p && std::string(p) != "0";
@@ -117,7 +118,13 @@ void Runtime::onVblank(std::uint32_t pc) {
         std::snprintf(suffix, sizeof suffix, "_%06llu.png", static_cast<unsigned long long>(vblanks_));
         writePng(base + suffix, gs_->display());
     }
-    if (options_.frames && vblanks_ >= options_.frames) throw ProgramExit{0};
+    if (options_.frames && vblanks_ >= options_.frames) {
+        if (options_.traceThreads) {
+            std::fprintf(stderr, "[threads] no VBlank %llu:%s\n", static_cast<unsigned long long>(vblanks_),
+                         kernel_->threadReport().c_str());
+        }
+        throw ProgramExit{0};
+    }
     if (!video_) return;
     if (gs_->displayEnabled()) video_->present(gs_->display());
     if (!video_->pollEvents()) throw ProgramExit{0};  // janela fechada

@@ -583,8 +583,98 @@ TEST_CASE(ipu, bdec_restarts_when_data_arrives) {
     f.cmd(0x2C010000);
     CHECK_EQ(f.ctrl() >> 31, 1u);
     CHECK_EQ(f.m.read<std::uint32_t>(0x1000B020, 0), 48u);  // nada saiu
+    // Esperando dados, o FIFO aparece vazio (como no hardware, que já teria
+    // consumido tudo): é o que faz a libmpeg chamar o callback de "sem dados".
+    CHECK_EQ(f.ctrl() & 0xF, 0u);
+    CHECK_EQ((f.bp() >> 8) & 0xF, 0u);
     f.m.write<std::uint32_t>(kD4Qwc, total - 5, 0);
     f.m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
     CHECK_EQ(f.ctrl() >> 31, 0u);
     for (unsigned i = 0; i < 384; ++i) CHECK_EQ(raw16(f.m, 0x00300000, i), expected[i]);
+}
+
+// ---- Etapa 4: CSC -------------------------------------------------------------
+
+namespace {
+
+// Macrobloco RAW8: Y nas linhas 0–7 = 235; nas 8–15, x < 8 = 16 e x ≥ 8 = 126.
+// Cb = 128 (o canto de baixo à esquerda = 90); Cr = 128, e 240 no canto de
+// baixo à direita.
+void cscMacroblock(BitWriter& w) {
+    for (unsigned y = 0; y < 16; ++y) {
+        for (unsigned x = 0; x < 16; ++x) w.put(y < 8 ? 235 : x < 8 ? 16 : 126, 8);
+    }
+    for (unsigned y = 0; y < 8; ++y) {
+        for (unsigned x = 0; x < 8; ++x) w.put(y >= 4 && x < 4 ? 90 : 128, 8);
+    }
+    for (unsigned y = 0; y < 8; ++y) {
+        for (unsigned x = 0; x < 8; ++x) w.put(y >= 4 && x >= 4 ? 240 : 128, 8);
+    }
+}
+
+std::uint32_t pixel(Memory& m, std::uint32_t base, unsigned mb, unsigned y, unsigned x) {
+    return m.read<std::uint32_t>(base + mb * 1024 + (y * 16 + x) * 4, 0);
+}
+constexpr std::uint32_t rgba(unsigned r, unsigned g, unsigned b, unsigned a) {
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+}  // namespace
+
+// YCbCr → RGB32 em ponto fixo, dois macroblocos; o segundo com os limiares
+// do SETTH (TH0 zera o pixel escuro, TH1 dá alfa 0x40).
+TEST_CASE(ipu, csc_rgb32_and_thresholds) {
+    Fixture f;
+    BitWriter w;
+    cscMacroblock(w);
+    cscMacroblock(w);
+    f.cmd(0x00000000);
+    feed(f, w);
+    drainTo(f, 0x00300000, 64);
+    f.cmd(0x70000001);  // CSC de 1 macrobloco, RGB32
+    CHECK_EQ(f.ctrl() >> 31, 0u);
+    CHECK(f.ipuIrq());
+    Memory& m = f.m;
+    CHECK_EQ(pixel(m, 0x00300000, 0, 0, 0), rgba(255, 255, 255, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 0, 7, 15), rgba(255, 255, 255, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 0, 8, 0), rgba(0, 15, 0, 0x80));  // Y=16, Cb=90
+    CHECK_EQ(pixel(m, 0x00300000, 0, 8, 8), rgba(255, 37, 128, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 0, 15, 15), rgba(255, 37, 128, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 0, 12, 3), rgba(0, 15, 0, 0x80));
+    f.cmd(0x90900020);  // SETTH: TH0 = 0x20, TH1 = 0x90
+    drainTo(f, 0x00300400, 64);
+    f.cmd(0x70000001);
+    CHECK_EQ(pixel(m, 0x00300000, 1, 0, 0), rgba(255, 255, 255, 0x80));
+    CHECK_EQ(pixel(m, 0x00300000, 1, 8, 0), 0u);                       // abaixo de TH0
+    CHECK_EQ(pixel(m, 0x00300000, 1, 8, 8), rgba(255, 37, 128, 0x80)); // R acima de TH1
+    CHECK_EQ(pixel(m, 0x00300000, 0, 8, 8), rgba(255, 37, 128, 0x80)); // o primeiro ficou
+    // RGB16 (OFM) ainda não existe: erro claro.
+    CHECK_THROWS_WITH(f.cmd(0x78000001), "RGB16");
+}
+
+// CSC de vários macroblocos com os dados chegando aos poucos: o que já saiu
+// não se refaz; o comando espera e continua.
+TEST_CASE(ipu, csc_waits_between_macroblocks) {
+    Fixture f;
+    BitWriter w;
+    cscMacroblock(w);
+    cscMacroblock(w);
+    std::vector<std::uint8_t> all = w.bytes;  // 768 bytes = 48 quadwords
+    f.m.copyToGuest(0x00100000, all.data(), static_cast<std::uint32_t>(all.size()), 0);
+    f.cmd(0x00000000);
+    f.m.write<std::uint32_t>(kD4Madr, 0x00100000, 0);
+    f.m.write<std::uint32_t>(kD4Qwc, 30, 0);  // o primeiro inteiro e um pedaço do segundo
+    f.m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
+    drainTo(f, 0x00300000, 128);
+    f.cmd(0x70000002);
+    CHECK_EQ(f.ctrl() >> 31, 1u);
+    CHECK_EQ(f.ctrl() & 0xF, 0u);
+    CHECK_EQ(f.m.read<std::uint32_t>(0x1000B020, 0), 64u);  // o primeiro já saiu
+    CHECK_EQ(pixel(f.m, 0x00300000, 0, 8, 8), rgba(255, 37, 128, 0x80));
+    f.m.write<std::uint32_t>(kD4Qwc, 18, 0);
+    f.m.write<std::uint32_t>(kD4Chcr, 0x101, 0);
+    CHECK_EQ(f.ctrl() >> 31, 0u);
+    CHECK_EQ(f.m.read<std::uint32_t>(0x1000B000, 0) & 0x100, 0u);
+    CHECK_EQ(pixel(f.m, 0x00300000, 1, 8, 8), rgba(255, 37, 128, 0x80));
+    CHECK_EQ(pixel(f.m, 0x00300000, 1, 15, 0), rgba(0, 15, 0, 0x80));
 }

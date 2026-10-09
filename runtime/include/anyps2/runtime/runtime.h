@@ -63,6 +63,10 @@ struct RuntimeOptions {
     bool traceHardware = false;  // ANYPS2_TRACE contém "hw"
     bool traceIop = false;       // ANYPS2_TRACE contém "iop"
     bool traceGs = false;        // ANYPS2_TRACE contém "gs" (DMA, GIF, VIF, VU)
+    // ANYPS2_TRACE contém "threads": ao encerrar por ANYPS2_FRAMES, imprime o
+    // estado das threads do EE e de onde as bloqueadas chamaram a espera
+    // (achar quem trava um programa que fica parado).
+    bool traceThreads = false;
     // ANYPS2_PROFILE=1: amostra o PC em cada safepoint (desvios para trás e fim
     // de syscalls) e imprime os mais frequentes ao terminar — mostra onde o
     // programa passa o tempo ou fica girando.

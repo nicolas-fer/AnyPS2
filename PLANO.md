@@ -202,8 +202,8 @@ SetGsCrt com modo PAL relevante).
   fica ocupado e continua quando o FIFO recebe mais. DMA toIPU (normal e
   chain) sob demanda: enche o FIFO e pausa com STR ligado; cada quadword
   consumido puxa mais. VDEC (as 4 tabelas) e BDEC (macrobloco em RAW16)
-  reiniciáveis; FIFO de saída e DMA fromIPU. Faltam IDEC, CSC e PACK, e o
-  MPEG-1 no BDEC.
+  reiniciáveis; CSC (RGB32); FIFO de saída e DMA fromIPU. Faltam IDEC,
+  PACK, o CSC com saída RGB16 e o MPEG-1 no BDEC.
 - ✅ GS em software (referência): VRAM de 4 MB com o swizzle de todos os
   formatos (PSMCT32/24/16/16S, PSMT8/4/8H/4HL/4HH, PSMZ32/24/16/16S —
   validado contra as tabelas publicadas), registradores privilegiados
@@ -256,7 +256,7 @@ Limitações e riscos:
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
   sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
-  interleave, IDEC/CSC/PACK do IPU, espera de PATH3 mascarado,
+  interleave, IDEC/PACK do IPU, espera de PATH3 mascarado,
   `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
   transferência ou dependem de PATH3 intercalado com PATH2 podem se
@@ -686,11 +686,25 @@ Marco 7 — o vídeo de abertura (em andamento):
   só termina quando o resto cabe no FIFO) e **DMA fromIPU** (modo normal,
   pausa até haver saída). Testes `ipu.mpeg_*`, `ipu.vdec_tables_and_top`
   e `ipu.bdec_*`.
-- Onde o GT4 está: decodifica a primeira imagem do vídeo (VDEC + BDEC por
-  macrobloco, compensação de movimento no EE) e pede o **CSC**
-  (YCbCr → RGB32 de 768 macroblocos).
-- Próximos passos: CSC (e PACK/IDEC se o jogo pedir). O som continua mudo
-  (pdispu2/rt_ac exigem executar o código do IOP).
+- ✅ IPU, etapa 4: **CSC** (RAW8 YCbCr 4:2:0 → RGB32) com os coeficientes
+  em ponto fixo do IPU (BT.601 em 1/64), alfa 0x80 e os limiares do SETTH
+  (abaixo de TH0, pixel zerado; abaixo de TH1, alfa 0x40); reiniciável por
+  macrobloco (o que já saiu não se refaz). Testes `ipu.csc_*`.
+- ✅ Comando reiniciável esperando dados mostra o FIFO **vazio** (IFC = 0),
+  como o hardware, que já teria consumido tudo. Sem isso o vídeo congelava
+  no quadro 22: enquanto espera o IPU, a libmpeg faz `while (IFC == 0)
+  callback_sem_dados()`, e é esse callback que acorda a thread que enche o
+  anel e reinicia o DMA (achado com o relatório de threads abaixo).
+- ✅ `ANYPS2_TRACE=threads`: ao encerrar por `ANYPS2_FRAMES`, o estado das
+  threads do EE e de onde as bloqueadas chamaram a espera.
+- Onde o GT4 está: **o vídeo de abertura toca** — fade do preto para o
+  branco (os quadros batem com os de um decodificador de referência; o
+  vídeo guarda os dois campos empilhados e o jogo os entrelaça na saída)
+  com o logo da Polyphony Digital desenhado por cima pelo jogo — e depois
+  o jogo pede um **IDEC**. No fundo branco sobram padrões de 3 níveis
+  (251 × 254), provavelmente arredondamento acumulado nos quadros P/B.
+- Próximos passos: IDEC; investigar os padrões tênues. O som continua
+  mudo (pdispu2/rt_ac exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

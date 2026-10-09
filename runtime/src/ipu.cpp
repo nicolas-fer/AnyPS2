@@ -64,7 +64,7 @@ void Ipu::softReset() {
     fifo_.clear();
     out_.clear();
     popped_.clear();
-    restartable_ = waitingOutput_ = false;
+    restartable_ = waitingOutput_ = starved_ = false;
     th_[0] = th_[1] = 0;
     ctrl_ &= kCtrlKeptOnReset;
     data_ = top_ = 0;
@@ -77,6 +77,10 @@ void Ipu::softReset() {
 // ---- Fluxo de bits ----------------------------------------------------------
 
 unsigned Ipu::inputCount() const {
+    // Comando reiniciável esperando dados: no hardware ele já teria consumido
+    // tudo, então o FIFO aparece vazio (a libmpeg chama o callback de "sem
+    // dados" enquanto IFC = 0 — é ele que reabastece o DMA).
+    if (starved_) return 0;
     return static_cast<unsigned>(std::min<std::size_t>(fifo_.size(), kFifoQw));
 }
 
@@ -260,6 +264,7 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
             std::memset(internal_, 0, sizeof internal_);
             fp_ = 0;
             fifo_.clear();
+            starved_ = false;
             bp_ = cmd & 0x7F;
             finishCommand();
             requestData();  // FIFO vazio: o DMA toIPU volta a enchê-lo
@@ -269,6 +274,12 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
             th_[1] = static_cast<std::uint16_t>((cmd >> 16) & 0x1FF);
             finishCommand();
             return;
+        case CSC:
+            if (cmd & (1u << 27)) {
+                throw Unimplemented("IPU: CSC com saída RGB16 (OFM, " + anyps2::hex(cmd) + ") ainda não suportado",
+                                    pc);
+            }
+            [[fallthrough]];
         case VDEC:
         case BDEC:
         case FDEC:
@@ -282,6 +293,37 @@ void Ipu::startCommand(std::uint32_t cmd, std::uint32_t pc) {
                                     ") ainda não suportado",
                                 pc);
     }
+}
+
+template <typename Body>
+bool Ipu::attempt(Body&& body) {
+    // Instantâneo do começo: sem dados no meio, tudo volta como estava e os
+    // quadwords já lidos voltam para a frente do FIFO.
+    std::memcpy(snap_.internal, internal_, sizeof internal_);
+    snap_.bp = bp_;
+    snap_.fp = fp_;
+    std::copy(std::begin(dcPred_), std::end(dcPred_), snap_.dcPred);
+    snap_.ctrl = ctrl_;
+    popped_.clear();
+    restartable_ = true;
+    starved_ = false;
+    try {
+        body();
+    } catch (const NeedData&) {
+        starved_ = true;
+        restartable_ = false;
+        std::memcpy(internal_, snap_.internal, sizeof internal_);
+        bp_ = snap_.bp;
+        fp_ = snap_.fp;
+        std::copy(std::begin(snap_.dcPred), std::end(snap_.dcPred), dcPred_);
+        ctrl_ = snap_.ctrl;
+        fifo_.insert(fifo_.begin(), popped_.begin(), popped_.end());
+        popped_.clear();
+        return false;
+    }
+    restartable_ = false;
+    popped_.clear();
+    return true;
 }
 
 void Ipu::run(std::uint32_t pc) {
@@ -339,32 +381,21 @@ void Ipu::run(std::uint32_t pc) {
             break;
         }
         case VDEC:
-        case BDEC: {
+        case BDEC:
             if (waitingOutput_) break;  // já decodificado; a saída ainda não coube
-            // Tentativa do começo: sem dados, tudo volta como estava.
-            std::memcpy(snap_.internal, internal_, sizeof internal_);
-            snap_.bp = bp_;
-            snap_.fp = fp_;
-            std::copy(std::begin(dcPred_), std::end(dcPred_), snap_.dcPred);
-            snap_.ctrl = ctrl_;
-            popped_.clear();
-            restartable_ = true;
-            try {
-                if (c == VDEC) runVdec(pc);
-                else runBdec(pc);
-                restartable_ = false;
-                popped_.clear();
+            if (attempt([&] { c == VDEC ? runVdec(pc) : runBdec(pc); })) {
                 waitingOutput_ = out_.size() > kFifoQw;
                 done = !waitingOutput_;
-            } catch (const NeedData&) {
-                restartable_ = false;
-                std::memcpy(internal_, snap_.internal, sizeof internal_);
-                bp_ = snap_.bp;
-                fp_ = snap_.fp;
-                std::copy(std::begin(snap_.dcPred), std::end(snap_.dcPred), dcPred_);
-                ctrl_ = snap_.ctrl;
-                fifo_.insert(fifo_.begin(), popped_.begin(), popped_.end());
-                popped_.clear();
+            }
+            break;
+        case CSC: {
+            // Um macrobloco por tentativa: o que já saiu não se refaz.
+            if (waitingOutput_) break;
+            const unsigned count = cmd_ & 0x7FF;
+            while (pos_ < count && attempt([&] { runCscMacroblock(); })) ++pos_;
+            if (pos_ == count) {
+                waitingOutput_ = out_.size() > kFifoQw;
+                done = !waitingOutput_;
             }
             break;
         }
@@ -591,6 +622,44 @@ void Ipu::runBdec(std::uint32_t pc) {
         bytes[2 * i + 1] = static_cast<std::uint8_t>(v >> 8);
     }
     pushOutput(bytes, 48);
+}
+
+// ---- CSC --------------------------------------------------------------------
+
+// Um macrobloco em RAW8 (Y 16×16, Cb 8×8, Cr 8×8, 384 bytes) vira 16×16
+// pixels RGBA (RGB32) com os coeficientes em ponto fixo do IPU (BT.601 em
+// 1/64: Y 1,164; Cr→R 1,594; Cr→G -0,813; Cb→G -0,391; Cb→B 2,016) e alfa
+// 0x80. Limiares do SETTH: tudo abaixo de TH0 vira pixel zerado; abaixo de
+// TH1, alfa 0x40.
+void Ipu::runCscMacroblock() {
+    std::uint8_t in[384];
+    for (unsigned i = 0; i < 384; i += 4) {
+        const std::uint32_t w = get(32);
+        for (unsigned k = 0; k < 4; ++k) in[i + k] = static_cast<std::uint8_t>(w >> (24 - 8 * k));
+    }
+    std::uint8_t px[1024];
+    for (unsigned y = 0; y < 16; ++y) {
+        for (unsigned x = 0; x < 16; ++x) {
+            const int lum = (0x95 * std::max(0, in[y * 16 + x] - 16)) >> 6;
+            const unsigned c = (y / 2) * 8 + x / 2;
+            const int cb = in[256 + c] - 128, cr = in[320 + c] - 128;
+            const int r = std::clamp((lum + ((0xCC * cr) >> 6) + 1) >> 1, 0, 255);
+            const int g = std::clamp((lum + ((-0x68 * cr) >> 6) + ((-0x32 * cb) >> 6) + 1) >> 1, 0, 255);
+            const int b = std::clamp((lum + ((0x102 * cb) >> 6) + 1) >> 1, 0, 255);
+            std::uint8_t* p = px + (y * 16 + x) * 4;
+            p[0] = static_cast<std::uint8_t>(r);
+            p[1] = static_cast<std::uint8_t>(g);
+            p[2] = static_cast<std::uint8_t>(b);
+            p[3] = 0x80;
+            const auto below = [&](int th) { return r < th && g < th && b < th; };
+            if (th_[0] > 0 && below(th_[0])) {
+                std::memset(p, 0, 4);
+            } else if (below(th_[1])) {
+                p[3] = 0x40;
+            }
+        }
+    }
+    pushOutput(px, 64);
 }
 
 }  // namespace anyps2::rt

@@ -108,6 +108,9 @@ public:
     static constexpr std::uint32_t TSW_SLEEP = 1, TSW_SEMA = 2;
 
     std::int32_t currentThreadId() const;
+    // Estado de cada thread; as bloqueadas com o PC e o ra salvos (de onde
+    // chamaram a espera).
+    std::string threadReport() const;
 
 private:
     struct Thread;

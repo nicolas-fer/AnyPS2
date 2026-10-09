@@ -35,9 +35,10 @@ class Runtime;
 // fromIPU (canal 3) ou leituras de 0x1000_7000 a esvaziam. O comando só deixa
 // de estar ocupado quando o que sobra cabe no FIFO de saída (8 quadwords).
 //
-// Implementado: BCLR, VDEC, BDEC (saída RAW16), FDEC, SETIQ, SETVQ e SETTH.
-// IDEC, CSC e PACK lançam erro dizendo o que falta; MPEG-1 (CTRL.MP1) no
-// BDEC também.
+// Implementado: BCLR, VDEC, BDEC (saída RAW16), FDEC, SETIQ, SETVQ, CSC
+// (saída RGB32, reiniciável por macrobloco) e SETTH. IDEC, PACK e o CSC com
+// saída RGB16 lançam erro dizendo o que falta; MPEG-1 (CTRL.MP1) no BDEC
+// também.
 class Ipu {
 public:
     explicit Ipu(Runtime* rt);
@@ -101,6 +102,10 @@ private:
     void nonIntraBlock(std::int32_t (&coef)[64], int quantizerScale);
     // Depois de um macrobloco: start code à frente liga SCD (outro dado, ECD).
     void checkStartCode();
+    void runCscMacroblock();
+    // Executa um trecho reiniciável: sem dados no meio, desfaz e retorna false.
+    template <typename Body>
+    bool attempt(Body&& body);
     void pushOutput(const std::uint8_t* data, std::size_t qwords);
 
     Runtime* rt_;
@@ -122,6 +127,7 @@ private:
     Snapshot snap_{};
     std::deque<Qword> popped_;
     bool restartable_ = false;
+    bool starved_ = false;  // a última tentativa ficou sem dados (IFC aparece 0)
 
     std::uint32_t ctrl_ = 0;  // bits graváveis e flags (IFC/OFC/BUSY montados na leitura)
     std::uint32_t cmd_ = 0;   // comando corrente (ou o último)

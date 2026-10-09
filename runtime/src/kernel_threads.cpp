@@ -371,6 +371,16 @@ std::string Kernel::describeThreads() const {
     return s;
 }
 
+std::string Kernel::threadReport() const {
+    std::string s = describeThreads();
+    for (const auto& [id, t] : threads_) {
+        if (t->deleted || t.get() == current_ || t->status == THS_DORMANT) continue;
+        s += "\n  thread " + std::to_string(id) + " parada em " + rt_.describe(t->saved.pc) + ", chamada de " +
+             rt_.describe(t->saved.r[31].uw[0]);
+    }
+    return s;
+}
+
 void Kernel::deadlock(std::uint32_t pc) {
     throw GuestError("deadlock: todas as threads do EE estão bloqueadas e nenhum evento (timer, "
                      "alarme, VBlank) as acordou:" + describeThreads(),
