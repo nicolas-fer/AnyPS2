@@ -77,6 +77,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     gs_ = std::make_unique<gs::Gs>(this);
     gs_->setHsyncSource([](void* t) { return static_cast<Timing*>(t)->now(); }, timing_.get(),
                         Timing::kCyclesPerLine);
+    gs_->setRealTimeClock(!options_.virtualClock);
     gif_ = std::make_unique<Gif>(this, *gs_);
     vif0_ = std::make_unique<Vif>(this, 0, *vu_, gif_.get());
     vif1_ = std::make_unique<Vif>(this, 1, *vu_, gif_.get());

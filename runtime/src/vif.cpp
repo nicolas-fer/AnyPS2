@@ -6,8 +6,10 @@
 #include <string>
 
 #include "anyps2/common/error.h"
+#include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vu/vu.h"
 
@@ -16,6 +18,13 @@ namespace anyps2::rt {
 namespace {
 constexpr std::uint32_t kStatMrk = 1u << 6;
 constexpr std::uint32_t kStatDbf = 1u << 7;
+constexpr std::uint32_t kStatVss = 1u << 8;   // parado por STOP
+constexpr std::uint32_t kStatVfs = 1u << 9;   // parado por ForceBreak
+constexpr std::uint32_t kStatVis = 1u << 10;  // parado pelo bit I
+constexpr std::uint32_t kStatInt = 1u << 11;  // interrupção do bit I
+constexpr std::uint32_t kStatEr0 = 1u << 12, kStatEr1 = 1u << 13;
+constexpr std::uint32_t kStatStall = kStatVss | kStatVfs | kStatVis;
+constexpr std::uint32_t kErrMii = 1;  // ERR.MII: ignora o bit I
 
 std::string cmdName(std::uint32_t cmd) {
     switch (cmd & 0x7F) {
@@ -50,6 +59,8 @@ Vif::Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif) : rt_(rt), unit_(un
 
 void Vif::reset() {
     state_ = State::Idle;
+    irqPending_ = false;
+    fifo_.clear();
     remaining_ = 0;
     directFill_ = 0;
     stat_ = err_ = mark_ = cycle_ = mode_ = num_ = mask_ = 0;
@@ -64,39 +75,83 @@ std::uint32_t Vif::dataSize() const { return unit_ == 0 ? VuMemory::kVu0Size : V
 std::uint8_t* Vif::microMem() const { return unit_ == 0 ? vu_.micro0.get() : vu_.micro1.get(); }
 std::uint32_t Vif::microSize() const { return unit_ == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size; }
 
-void Vif::transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
+bool Vif::stalled() const { return (stat_ & kStatStall) != 0; }
+
+std::size_t Vif::transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
+    if (stalled()) return 0;
     for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
         std::uint32_t w;
         std::memcpy(&w, data + off, 4);
         word(w, pc);
+        if (stalled()) {
+            // O quadword em que parou já entrou no FIFO; o resto dele espera.
+            const std::size_t end = std::min(bytes, (off + 4 + 15) & ~std::size_t{15});
+            fifo_.insert(fifo_.end(), data + off + 4, data + end);
+            return end;
+        }
     }
+    return bytes;
+}
+
+void Vif::fifoWrite(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
+    if (stalled()) {
+        fifo_.insert(fifo_.end(), data, data + bytes);
+        return;
+    }
+    transfer(data, bytes, pc);
 }
 
 void Vif::transferTag(std::uint64_t upper, std::uint32_t pc) {
-    word(static_cast<std::uint32_t>(upper), pc);
-    word(static_cast<std::uint32_t>(upper >> 32), pc);
+    std::uint8_t b[8];
+    std::memcpy(b, &upper, 8);
+    transfer(b, 8, pc);
+}
+
+void Vif::stallOnIrq() {
+    irqPending_ = false;
+    stat_ |= kStatVis | kStatInt;
+    if (rt_) rt_->kernel().raiseIntc(unit_ == 0 ? 4 : 5);
+}
+
+// FBRST.STC: sai da parada, processa o que esperava no FIFO e, se não parar
+// de novo, o DMA do canal continua.
+void Vif::resume(std::uint32_t pc) {
+    stat_ &= ~(kStatStall | kStatInt | kStatEr0 | kStatEr1);
+    std::vector<std::uint8_t> pending;
+    pending.swap(fifo_);
+    std::size_t off = 0;
+    for (; off + 4 <= pending.size() && !stalled(); off += 4) {
+        std::uint32_t w;
+        std::memcpy(&w, pending.data() + off, 4);
+        word(w, pc);
+    }
+    if (stalled()) {
+        fifo_.insert(fifo_.begin(), pending.begin() + static_cast<std::ptrdiff_t>(off), pending.end());
+        return;
+    }
+    if (rt_) rt_->dmac().resumeChannel(unit_, pc);
 }
 
 void Vif::word(std::uint32_t w, std::uint32_t pc) {
     switch (state_) {
         case State::Idle:
             command(w, pc);
-            return;
+            break;
         case State::Mask:
             mask_ = w;
             state_ = State::Idle;
-            return;
+            break;
         case State::Row:
         case State::Col:
             (state_ == State::Row ? row_ : col_)[index_++] = w;
             if (index_ == 4) state_ = State::Idle;
-            return;
+            break;
         case State::Mpg: {
             std::uint8_t* m = microMem();
             std::memcpy(m + (mpgAddr_ & (microSize() - 4)), &w, 4);
             mpgAddr_ += 4;
             if (--remaining_ == 0) state_ = State::Idle;
-            return;
+            break;
         }
         case State::Direct:
             std::memcpy(directBuf_ + directFill_, &w, 4);
@@ -106,11 +161,13 @@ void Vif::word(std::uint32_t w, std::uint32_t pc) {
                 gif_->transfer(2, directBuf_, 1, pc);
                 if (--remaining_ == 0) state_ = State::Idle;
             }
-            return;
+            break;
         case State::Unpack:
             unpackWord(w, pc);
-            return;
+            break;
     }
+    // Bit I: a interrupção vem ao fim do comando (com os dados dele).
+    if (irqPending_ && state_ == State::Idle) stallOnIrq();
 }
 
 void Vif::command(std::uint32_t w, std::uint32_t pc) {
@@ -122,11 +179,7 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
     if (rt_ && rt_->options().traceGs) {
         std::fprintf(stderr, "[vif%u] %s (0x%08x)\n", unit_, cmdName(cmd).c_str(), w);
     }
-    if ((cmd & 0x80) && !(err_ & 1)) {
-        throw Unimplemented(unitName + ": VIFcode " + cmdName(cmd) + " com bit de interrupção (" + anyps2::hex(w) +
-                                ") — interrupção/parada do VIF ainda não emulada",
-                            pc);
-    }
+    if ((cmd & 0x80) && !(err_ & kErrMii)) irqPending_ = true;
     const bool vif1 = unit_ == 1;
     switch (cmd & 0x7F) {
         case 0x00: return;
@@ -286,7 +339,11 @@ void Vif::writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t) {
 std::uint32_t Vif::readRegister(std::uint32_t addr, std::uint32_t pc) {
     const std::uint32_t off = addr & 0x3FF;
     switch (off) {
-        case 0x00: return stat_ | (state_ != State::Idle ? 1u : 0u);  // VPS: esperando dados
+        case 0x00: {
+            // VPS (esperando dados) e FQC (quadwords no FIFO).
+            const std::uint32_t fqc = std::min<std::uint32_t>(static_cast<std::uint32_t>((fifo_.size() + 15) / 16), 16);
+            return stat_ | (state_ != State::Idle ? 1u : 0u) | (fqc << 24);
+        }
         case 0x10: return 0;
         case 0x20: return err_;
         case 0x30: return mark_;
@@ -313,8 +370,18 @@ std::uint32_t Vif::readRegister(std::uint32_t addr, std::uint32_t pc) {
 void Vif::writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
     const std::uint32_t off = addr & 0x3FF;
     switch (off) {
-        case 0x10:  // FBRST
-            if (value & 1) reset();
+        case 0x10:  // FBRST: RST, FBK, STP, STC
+            if (value & 1) {
+                reset();
+                return;
+            }
+            if (value & 6) {
+                throw Unimplemented("VIF" + std::to_string(unit_) + ": FBRST " + anyps2::hex(value) +
+                                        " (ForceBreak/STOP) ainda não suportado",
+                                    pc);
+            }
+            if ((value & 8) && stalled()) resume(pc);
+            else if (value & 8) stat_ &= ~(kStatInt | kStatEr0 | kStatEr1);
             return;
         case 0x20: err_ = value & 7; return;
         case 0x30:

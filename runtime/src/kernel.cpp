@@ -225,6 +225,25 @@ std::int32_t Kernel::addHandler(std::vector<Handler>& list, unsigned cause, std:
     return h.id;
 }
 
+// Handler em contexto de interrupção: como no kernel do console, Status.IE
+// (bit 0) fica desligado enquanto ele roda — código que escolhe entre
+// SignalSema e iSignalSema olhando esse bit (Gran Turismo 4) depende disso.
+std::uint64_t Kernel::invokeHandler(std::uint32_t function, const std::vector<std::uint32_t>& args,
+                                    std::uint32_t pc) {
+    Context& c = rt_.context();
+    const std::uint32_t ie = c.cop0[cop0::Status] & 1u;
+    c.cop0[cop0::Status] &= ~1u;
+    std::uint64_t ret = 0;
+    try {
+        ret = rt_.invokeGuest(function, args, pc);
+    } catch (...) {
+        rt_.context().cop0[cop0::Status] |= ie;
+        throw;
+    }
+    rt_.context().cop0[cop0::Status] |= ie;
+    return ret;
+}
+
 void Kernel::runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, unsigned cause,
                          std::uint32_t pc, bool ignoreEie) {
     if (!(enabledMask & (1u << cause))) return;
@@ -240,7 +259,7 @@ void Kernel::runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, 
             Context& c = rt_.context();
             const std::uint32_t savedGp = c.r[28].uw[0];
             c.r[28].sd[0] = static_cast<std::int32_t>(h.gp);
-            const auto ret = static_cast<std::int32_t>(rt_.invokeGuest(h.function, {cause, h.arg, 0}, pc));
+            const auto ret = static_cast<std::int32_t>(invokeHandler(h.function, {cause, h.arg, 0}, pc));
             c.r[28].sd[0] = static_cast<std::int32_t>(savedGp);
             if (ret < 0) break;
         }
@@ -300,7 +319,7 @@ void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle
                 const std::uint32_t savedGp = c.r[28].uw[0];
                 c.r[28].sd[0] = static_cast<std::int32_t>(a.gp);
                 try {
-                    rt_.invokeGuest(a.handler, {static_cast<std::uint32_t>(a.id), a.lines, a.arg}, pc);
+                    invokeHandler(a.handler, {static_cast<std::uint32_t>(a.id), a.lines, a.arg}, pc);
                 } catch (...) {
                     --interruptDepth_;
                     throw;

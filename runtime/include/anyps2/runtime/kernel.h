@@ -140,6 +140,8 @@ private:
                             std::int32_t next, std::uint32_t arg, std::uint32_t gp);
     void runHandlers(std::vector<Handler>& list, std::uint32_t enabledMask, unsigned cause,
                      std::uint32_t pc, bool ignoreEie = false);
+    // Chama um handler do programa com Status.IE desligado (contexto de interrupção).
+    std::uint64_t invokeHandler(std::uint32_t function, const std::vector<std::uint32_t>& args, std::uint32_t pc);
 
     // ---- Threads ---------------------------------------------------------
     Thread* thread(std::int32_t id, std::uint32_t pc, bool allowSelf = true);

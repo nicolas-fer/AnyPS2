@@ -7,11 +7,14 @@
 //   handle, 0 = erro.
 //   fn 4 (ler): {handle, destino no EE, tamanho}: o IOP escreve os dados na
 //   memória do EE e avança a posição; sem resposta.
+//   fn 5 (ler para o IOP): {handle, destino na RAM do IOP, tamanho} — dados
+//   que ficam no IOP (som); o HLE do som é mudo, mas os dados são copiados.
 //   fn 2 (fechar): {handle}.
-// O resto (abrir por caminho, fn 1/5/6/8/9) ainda não foi visto em uso e para
+// O resto (abrir por caminho, fn 1/6/8/9) ainda não foi visto em uso e para
 // com erro claro.
 
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -84,14 +87,16 @@ void registerPdiStr(Iop& iop) {
                     wr32(out, 0, h);
                     return out;
                 }
-                case 4: {
+                case 4:
+                case 5: {
+                    const bool toIop = fn == 5;
                     const std::uint32_t h = rd32(in, 0), dest = rd32(in, 4), size = rd32(in, 8);
                     auto it = st->streams.find(h);
                     if (it == st->streams.end()) {
                         throw GuestError("pdistr: leitura do stream " + std::to_string(h) + ", que não está aberto",
                                          pc);
                     }
-                    if (!dest) {
+                    if (!dest && !toIop) {
                         throw Unimplemented("pdistr: leitura de " + std::to_string(size) +
                                                 " bytes sem destino (endereço 0) — semântica desconhecida",
                                             pc);
@@ -106,10 +111,11 @@ void registerPdiStr(Iop& iop) {
                                          pc);
                     }
                     if (trace) {
-                        std::fprintf(stderr, "[iop] pdistr: stream %u lê %u bytes (posição %u) para 0x%08x\n", h,
-                                     size, s.pos, dest);
+                        std::fprintf(stderr, "[iop] pdistr: stream %u lê %u bytes (posição %u) para 0x%08x (%s)\n", h,
+                                     size, s.pos, dest, toIop ? "IOP" : "EE");
                     }
-                    if (size) iop.runtime().memory().copyToGuest(dest, buf.data(), size, pc);
+                    if (size && toIop) std::memcpy(iop.iopPointer(dest, size, pc), buf.data(), size);
+                    else if (size) iop.runtime().memory().copyToGuest(dest, buf.data(), size, pc);
                     s.pos += size;
                     return out;
                 }

@@ -106,6 +106,7 @@ void Dmac::write(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
         switch (addr - kBase[ch]) {
             case 0x00:
                 c.chcr = value;
+                if (!(value & kChcrStr)) c.paused = false;
                 if (value & kChcrStr) start(static_cast<unsigned>(ch), pc);
                 return;
             case 0x10: c.madr = value & 0xFFFFFFF0u; return;
@@ -176,18 +177,27 @@ std::uint8_t* Dmac::hostAddress(std::uint32_t dmaAddr, std::uint32_t qwc, unsign
     return rt_.memory().ram() + phys;
 }
 
-void Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std::uint32_t pc) {
-    if (qwc == 0) return;
+bool Dmac::deviceStalled(unsigned ch) {
+    if (ch == kVif0) return rt_.vif0().stalled();
+    if (ch == kVif1) return rt_.vif1().stalled();
+    return false;
+}
+
+std::uint32_t Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std::uint32_t pc) {
+    if (qwc == 0) return 0;
     std::uint8_t* src = hostAddress(addr, qwc, ch, pc);
     switch (ch) {
-        case kVif0: rt_.vif0().transfer(src, std::size_t{qwc} * 16, pc); return;
-        case kVif1: rt_.vif1().transfer(src, std::size_t{qwc} * 16, pc); return;
+        case kVif0:
+        case kVif1: {
+            const std::size_t bytes = (ch == kVif0 ? rt_.vif0() : rt_.vif1()).transfer(src, std::size_t{qwc} * 16, pc);
+            return static_cast<std::uint32_t>(bytes / 16);
+        }
         case kGif:
             if (rt_.gif().path3Masked()) {
                 throw Unimplemented("DMA do GIF com PATH3 mascarado pelo VIF1 (MSKPATH3) — espera não emulada", pc);
             }
             rt_.gif().transfer(3, src, qwc, pc);
-            return;
+            return qwc;
         case kToSpr: {
             Channel& c = ch_[ch];
             if (c.sadr + qwc * 16 > Memory::kScratchpadSize) {
@@ -195,7 +205,7 @@ void Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std:
             }
             std::memcpy(rt_.memory().scratchpad() + c.sadr, src, std::size_t{qwc} * 16);
             c.sadr = (c.sadr + qwc * 16) & 0x3FF0u;
-            return;
+            return qwc;
         }
         default:
             break;
@@ -203,10 +213,25 @@ void Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std:
     throw Unimplemented(std::string("DMA para o canal ") + channelName(ch) + " ainda não suportado", pc);
 }
 
+bool Dmac::transferData(unsigned ch, std::uint32_t pc) {
+    Channel& c = ch_[ch];
+    const std::uint32_t done = sendToDevice(ch, c.madr, c.qwc, pc);
+    c.madr += done * 16;
+    c.qwc -= done;
+    return c.qwc == 0 && !deviceStalled(ch);
+}
+
+void Dmac::resumeChannel(unsigned ch, std::uint32_t pc) {
+    if (ch >= kChannels) return;
+    const Channel& c = ch_[ch];
+    if (c.paused && (c.chcr & kChcrStr)) start(ch, pc);
+}
+
 void Dmac::finish(unsigned ch) {
     Channel& c = ch_[ch];
     c.chcr &= ~kChcrStr;
     c.pending = false;
+    c.paused = false;
     stat_ |= 1u << ch;
     if (stat_ & (1u << (16 + ch))) rt_.kernel().raiseIntc(kIntcDmac);
 }
@@ -238,18 +263,33 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
                                     " (os programas do ps2sdk usam as syscalls de SIF; IPU chega com MPEG)",
                                 pc);
     }
+    // Começo (não retomada) de uma cadeia com QWC já escrito: o tag em CHCR
+    // diz se ela já tinha terminado.
+    if (!c.paused) {
+        const unsigned lastId = (c.chcr >> 28) & 7;
+        c.tagEnds = lastId == 0 || lastId == 7;
+    }
+    bool done = false;
     switch (mod) {
-        case 0: runNormal(ch, pc); break;
-        case 1: runChain(ch, pc); break;
+        case 0: done = runNormal(ch, pc); break;
+        case 1: done = runChain(ch, pc); break;
         default:
             throw Unimplemented(std::string("DMA ") + channelName(ch) + " em modo interleave (MOD=" +
                                     std::to_string(mod) + ") ainda não suportado",
                                 pc);
     }
-    finish(ch);
+    if (done) {
+        finish(ch);
+    } else {
+        c.paused = true;
+        if (rt_.options().traceGs) {
+            std::fprintf(stderr, "[dma] %s pausado (VIF parado) em MADR=%08x QWC=%u TADR=%08x\n", channelName(ch),
+                         c.madr, c.qwc, c.tadr);
+        }
+    }
 }
 
-void Dmac::runNormal(unsigned ch, std::uint32_t pc) {
+bool Dmac::runNormal(unsigned ch, std::uint32_t pc) {
     Channel& c = ch_[ch];
     if (ch == kFromSpr) {
         if (c.sadr + c.qwc * 16 > Memory::kScratchpadSize) {
@@ -258,26 +298,28 @@ void Dmac::runNormal(unsigned ch, std::uint32_t pc) {
         std::uint8_t* dst = hostAddress(c.madr, c.qwc, ch, pc);
         std::memcpy(dst, rt_.memory().scratchpad() + c.sadr, std::size_t{c.qwc} * 16);
         c.sadr = (c.sadr + c.qwc * 16) & 0x3FF0u;
-    } else {
-        sendToDevice(ch, c.madr, c.qwc, pc);
+        c.madr += c.qwc * 16;
+        c.qwc = 0;
+        return true;
     }
-    c.madr += c.qwc * 16;
-    c.qwc = 0;
+    // Modo normal: com tudo entregue o DMA terminou, mesmo que o VIF tenha
+    // parado no último quadword (o resto dele está no FIFO do VIF).
+    transferData(ch, pc);
+    return c.qwc == 0;
 }
 
-void Dmac::runChain(unsigned ch, std::uint32_t pc) {
+bool Dmac::runChain(unsigned ch, std::uint32_t pc) {
     Channel& c = ch_[ch];
     if ((c.chcr & kChcrTte) && ch == kGif) {
         throw Unimplemented("DMA do GIF em chain com TTE=1 (tag transferido para o GIF) não suportado", pc);
     }
-    // Se QWC já tem dados, o DMAC os transfere antes de ler o próximo tag.
-    if (c.qwc > 0) {
-        sendToDevice(ch, c.madr, c.qwc, pc);
-        c.madr += c.qwc * 16;
-        c.qwc = 0;
-        const unsigned lastId = (c.chcr >> 28) & 7;
-        if (lastId == 0 || lastId == 7) return;  // refe/end: a cadeia já tinha terminado
-    }
+    // Dados pendentes do tag corrente — QWC escrito pelo programa antes de
+    // STR, ou transferência pausada — vão antes do próximo tag.
+    const bool resuming = c.paused;
+    const bool hadData = c.qwc > 0;
+    c.paused = false;
+    if (hadData && !transferData(ch, pc)) return false;
+    if ((resuming || hadData) && c.tagEnds) return true;
     for (unsigned guard = 0;; ++guard) {
         if (guard > 1000000) {
             throw GuestError(std::string("DMA ") + channelName(ch) + ": cadeia de tags com mais de 1 milhão de "
@@ -298,37 +340,32 @@ void Dmac::runChain(unsigned ch, std::uint32_t pc) {
             std::fprintf(stderr, "[dma] %s tag %s QWC=%u ADDR=%08x em %08x\n", channelName(ch), tagName(id), qwc,
                          addr, c.tadr);
         }
-        if ((c.chcr & kChcrTte) && (ch == kVif0 || ch == kVif1)) {
-            (ch == kVif0 ? rt_.vif0() : rt_.vif1()).transferTag(upper, pc);
-        }
+        // Primeiro a contabilidade do tag (de onde vêm os dados, próximo tag,
+        // pilha ASR, se a cadeia termina); depois TTE e dados, que podem
+        // pausar se o VIF parar.
         const std::uint32_t after = c.tadr + 16;
-        bool done = false;
+        bool ends = false;
         unsigned asp = (c.chcr >> 4) & 3;
         switch (id) {
             case 0:  // refe
                 c.madr = addr;
-                sendToDevice(ch, addr, qwc, pc);
                 c.tadr = after;
-                done = true;
+                ends = true;
                 break;
             case 1:  // cnt
                 c.madr = after;
-                sendToDevice(ch, after, qwc, pc);
                 c.tadr = after + qwc * 16;
                 break;
             case 2:  // next
                 c.madr = after;
-                sendToDevice(ch, after, qwc, pc);
                 c.tadr = addr;
                 break;
             case 3: case 4:  // ref, refs
                 c.madr = addr;
-                sendToDevice(ch, addr, qwc, pc);
                 c.tadr = after;
                 break;
             case 5: {  // call
                 c.madr = after;
-                sendToDevice(ch, after, qwc, pc);
                 const std::uint32_t ret = after + qwc * 16;
                 if (asp == 0) c.asr0 = ret;
                 else if (asp == 1) c.asr1 = ret;
@@ -343,9 +380,8 @@ void Dmac::runChain(unsigned ch, std::uint32_t pc) {
             }
             case 6:  // ret
                 c.madr = after;
-                sendToDevice(ch, after, qwc, pc);
                 if (asp == 0) {
-                    done = true;
+                    ends = true;
                 } else {
                     c.tadr = asp == 2 ? c.asr1 : c.asr0;
                     --asp;
@@ -353,16 +389,19 @@ void Dmac::runChain(unsigned ch, std::uint32_t pc) {
                 break;
             default:  // end
                 c.madr = after;
-                sendToDevice(ch, after, qwc, pc);
                 c.tadr = after;
-                done = true;
+                ends = true;
                 break;
         }
-        c.madr += qwc * 16;
-        c.qwc = 0;
+        c.qwc = qwc;
         c.chcr = (c.chcr & ~0x30u) | (asp << 4);
-        if (irq && (c.chcr & kChcrTie)) done = true;
-        if (done) return;
+        c.tagEnds = ends || (irq && (c.chcr & kChcrTie));
+        if ((c.chcr & kChcrTte) && (ch == kVif0 || ch == kVif1)) {
+            (ch == kVif0 ? rt_.vif0() : rt_.vif1()).transferTag(upper, pc);
+            if (deviceStalled(ch)) return false;
+        }
+        if (c.qwc > 0 && !transferData(ch, pc)) return false;
+        if (c.tagEnds) return true;
     }
 }
 

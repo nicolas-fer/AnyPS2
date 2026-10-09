@@ -196,8 +196,8 @@ void Hardware::write(std::uint32_t addr, const void* in, unsigned size, std::uin
             std::fprintf(stderr, "[hw] escrita 128 bits %08x %s\n", addr, registerName(addr).c_str());
         }
         switch (addr & ~0xFFFu) {
-            case 0x10004000: rt_.vif0().transfer(data, 16, pc); return;
-            case 0x10005000: rt_.vif1().transfer(data, 16, pc); return;
+            case 0x10004000: rt_.vif0().fifoWrite(data, 16, pc); return;
+            case 0x10005000: rt_.vif1().fifoWrite(data, 16, pc); return;
             case 0x10006000:
                 rt_.gif().transfer(3, data, 1, pc);
                 return;

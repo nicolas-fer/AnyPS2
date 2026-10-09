@@ -28,14 +28,25 @@ struct VuMemory {
 // UNPACK (todos os formatos, com máscara, modos offset/difference e
 // escrita com salto) e MSCAL/MSCALF/MSCNT, que executam o microprograma do
 // VU correspondente na hora (com o double buffering TOPS/BASE/OFST do VIF1).
+//
+// VIFcode com bit I (sem ERR.MII): ao fim do comando o VIF liga STAT.VIS e
+// STAT.INT, pede a interrupção do INTC (VIF0 = 4, VIF1 = 5) e para; o resto
+// do quadword fica no FIFO e o DMA do canal pausa. FBRST.STC libera: o FIFO
+// é processado e o DMA continua.
 class Vif {
 public:
     Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif);
 
-    // Processa dados (múltiplo de 4 bytes) vindos do DMA/FIFO.
-    void transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc);
+    // Processa dados (múltiplo de 4 bytes) vindos do DMA. Retorna quantos
+    // bytes foram aceitos: tudo, ou — se o VIF parou — até o fim do quadword
+    // em que parou (o resto dele fica no FIFO); 0 se já estava parado.
+    std::size_t transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc);
+    // Escrita no VIFn_FIFO pelo EE: com o VIF parado, os dados esperam no FIFO.
+    void fifoWrite(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc);
     // DMA com TTE: os 64 bits altos do DMAtag passam pelo VIF.
     void transferTag(std::uint64_t upper, std::uint32_t pc);
+    // Parado (bit I, STOP ou ForceBreak) até FBRST.STC.
+    bool stalled() const;
 
     std::uint32_t readRegister(std::uint32_t addr, std::uint32_t pc);
     void writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc);
@@ -63,6 +74,10 @@ private:
 
     State state_ = State::Idle;
     std::uint32_t code_ = 0;
+    bool irqPending_ = false;           // comando corrente tem o bit I
+    std::vector<std::uint8_t> fifo_;    // dados recebidos e ainda não processados (parado)
+    void stallOnIrq();
+    void resume(std::uint32_t pc);
     std::uint32_t remaining_ = 0;  // palavras (ou quadwords no DIRECT) restantes
     unsigned index_ = 0;
     // MPG

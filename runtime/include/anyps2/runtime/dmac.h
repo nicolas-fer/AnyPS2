@@ -19,6 +19,10 @@ class Runtime;
 // ret/end, com TTE para os VIFs, IRQ+TIE, pilha ASR0/ASR1) nos canais VIF0,
 // VIF1, GIF e toSPR; modo normal no fromSPR. IPU, SIF por registradores,
 // MFIFO, interleave e VIF1→memória lançam erro dizendo o que faltou.
+//
+// Exceção à transferência instantânea: se o VIF para (VIFcode com bit I), o
+// canal pausa no ponto exato (MADR/QWC/TADR, STR continua ligado) e só
+// continua quando o VIF for liberado (resumeChannel, chamado pelo VIF).
 class Dmac {
 public:
     static constexpr unsigned kChannels = 10;
@@ -43,17 +47,27 @@ public:
     bool cpcond0() const { return ((~pcr_ | stat_) & 0x3FFu) == 0x3FFu; }
     // ResetEE(DMAC)
     void reset();
+    // O VIF do canal (0 ou 1) saiu da parada: o DMA pausado continua.
+    void resumeChannel(unsigned ch, std::uint32_t pc);
 
 private:
     struct Channel {
         std::uint32_t chcr = 0, madr = 0, qwc = 0, tadr = 0, asr0 = 0, asr1 = 0, sadr = 0;
         bool pending = false;  // STR ligado com o DMAC suspenso/desabilitado
+        bool paused = false;   // STR ligado, esperando o VIF sair da parada
+        bool tagEnds = false;  // o tag corrente termina a cadeia (end/refe/ret, IRQ+TIE)
     };
 
     void start(unsigned ch, std::uint32_t pc);
-    void runNormal(unsigned ch, std::uint32_t pc);
-    void runChain(unsigned ch, std::uint32_t pc);
-    void sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std::uint32_t pc);
+    // Retornam true se a transferência terminou, false se pausou (VIF parado).
+    bool runNormal(unsigned ch, std::uint32_t pc);
+    bool runChain(unsigned ch, std::uint32_t pc);
+    // Transfere QWC quadwords a partir de MADR (o quanto o destino aceitar) e
+    // avança MADR/QWC. Retorna true se tudo foi e o destino não parou.
+    bool transferData(unsigned ch, std::uint32_t pc);
+    bool deviceStalled(unsigned ch);
+    // Retorna quantos quadwords o destino aceitou.
+    std::uint32_t sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t qwc, std::uint32_t pc);
     void finish(unsigned ch);
     std::uint8_t* hostAddress(std::uint32_t dmaAddr, std::uint32_t qwc, unsigned ch, std::uint32_t pc);
     void startPending(std::uint32_t pc);

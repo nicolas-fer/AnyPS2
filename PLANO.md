@@ -596,19 +596,38 @@ sem som):
 - ✅ Teste `e2e_pdi`: fala os quatro protocolos (escritos a partir do que o
   jogo faz) com IRX mínimos só com o nome, sobre o `disc.iso` do teste cdvd.
 
-Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para som, USB e
-rede, que respondem zeros): o jogo lê dados reais do GT4.VOL e começa a
-desenhar, e para no VIF1: um `FLUSH` com o bit de interrupção. O GT4
-sincroniza o desenho com um sistema próprio: o VIF1 para no VIFcode com bit
-I até o handler da interrupção (causa 5) decidir, por contadores no
-scratchpad, se libera (FBRST.STC); tags de DMA com IRQ e o FINISH do GS
-(causa 0) também mexem nesses contadores e liberam o VIF1 ou o PATH3.
+Marco 5 — a primeira tela do jogo: seleção de idioma ✅ (sem som):
+- ✅ **Parada do VIF pelo bit I**: o GT4 sincroniza o desenho com um sistema
+  próprio — o VIF1 para no VIFcode com bit I até o handler da interrupção
+  (causa 5) decidir, por contadores no scratchpad, se libera (FBRST.STC);
+  tags de DMA com IRQ e o FINISH do GS (causa 0) mexem nos mesmos
+  contadores. Agora o VIF liga STAT.VIS/INT ao fim do comando, pede a
+  interrupção do INTC (4/5) e para; o resto do quadword fica no FIFO
+  (STAT.FQC) e o DMA do canal pausa no ponto exato (MADR/QWC/TADR, STR
+  ligado, também no meio do DMAtag com TTE). FBRST.STC processa o FIFO e o
+  DMA continua; ERR.MII ignora o bit I.
+- ✅ **Handlers com Status.IE desligado**: o GT4 escolhe entre `SignalSema` e
+  `iSignalSema` olhando esse bit; com ele ligado, o `SignalSema` dentro do
+  handler de VBLANK trocava de thread no meio da interrupção.
+- ✅ **Vídeo entrelaçado em modo campo** (SMODE2 INT+FFMD): o framebuffer
+  tem meia altura e cada linha aparece duas vezes na saída (o GT4 PAL usa
+  640×256 por campo, PSMCT24, double buffering).
+- ✅ pdistr fn 5: ler do stream para a RAM do IOP (dados de som).
+- ✅ Relógio real: dois FINISH do GS que vencem juntos (o GS em software
+  gasta tempo de verdade) saem um por vez — o sample `draw/teapot` do
+  ps2sdk travava em tela preta com a janela aberta.
+- ✅ Testes: `gs.vif1_interrupt_bit_stalls_and_resumes_dma` (chain com
+  FLUSH+I no meio dos dados e no DMAtag, modo normal parando no meio do
+  quadword, ERR.MII), `gs.finish_real_clock_one_at_a_time` e o modo campo
+  em `gs.display_output`.
 
-Próximos passos do GT4: DMA/VIF assíncronos — o canal parar no meio de uma
-cadeia (VIFcode com bit I, tag com IRQ) e continuar quando o programa
-liberar; interrupções do VIF1 e do GS (SIGNAL/FINISH). Depois: o que
-aparecer (som continua mudo: pdispu2/rt_ac exigem executar o código do
-IOP), e PAL.
+Onde o GT4 está agora (com `ANYPS2_IOP_ACCEPT_MISSING=1` para som, USB e
+rede, que respondem zeros): a tela de seleção de idioma (ENGLISH,
+FRANÇAIS, DEUTSCH, ITALIANO, ESPAÑOL), esperando o controle.
+
+Próximos passos do GT4: avançar pelos menus com o roteiro de controle e
+tratar o que aparecer; o som continua mudo (pdispu2/rt_ac exigem executar
+o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

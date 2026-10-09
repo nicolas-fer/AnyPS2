@@ -23,8 +23,8 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > Gran Turismo 4 (dump do usuário) recompilado desenha a tela de copyright,
 > descomprime e executa o programa principal (também recompilado: 1,4 M
 > instruções), inicializa controles e memory card, lê os dados do disco
-> pelos drivers da Polyphony (em HLE, sem som) e para na sincronização do
-> desenho (interrupção do VIF1), que ainda não é emulada. Jogos
+> pelos drivers da Polyphony (em HLE, sem som) e mostra a primeira tela do
+> jogo, a seleção de idioma. Jogos
 > comerciais ainda não são jogáveis: eles trazem drivers próprios para o
 > IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
 > [PLANO.md](PLANO.md) para o roteiro completo.
@@ -405,9 +405,8 @@ gravado da RAM e recompilado junto (`ANYPS2_EXEC_DUMP`, `anyps2 ram2elf`,
 `recomp --extra`), o GS em software é
 mono-thread (~19 Mpixels/s com textura bilinear — suficiente para homebrews,
 não para jogos comerciais; é ele, não o VU, que domina o tempo nos samples
-3D), DMA termina instantaneamente (só o FINISH do GS tem latência; VIFcode
-com bit de interrupção e a parada do DMA no meio da cadeia não são
-emulados), os VUs
+3D), DMA termina instantaneamente (só o FINISH do GS tem latência e a
+parada do VIF pelo bit I pausa o canal), os VUs
 rodam síncronos com o EE, o EFU usa a libm do host (último bit pode
 diferir), só há vídeo NTSC e os limites do IOP em HLE listados na
 [Fase 6](#fase-6--iop-em-hle-módulos-controle-memory-card-disco-e-som).

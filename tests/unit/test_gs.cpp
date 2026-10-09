@@ -10,6 +10,7 @@
 #include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/vif.h"
@@ -501,6 +502,15 @@ TEST_CASE(gs, display_output) {
     // MAGH=1 (2x): metade da largura
     g.writePrivileged(0x12000080, (63ull << 32) | (31ull << 44) | (1ull << 23), 0);
     CHECK_EQ(g.display().width, 32u);
+    // SMODE2 INT+FFMD (modo campo): o framebuffer tem meia altura; cada linha
+    // aparece duas vezes (linhas 6 e 7 da saída = linha 3 do framebuffer).
+    g.writePrivileged(0x12000080, (63ull << 32) | (31ull << 44), 0);
+    g.writePrivileged(0x12000020, 3, 0);
+    const Frame field = g.display();
+    CHECK_EQ(field.height, 32u);
+    CHECK_EQ(field.pixels[6 * 64 + 2], 0xFFFFFFFFu);
+    CHECK_EQ(field.pixels[7 * 64 + 2], 0xFFFFFFFFu);
+    CHECK_EQ(field.pixels[3 * 64 + 2], 0xFF1E140Au);
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +804,101 @@ TEST_CASE(gs, finish_latency) {
     rt.gs().writePrivileged(0x12001000, 0x200, 0);  // RESET
     CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
     // GS isolado (sem relógio): imediato, ver gs.signal_finish_and_csr.
+}
+
+// Relógio real: o GS em software leva tempo de verdade, e dois FINISH que no
+// hardware chegariam separados podem vencer juntos. Eles saem um por vez — o
+// segundo só depois que o programa limpar o primeiro (o sample draw/teapot do
+// ps2sdk espera dois FINISH por quadro e travava com o relógio real).
+TEST_CASE(gs, finish_real_clock_one_at_a_time) {
+    const ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = false;
+    Runtime rt(info, o);
+    rt.gs().writeRegister(FINISH, 0, 0);
+    rt.gs().writeRegister(FINISH, 0, 0);
+    const std::uint64_t later = rt.timing().now() + 1000000000ull;
+    rt.gs().processEvents(later);
+    CHECK_EQ(rt.gs().csr() & 2, 2ull);
+    CHECK(rt.gs().nextEventTime() != ~std::uint64_t{0});  // o segundo continua na fila
+    rt.gs().processEvents(later);                          // bit ainda ligado: espera
+    CHECK(rt.gs().nextEventTime() != ~std::uint64_t{0});
+    rt.gs().writePrivileged(0x12001000, 2, 0);             // o programa limpa o primeiro
+    CHECK_EQ(rt.gs().csr() & 2, 0ull);
+    rt.gs().processEvents(later);
+    CHECK_EQ(rt.gs().csr() & 2, 2ull);
+    CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
+}
+
+// VIFcode com bit I: o VIF para ao fim do comando (STAT.VIS/INT, INTC 5) e o
+// DMA do VIF1 pausa no ponto exato, com STR ligado; FBRST.STC processa o
+// resto do quadword que ficou no FIFO e o DMA continua. ERR.MII ignora o bit.
+// (Gran Turismo 4 sincroniza o desenho assim.)
+TEST_CASE(gs, vif1_interrupt_bit_stalls_and_resumes_dma) {
+    const ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = true;
+    Runtime rt(info, o);
+    Memory& m = rt.memory();
+    constexpr std::uint32_t kStat = 0x10003C00, kFbrst = 0x10003C10, kErr = 0x10003C20, kMark = 0x10003C30,
+                            kCode = 0x10003C80, kChcr = 0x10009000, kMadr = 0x10009010, kQwc = 0x10009020,
+                            kTadr = 0x10009030;
+    constexpr std::uint32_t kInt = 1u << 11, kVis = 1u << 10, kStr = 0x100;
+    auto put = [&](std::uint32_t addr, std::initializer_list<std::uint32_t> words) {
+        for (std::uint32_t w : words) {
+            m.write<std::uint32_t>(addr, w, 0);
+            addr += 4;
+        }
+    };
+    const std::uint32_t mark = 0x07000000u, flushI = 0x91010000u, nop = 0;
+
+    // Chain: cnt com [MARK 1, FLUSH+I, MARK 2, NOP]; end com [MARK 3, ...].
+    put(0x00200000, {0x10000001u, 0, 0, 0, mark | 1, flushI, mark | 2, nop});
+    put(0x00200020, {0x70000001u, 0, 0, 0, mark | 3, nop, nop, nop});
+    m.write<std::uint32_t>(kTadr, 0x00200000, 0);
+    m.write<std::uint32_t>(kQwc, 0, 0);
+    m.write<std::uint32_t>(kChcr, 0x105, 0);  // chain, para o VIF1, STR
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, kStr);  // pausado
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 1u);
+    CHECK_EQ(m.read<std::uint32_t>(kStat, 0) & (kInt | kVis), kInt | kVis);
+    CHECK_EQ(m.read<std::uint32_t>(kCode, 0), flushI);
+    CHECK_EQ(rt.kernel().intcStat() & (1u << 5), 1u << 5);
+    CHECK_EQ(m.read<std::uint32_t>(kTadr, 0), 0x00200020u);
+    m.write<std::uint32_t>(kFbrst, 8, 0);  // STC
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 3u);
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, 0u);
+    CHECK_EQ(m.read<std::uint32_t>(kStat, 0) & (kInt | kVis), 0u);
+
+    // Bit I no DMAtag (TTE): para antes dos dados do tag.
+    put(0x00200040, {0x70000001u, 0, mark | 5, flushI, mark | 6, nop, nop, nop});
+    m.write<std::uint32_t>(kTadr, 0x00200040, 0);
+    m.write<std::uint32_t>(kChcr, 0x145, 0);  // + TTE
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 5u);
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, kStr);
+    m.write<std::uint32_t>(kFbrst, 8, 0);
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 6u);
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, 0u);
+
+    // Modo normal: para no meio do 1º quadword; o resto espera no FIFO.
+    put(0x00200080, {mark | 7, flushI, mark | 8, nop, mark | 9, nop, nop, nop});
+    m.write<std::uint32_t>(kMadr, 0x00200080, 0);
+    m.write<std::uint32_t>(kQwc, 2, 0);
+    m.write<std::uint32_t>(kChcr, 0x101, 0);
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 7u);
+    CHECK_EQ(m.read<std::uint32_t>(kQwc, 0), 1u);
+    CHECK_EQ((m.read<std::uint32_t>(kStat, 0) >> 24) & 0x1F, 1u);  // FQC
+    m.write<std::uint32_t>(kFbrst, 8, 0);
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 9u);
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, 0u);
+
+    // ERR.MII: o bit I é ignorado.
+    m.write<std::uint32_t>(kErr, 1, 0);
+    m.write<std::uint32_t>(kMadr, 0x00200080, 0);
+    m.write<std::uint32_t>(kQwc, 2, 0);
+    m.write<std::uint32_t>(kChcr, 0x101, 0);
+    CHECK_EQ(m.read<std::uint32_t>(kMark, 0), 9u);
+    CHECK_EQ(m.read<std::uint32_t>(kChcr, 0) & kStr, 0u);
+    CHECK_EQ(m.read<std::uint32_t>(kStat, 0) & (kInt | kVis), 0u);
 }
 
 TEST_CASE(gs, dmac_scratchpad_and_vif_memory_map) {

@@ -109,6 +109,18 @@ void Gs::processEvents(std::uint64_t now) {
     std::size_t n = 0;
     while (n < finishDue_.size() && finishDue_[n] <= now) ++n;
     if (n == 0) return;
+    if (realTime_) {
+        // Relógio real: o GS em software leva tempo de verdade, e dois FINISH
+        // separados no hardware podem vencer juntos aqui — uma única limpeza
+        // do CSR apagaria os dois e quem espera o segundo esperaria para
+        // sempre. Como o desenho já terminou (síncrono), um FINISH adiantado
+        // não faz mal: entrega um por vez, o próximo depois que o programa
+        // limpar o anterior.
+        if (csr_ & (1ull << kFinish)) return;
+        finishDue_.erase(finishDue_.begin());
+        raiseEvent(kFinish);
+        return;
+    }
     finishDue_.erase(finishDue_.begin(), finishDue_.begin() + static_cast<std::ptrdiff_t>(n));
     raiseEvent(kFinish);
 }
@@ -503,6 +515,10 @@ Frame Gs::display() const {
         std::uint32_t w, h;
     } c[2];
     const std::uint64_t pmode = priv_[0];
+    // SMODE2 com INT e FFMD (entrelaçado, modo campo): o framebuffer tem meia
+    // altura e cada linha dele aparece nos dois campos — a saída repete a
+    // linha (o DISPLAY conta as linhas da tela inteira).
+    const std::uint32_t lineDiv = (priv_[2] & 3) == 3 ? 2 : 1;
     std::uint32_t outW = 0, outH = 0;
     std::int32_t minX = 1 << 30, minY = 1 << 30;
     for (unsigned n = 0; n < 2; ++n) {
@@ -544,7 +560,8 @@ Frame Gs::display() const {
         const std::int32_t x = ox - (k.dx - minX), y = oy - (k.dy - minY);
         inside = x >= 0 && y >= 0 && static_cast<std::uint32_t>(x) < k.w && static_cast<std::uint32_t>(y) < k.h;
         if (!inside) return 0;
-        const std::uint32_t px = k.dbx + static_cast<std::uint32_t>(x), py = k.dby + static_cast<std::uint32_t>(y);
+        const std::uint32_t px = k.dbx + static_cast<std::uint32_t>(x),
+                            py = k.dby + static_cast<std::uint32_t>(y) / lineDiv;
         switch (k.psm) {
             case PSMCT32: return vram_.readPixel(PSMCT32, k.fbp * 32, k.fbw, px, py);
             case PSMCT24: return vram_.readPixel(PSMCT24, k.fbp * 32, k.fbw, px, py) | 0x80000000u;

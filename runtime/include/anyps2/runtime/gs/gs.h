@@ -74,6 +74,10 @@ public:
     void vblankEnd();
     // Linha HSYNC (o HSINT é calculado sob demanda a partir do relógio).
     void setHsyncSource(std::uint64_t (*now)(void*), void* ctx, std::uint64_t cyclesPerLine);
+    // Relógio real: o GS em software gasta tempo de verdade desenhando, e
+    // FINISH separados no hardware podem vencer juntos; com isto eles são
+    // entregues um por vez (o próximo depois que o programa limpar o bit).
+    void setRealTimeClock(bool realTime) { realTime_ = realTime; }
     // Eventos de desenho atrasados (FINISH): o GS processa os dados na hora,
     // mas o evento só aparece depois do tempo estimado de trabalho do GS
     // (transferência pelo GIF + preenchimento de pixels). Sem relógio
@@ -155,6 +159,7 @@ private:
     std::uint64_t work_ = 0;        // trabalho acumulado desde o último evento
     std::uint64_t pixels_ = 0;      // pixels desenhados desde o último evento
     std::uint64_t busyUntil_ = 0;   // fim do trabalho já agendado
+    bool realTime_ = false;
     std::uint64_t workStart_ = 0;   // chegada do primeiro dado do lote atual
     std::vector<std::uint64_t> finishDue_;  // FINISH pendentes (ordem crescente)
 
