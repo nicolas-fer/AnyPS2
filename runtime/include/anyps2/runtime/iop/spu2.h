@@ -41,9 +41,14 @@ public:
     void keyOff(unsigned voice);  // entra em release
     void setVolume(unsigned voice, std::uint16_t volL, std::uint16_t volR);
     void setPitch(unsigned voice, std::uint16_t pitch);
+    void setEnvelope(unsigned voice, std::uint16_t adsr1, std::uint16_t adsr2);  // vale já na voz tocando
     // A voz ainda produz som (não chegou ao fim do sample nem do release).
     bool active(unsigned voice) const { return voices_[voice].phase != Phase::Off; }
     std::uint32_t startAddress(unsigned voice) const { return voices_[voice].start; }
+    // Nível do envelope (registrador ENVX, 0..0x7FFF) e o "fim do sample"
+    // (bit do ENDX: a voz leu um bloco com a flag de fim desde o último keyOn).
+    std::uint16_t envelopeLevel(unsigned voice) const { return static_cast<std::uint16_t>(voices_[voice].level); }
+    bool reachedEnd(unsigned voice) const { return voices_[voice].ended; }
 
     // Soma a saída das vozes em `mix` (frames × 2, L/R intercalados).
     void render(std::int32_t* mix, std::size_t frames);
@@ -69,6 +74,7 @@ private:
         std::int32_t s1 = 0, s2 = 0;  // histórico do filtro ADPCM
         std::array<std::int32_t, 4> hist{};  // últimas amostras (interpolação)
         bool stopAtBlockEnd = false;
+        bool ended = false;           // leu um bloco com a flag de fim
     };
     void nextSample(Voice& v);
     void envelope(Voice& v);

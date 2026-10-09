@@ -85,6 +85,7 @@ std::int32_t Iop::loadModule(const std::string& name, std::uint16_t version, con
         else if (hle == "pdicdvd") pdiCdvd_->load();
         else if (hle == "lgdev") registerLgDev(*this);
         else if (hle == "pdistr") registerPdiStr(*this);
+        else if (hle == "pdispu2") registerPdiSpu2(*this);
         loaded_.insert(hle);
     }
     return nextModuleId_++;

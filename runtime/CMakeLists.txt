@@ -47,6 +47,7 @@ add_library(anyps2_runtime STATIC
     src/iop/pdicdvd.cpp
     src/iop/lgdev.cpp
     src/iop/pdistr.cpp
+    src/iop/pdispu2.cpp
     src/iop/mcserv.cpp
     src/iop/cdvd.cpp
     src/iop/spu2.cpp

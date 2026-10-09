@@ -226,5 +226,6 @@ std::vector<std::uint8_t> result32(std::int32_t r);
 // Módulos simples em HLE registrados direto (um .cpp cada).
 void registerLgDev(Iop& iop);  // volante Logitech (lgdev.cpp)
 void registerPdiStr(Iop& iop);  // streaming da Polyphony (pdistr.cpp)
+void registerPdiSpu2(Iop& iop);  // driver de som da Polyphony (pdispu2.cpp)
 
 }  // namespace anyps2::rt

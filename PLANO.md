@@ -621,7 +621,8 @@ Marco 5 — a primeira tela do jogo: seleção de idioma ✅ (sem som):
 - ✅ **Vídeo entrelaçado em modo campo** (SMODE2 INT+FFMD): o framebuffer
   tem meia altura e cada linha aparece duas vezes na saída (o GT4 PAL usa
   640×256 por campo, PSMCT24, double buffering).
-- ✅ pdistr fn 5: ler do stream para a RAM do IOP (dados de som).
+- ✅ pdistr fn 5: ler do stream para os dados de som (no marco 8 se viu que o
+  destino é a RAM do SPU2, não a do IOP).
 - ✅ Relógio real: dois FINISH do GS que vencem juntos (o GS em software
   gasta tempo de verdade) saem um por vez — o sample `draw/teapot` do
   ps2sdk travava em tela preta com a janela aberta.
@@ -744,8 +745,37 @@ Marco 7 — o vídeo de abertura (em andamento):
   projeto do GT4 com `--vu-dumps`.
 - Próximos passos: os defeitos de textura nos carros; velocidade do GS
   (paralelizar o rasterizador ou backend por hardware); as listras nos
-  vídeos de fundo e os padrões tênues no branco. O som continua mudo
-  (pdispu2/rt_ac exigem executar o código do IOP).
+  vídeos de fundo e os padrões tênues no branco. O som: ver o marco 8.
+
+Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
+(efeitos; a música de fundo e o áudio dos vídeos ainda não):
+- ✅ **O caminho do som não exige executar o IOP.** O levantamento do
+  `PDISPU2.IRX` ("PDI_SPU2_Manager" v1.18; `libsd` e `libpdi` importados)
+  mostrou um módulo que só traduz uma cópia dos registradores do SPU2
+  mantida pelo EE em chamadas ao libsd (SetParam/SetSwitch/SetAddr) e
+  move dados pelo FIFO do `libpdi` — tudo coberto pelo `Spu2` do runtime.
+  O protocolo está documentado no topo de `runtime/src/iop/pdispu2.cpp`.
+- ✅ **SPUP / SPUT** (`pdispu2.cpp`, `pdispu2.h`): fn 4 aplica o bloco de
+  960 bytes (2 núcleos × 464: marcas por voz e por núcleo, key-on/key-off
+  em máscaras, ADSR, pitch, volumes, endereço inicial) e responde com o
+  estado (ENDX + ENVX das 48 vozes); fn 3 só o estado; fn 1/2 leem/escrevem
+  a RAM do SPU2 de/para o EE; fn 5/6 (modo da saída digital) são aceitas sem
+  efeito. Reverb, PMON, NON e volume em "sweep" são avisados na primeira
+  vez e ignorados (o `Spu2` ainda não os tem).
+- ✅ **pdistr fn 5**: o destino é a RAM do SPU2 (o IRX chama `pdispu2_35`,
+  que envia por `sceSdVoiceTrans`) — os bancos de som do jogo
+  (0x5040…0x1e0000) agora chegam ao SPU2 em vez de cair na RAM do IOP.
+- ✅ `Spu2`: `envelopeLevel` (ENVX), `reachedEnd` (ENDX) e `setEnvelope`.
+- ✅ Testes `iop.pdispu2_*` (bloco de registradores → vozes: key-on com
+  endereço/pitch/volume/ADSR, marca "zerar o volume", máscara de vozes,
+  key-off × key-on, mudança em voz tocando, estado ENDX/ENVX, bloco curto).
+- Onde o GT4 está: o WAV de uma partida de ~50 s (3000 quadros) tem os
+  efeitos dos menus (cliques e confirmações) com picos de ~10 000.
+- Falta: **PBGM** (`PBGM`, música de fundo em streaming: fn 1–9, a
+  mesma biblioteca `pdispu2` com voz de streaming e `sceSdBlockTrans`),
+  **VOIC**, o áudio dos vídeos (stream privado 0xBD do MPG1/MPG2, também via
+  `pdispu2`), reverb, os servidores do USB (`bsuP`, `THUP`...) e o
+  servidor `0x8000059c`.
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.
