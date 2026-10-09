@@ -34,6 +34,22 @@ std::uint16_t parsePadButtons(const std::string& text) {
     return bits;
 }
 
+std::string padAxisName(const std::string& bound, int& dir) {
+    dir = 0;
+    if (!bound.empty() && (bound[0] == '+' || bound[0] == '-')) {
+        dir = bound[0] == '+' ? 1 : -1;
+        return bound.substr(1);
+    }
+    return bound;
+}
+
+bool padAxisPressed(int dir, int value) {
+    constexpr int kThreshold = 8000;
+    if (dir > 0) return value > kThreshold;
+    if (dir < 0) return value < -kThreshold;
+    return value > kThreshold || value < -kThreshold;
+}
+
 int padButtonIndex(const std::string& name) {
     for (int i = 0; i < 16; ++i) {
         if (name == kPadButtonNames[i]) return i;

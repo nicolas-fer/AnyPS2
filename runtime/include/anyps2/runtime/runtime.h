@@ -102,8 +102,11 @@ struct RuntimeOptions {
     int videoScale = 1;
     // Teclado e controles de cada porta (arquivo de configuração).
     PadBindings pad = PadBindings::defaults();
-    // Padrões, depois o arquivo de configuração (ANYPS2_CONFIG ou
-    // anyps2.ini), depois as variáveis de ambiente (ver config.h).
+    // Arquivo de configuração usado (ANYPS2_CONFIG ou anyps2.ini ao lado do
+    // executável); o menu grava nele.
+    std::string configPath;
+    // Padrões, depois o arquivo de configuração, depois as variáveis de
+    // ambiente (ver config.h).
     static RuntimeOptions fromEnvironment();
 };
 

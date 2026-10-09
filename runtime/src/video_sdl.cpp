@@ -14,13 +14,13 @@
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <cstdlib>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <thread>
 #include <vector>
 
+#include "anyps2/runtime/config.h"
 #include "anyps2/runtime/input.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/video.h"
@@ -28,9 +28,6 @@
 namespace anyps2::rt {
 
 namespace {
-
-// Limiar para eixo usado como botão digital (L2/R2 ou qualquer ligação digital).
-constexpr int kAxisButtonThreshold = 8000;
 
 // Nome do SDL para tecla ("Z", "Up", "Return"); letra única vira minúscula,
 // porque é assim que o SDL a reconhece.
@@ -117,6 +114,7 @@ private:
         unsigned port;
         int analog;
         std::uint16_t bit;
+        int dir;  // botão digital: 0 = os dois sentidos, +1, -1 (padAxisPressed)
     };
 
     // Resolve os nomes da configuração para códigos do SDL. Nome desconhecido
@@ -135,12 +133,14 @@ private:
                 }
                 const std::string& button = pad.button[port][i];
                 if (!button.empty()) {
-                    if (const SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(button.c_str());
+                    int dir = 0;
+                    const std::string name = padAxisName(button, dir);
+                    if (const SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(name.c_str());
                         b != SDL_CONTROLLER_BUTTON_INVALID) {
                         buttonBinds_.push_back({b, port, bit});
-                    } else if (const SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(button.c_str());
+                    } else if (const SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(name.c_str());
                                a != SDL_CONTROLLER_AXIS_INVALID) {
-                        axisBinds_.push_back({a, port, -1, bit});
+                        axisBinds_.push_back({a, port, -1, bit, dir});
                     } else {
                         warn("botão do controle", button, port, i);
                     }
@@ -151,7 +151,7 @@ private:
                 if (axis.empty()) continue;
                 if (const SDL_GameControllerAxis s = SDL_GameControllerGetAxisFromString(axis.c_str());
                     s != SDL_CONTROLLER_AXIS_INVALID) {
-                    axisBinds_.push_back({s, port, a, 0});
+                    axisBinds_.push_back({s, port, a, 0, 0});
                 } else {
                     std::cerr << "anyps2: aviso: eixo do controle desconhecido '" << axis << "' (porta "
                               << port + 1 << ", " << kPadAnalogNames[a] << "), ignorado\n";
@@ -314,7 +314,7 @@ private:
                         if (ab.port != p || ab.axis != ev.caxis.axis) continue;
                         if (ab.analog >= 0) {
                             analogField(c.state, ab.analog) = axisByte(v);
-                        } else if (std::abs(static_cast<int>(v)) > kAxisButtonThreshold) {
+                        } else if (padAxisPressed(ab.dir, static_cast<int>(v))) {
                             c.state.buttons |= ab.bit;
                         } else {
                             c.state.buttons = static_cast<std::uint16_t>(c.state.buttons & ~ab.bit);
@@ -367,6 +367,20 @@ std::unique_ptr<Video> createSdlVideo(const RuntimeOptions& options, const std::
     auto v = std::make_unique<SdlVideo>(options, title, input);
     if (!v->start(error)) return nullptr;
     return v;
+}
+
+// Conferência dos nomes do arquivo de configuração (o SDL não precisa estar
+// iniciado para isso).
+bool knownSdlKey(const std::string& name) {
+    return keycodeFromName(name) != SDLK_UNKNOWN;
+}
+
+bool knownSdlButton(const std::string& name) {
+    return SDL_GameControllerGetButtonFromString(name.c_str()) != SDL_CONTROLLER_BUTTON_INVALID;
+}
+
+bool knownSdlAxis(const std::string& name) {
+    return SDL_GameControllerGetAxisFromString(name.c_str()) != SDL_CONTROLLER_AXIS_INVALID;
 }
 
 }  // namespace anyps2::rt

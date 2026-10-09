@@ -99,6 +99,8 @@ if(ANYPS2_WITH_SDL)
         endif()
     endif()
     set_property(GLOBAL PROPERTY ANYPS2_SDL_ORIGIN ${_anyps2_sdl_origin})
+    # Os nomes do arquivo de configuração são conferidos com o SDL (config.h).
+    target_compile_definitions(anyps2_runtime PUBLIC ANYPS2_SDL_NAMES=1)
     target_sources(anyps2_runtime PRIVATE src/video_sdl.cpp src/audio_sdl.cpp)
     if(TARGET SDL2::SDL2-static)
         target_link_libraries(anyps2_runtime PRIVATE SDL2::SDL2-static)

@@ -70,6 +70,15 @@ inline constexpr const char* kPadAnalogNames[4] = {"lx", "ly", "rx", "ry"};
 // Índice do botão em kPadButtonNames, ou -1 se o nome não existir.
 int padButtonIndex(const std::string& name);
 
+// Eixo ligado a um botão digital: "leftx" (aciona nos dois sentidos), "+leftx"
+// (só para cima/direita) ou "-leftx" (só para baixo/esquerda). Devolve o nome do
+// eixo e o sentido em dir (0 = os dois, +1, -1).
+std::string padAxisName(const std::string& bound, int& dir);
+// Digital acionado pelo valor do eixo (-32768..32767) no sentido dir: |v| acima
+// de um limiar. Gatilhos só dão valores positivos, então "lefttrigger" aciona
+// como antes.
+bool padAxisPressed(int dir, int value);
+
 // Ligações de teclado e de controle de cada porta (0 = porta 1). Os nomes são
 // os do SDL, resolvidos pela janela: tecla ("Z", "Up", "Return"), botão do
 // controle ("a", "dpup", "leftshoulder") ou eixo ("leftx", "lefttrigger").

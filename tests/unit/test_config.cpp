@@ -205,3 +205,58 @@ TEST_CASE(config, invalid_env_scale_is_an_error) {
     Vars vars{{"ANYPS2_VIDEO_SCALE", "7"}};
     CHECK_THROWS_WITH(resolveOptions(envOf(vars), kNoFile), "ANYPS2_VIDEO_SCALE='7' inválido");
 }
+
+TEST_CASE(config, axis_direction_is_explicit) {
+    int dir = 99;
+    CHECK_EQ(padAxisName("leftx", dir), std::string("leftx"));
+    CHECK_EQ(dir, 0);
+    CHECK_EQ(padAxisName("+leftx", dir), std::string("leftx"));
+    CHECK_EQ(dir, 1);
+    CHECK_EQ(padAxisName("-righty", dir), std::string("righty"));
+    CHECK_EQ(dir, -1);
+    // "+" só para um lado, "-" só para o outro; sem sinal, os dois.
+    CHECK(padAxisPressed(1, 9000));
+    CHECK(!padAxisPressed(1, -9000));
+    CHECK(!padAxisPressed(1, 5000));
+    CHECK(padAxisPressed(-1, -9000));
+    CHECK(!padAxisPressed(-1, 9000));
+    CHECK(padAxisPressed(0, 9000));
+    CHECK(padAxisPressed(0, -9000));
+    CHECK(!padAxisPressed(0, 8000));  // limiar: estritamente acima
+    // Gatilho (0..32767) como antes: aciona acima do limiar, sem direção.
+    CHECK(padAxisPressed(0, 20000));
+    CHECK(!padAxisPressed(0, 0));
+}
+
+TEST_CASE(config, signed_axis_accepted_on_digital_button_only) {
+    RuntimeOptions o;
+    applyConfigText(o, "[gamepad.1]\nl2 = +lefttrigger\nlx = leftx\n", "x.ini");
+    CHECK_EQ(o.pad.button[0][padButtonIndex("l2")], std::string("+lefttrigger"));
+    CHECK_THROWS_WITH(applyConfigText(o, "[gamepad.1]\nlx = +leftx\n", "x.ini"),
+                      "x.ini:2: eixo analógico não aceita sinal");
+    CHECK_THROWS_WITH(applyConfigText(o, "[gamepad.1]\nsquare = +x\n", "x.ini"),
+                      "x.ini:2: sinal (+ ou -) só vale para eixos");
+}
+
+TEST_CASE(config, default_file_is_next_to_the_executable) {
+    const std::filesystem::path p = defaultConfigPath();
+    CHECK_EQ(p.filename().string(), std::string("anyps2.ini"));
+    CHECK(p.is_absolute());
+    // Sem ANYPS2_CONFIG, o caminho usado fica registrado para o menu gravar nele.
+    const RuntimeOptions o = resolveOptions(envOf(Vars{}), p.string());
+    CHECK_EQ(o.configPath, p.string());
+}
+
+#if defined(ANYPS2_SDL_NAMES)
+TEST_CASE(config, unknown_names_are_errors_with_line_and_section) {
+    RuntimeOptions o;
+    CHECK_THROWS_WITH(applyConfigText(o, "[keyboard.1]\n\ncross = Zz\n", "anyps2.ini"),
+                      "anyps2.ini:3: tecla desconhecida 'Zz' em [keyboard.1] cross");
+    CHECK_THROWS_WITH(applyConfigText(o, "[gamepad.2]\nsquare = botaoinexistente\n", "anyps2.ini"),
+                      "anyps2.ini:2: botão do controle desconhecido 'botaoinexistente' em [gamepad.2] square");
+    CHECK_THROWS_WITH(applyConfigText(o, "[gamepad.1]\nlx = eixoinexistente\n", "anyps2.ini"),
+                      "anyps2.ini:2: eixo do controle desconhecido 'eixoinexistente' em [gamepad.1] lx");
+    // Nomes válidos do SDL passam.
+    applyConfigText(o, "[keyboard.1]\ncross = Left Shift\n[gamepad.1]\ncross = a\n", "anyps2.ini");
+}
+#endif

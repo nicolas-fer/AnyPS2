@@ -203,7 +203,7 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
 | `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes ao terminar (onde o programa gasta tempo ou fica girando) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
-| `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` no diretório atual; ver abaixo) |
+| `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
 | `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |
 | `ANYPS2_MC_DIR=dir` | pasta dos memory cards `mc0` e `mc1` (padrão: `$ANYPS2_HOST_DIR/memcard`) |
 | `ANYPS2_ISO=arquivo` | imagem do disco (ver Fase 6) |
@@ -214,7 +214,8 @@ Variáveis de ambiente do executável gerado:
 Teclado, controle, memory card, disco, vídeo e som podem ficar num arquivo
 INI, sem depender de variáveis de ambiente. A prioridade é: **variável de
 ambiente > arquivo > padrão**; sem arquivo, vale o padrão de sempre. O
-arquivo é `ANYPS2_CONFIG` ou, sem ela, `anyps2.ini` no diretório atual (se
+arquivo é `ANYPS2_CONFIG` ou, sem ela, `anyps2.ini` ao lado do executável (não do
+diretório atual: assim um `anyps2.ini` solto em outra pasta não muda nada; se
 `ANYPS2_CONFIG` apontar para um arquivo que não existe, é erro). Caminhos são
 relativos ao diretório atual e `~` não é expandido. Linhas com `#` ou `;`
 são comentários.
@@ -252,9 +253,12 @@ circle cross square`. As teclas são os nomes do SDL (`Z`, `Up`, `Return`,
 `Left Shift`, `1`); os botões do controle, os nomes de `SDL_GameControllerButton`
 (`a`, `b`, `x`, `y`, `back`, `start`, `leftstick`, `dpup`, `leftshoulder`…) e os
 eixos (`leftx`, `lefty`, `rightx`, `righty`, `lefttrigger`, `righttrigger`). Um
-gatilho ligado a um botão vira digital acima de um limiar. Valor vazio desliga a
-ligação. Nome de tecla ou botão desconhecido vira aviso no início da janela e a
-ligação é ignorada. Erros de sintaxe param o programa com o arquivo e a linha,
+gatilho ligado a um botão vira digital acima de um limiar. Um eixo ligado a um
+botão digital aceita sentido: `+leftx` (só para a direita/cima) ou `-leftx`
+(só para a esquerda/baixo); sem sinal, aciona nos dois sentidos. Analógicos não
+aceitam sinal. Valor vazio desliga a
+ligação. Nome de tecla, botão ou eixo desconhecido é erro com arquivo, linha, seção e
+chave, como qualquer erro de sintaxe (o programa para antes de abrir a janela),
 por exemplo `anyps2.ini:3: valor inválido para [video] scale: 9 (use um número de 1 a 4)`.
 
 ### Fase 1 — ELF e decodificador

@@ -2,10 +2,18 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <system_error>
+#include <vector>
 
 #include "anyps2/common/error.h"
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace anyps2::rt {
 
@@ -124,6 +132,7 @@ std::string setValue(RuntimeOptions& o, const std::string& section, const std::s
         const unsigned port = static_cast<unsigned>(section.back() - '1');
         const int button = padButtonIndex(key);
         const int analog = analogIndex(key);
+        const std::string where = " em [" + section + "] " + key;
         if (button < 0 && analog < 0) {
             return "botão desconhecido '" + key + "' em [" + section + "] (use " + buttonList() +
                    ", ou lx, ly, rx, ry no controle)";
@@ -133,14 +142,48 @@ std::string setValue(RuntimeOptions& o, const std::string& section, const std::s
                 return "'" + key + "' é analógico e não tem tecla: ligue-o em [gamepad." +
                        std::to_string(port + 1) + "]";
             }
+            if (!value.empty() && !knownSdlKey(value)) return "tecla desconhecida '" + value + "'" + where;
             o.pad.key[port][button] = value;
-        } else if (button >= 0) {
+            return "";
+        }
+        // Controle: botão digital aceita eixo com sinal (+leftx, -leftx); analógico
+        // só aceita eixo, sem sinal.
+        int dir = 0;
+        const std::string name = padAxisName(value, dir);
+        if (!value.empty()) {
+            if (button >= 0) {
+                if (!knownSdlButton(name) && !knownSdlAxis(name)) {
+                    return "botão do controle desconhecido '" + value + "'" + where;
+                }
+                if (dir != 0 && !knownSdlAxis(name)) {
+                    return "sinal (+ ou -) só vale para eixos, não para '" + name + "'" + where;
+                }
+            } else {
+                if (dir != 0) return "eixo analógico não aceita sinal (+ ou -): '" + value + "'" + where;
+                if (!knownSdlAxis(name)) return "eixo do controle desconhecido '" + value + "'" + where;
+            }
+        }
+        if (button >= 0) {
             o.pad.button[port][button] = value;
         } else {
             o.pad.analog[port][analog] = value;
         }
     }
     return "";
+}
+
+// Pasta do executável (o anyps2.ini padrão fica ao lado dele).
+std::filesystem::path executableDir() {
+#ifdef _WIN32
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0 || n >= buf.size()) return ".";
+    return std::filesystem::path(std::wstring(buf.data(), n)).parent_path();
+#else
+    std::error_code ec;
+    const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    return ec ? std::filesystem::path(".") : exe.parent_path();
+#endif
 }
 
 // Variáveis de ambiente: sobrepõem o arquivo.
@@ -175,6 +218,10 @@ void applyEnvironment(RuntimeOptions& o, const std::function<const char*(const c
 }
 
 }  // namespace
+
+std::string defaultConfigPath() {
+    return (executableDir() / kDefaultConfigFile).string();
+}
 
 void applyConfigText(RuntimeOptions& o, const std::string& text, const std::string& source) {
     std::string section;  // vazio até a primeira seção
@@ -213,6 +260,7 @@ RuntimeOptions resolveOptions(const std::function<const char*(const char*)>& env
     const char* explicitPath = env("ANYPS2_CONFIG");
     const bool given = explicitPath && *explicitPath;
     const std::string path = given ? explicitPath : defaultPath;
+    o.configPath = path;
     std::ifstream f(path, std::ios::binary);
     if (f) {
         std::stringstream text;

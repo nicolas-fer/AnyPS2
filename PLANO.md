@@ -743,13 +743,15 @@ interface gráfica. A ordem é **variável de ambiente > arquivo > padrão**, e
 sem arquivo o comportamento é o de sempre.
 
 - ✅ Arquivo INI escrito à mão, sem dependência nova (`ANYPS2_CONFIG` ou
-  `anyps2.ini` no diretório atual): `[memcard] dir`, `[disc] iso`,
+  `anyps2.ini` ao lado do executável): `[memcard] dir`, `[disc] iso`,
   `[video] mode/scale`, `[audio] mode/wav`, e as ligações de teclado
   (`[keyboard.1]`, `[keyboard.2]`) e de controle SDL (`[gamepad.1]`,
   `[gamepad.2]`) para cada botão do DS2 e para os analógicos lx ly rx ry.
   Erros de sintaxe dizem arquivo, linha e motivo.
 - ✅ A janela usa as ligações configuradas (padrões = o mapeamento fixo de
-  antes). Nome de tecla ou botão desconhecido vira aviso e é ignorado.
+  antes). Nome de tecla, botão ou eixo desconhecido é erro com a linha
+  (conferido com o SDL; sem SDL, aceito). Eixo digital aceita sentido
+  (`+leftx`, `-leftx`).
 - ✅ Novas variáveis: `ANYPS2_CONFIG`, `ANYPS2_VIDEO_SCALE`, `ANYPS2_MC_DIR`
   (esta última antes lida direto no memory card).
 - ✅ Testes: leitura e comentários, erros com linha, prioridade

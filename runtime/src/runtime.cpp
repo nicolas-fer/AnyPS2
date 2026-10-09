@@ -34,7 +34,7 @@
 namespace anyps2::rt {
 
 RuntimeOptions RuntimeOptions::fromEnvironment() {
-    return resolveOptions([](const char* name) -> const char* { return std::getenv(name); });
+    return resolveOptions([](const char* name) -> const char* { return std::getenv(name); }, defaultConfigPath());
 }
 
 Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
