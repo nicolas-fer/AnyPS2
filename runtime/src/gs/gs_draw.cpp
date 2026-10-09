@@ -16,9 +16,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/host_profile.h"
 
 namespace anyps2::rt::gs {
 
@@ -68,6 +70,9 @@ struct Gs::DrawEnv {
     unsigned mxl = 0, mmin = 0, lodL = 0;
     bool mmag = false, lcm = false;
     float lodK = 0;
+    // Sem mipmap (MXL = 0) e com o mesmo filtro para ampliar e reduzir, o
+    // nível de detalhe não muda a amostra: o log2 por pixel é dispensado.
+    bool lodMatters = true;
     unsigned wms = 0, wmt = 0, minu = 0, maxu = 0, minv = 0, maxv = 0;
     std::uint32_t ta0 = 0, ta1 = 0;
     bool aem = false;
@@ -175,6 +180,8 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
         auto k12 = static_cast<int>(bits(t1, 32, 12));
         if (k12 & 0x800) k12 -= 0x1000;
         e.lodK = static_cast<float>(k12) / 16.0f;
+        const bool minLinear = e.mmin == 1 || e.mmin >= 4;
+        e.lodMatters = e.mxl > 0 || minLinear != e.mmag;
         const std::uint64_t m1 = k.miptbp1, m2 = k.miptbp2;
         for (unsigned i = 0; i < 3; ++i) {
             e.tbp[1 + i] = static_cast<std::uint32_t>(bits(m1, i * 20, 14));
@@ -196,6 +203,7 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
 }
 
 void Gs::draw(std::uint32_t pc) {
+    const HostProfile::Scope prof(HostProfile::Gs);
     DrawEnv e;
     setupEnv(e, pc);
     ++drawCount_;
@@ -331,8 +339,9 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
             const float q = f.q;
             u = f.s / q * static_cast<float>(1u << e.tw);
             v = f.t / q * static_cast<float>(1u << e.th);
-            lod = e.lcm ? e.lodK
-                        : std::log2(1.0f / std::fabs(q)) * static_cast<float>(1u << e.lodL) + e.lodK;
+            lod = e.lcm || !e.lodMatters
+                      ? e.lodK
+                      : std::log2(1.0f / std::fabs(q)) * static_cast<float>(1u << e.lodL) + e.lodK;
         }
         const std::uint32_t t = sampleTexture(e, u, v, lod);
         const int tr = static_cast<int>(t & 0xFF), tg = static_cast<int>((t >> 8) & 0xFF);
@@ -598,36 +607,51 @@ void Gs::drawTriangle(const DrawEnv& e, const Vertex& v0, const Vertex& v1, cons
     const Attr A = attrOf(*a), B = attrOf(*b), C = attrOf(*c);
     const double inv = 1.0 / static_cast<double>(area);
     const Vertex& last = v2;  // cor flat: último vértice
+    // Só o que o pixel vai usar é interpolado (mesma fórmula do lerp3, então
+    // os mesmos valores).
+    const bool needST = e.tme && !e.fst, needUV = e.tme && e.fst;
 
-    for (int py = minY; py <= maxY; ++py) {
-        const std::int64_t sy = std::int64_t{py} * 16;
-        for (int px = minX; px <= maxX; ++px) {
-            const std::int64_t sx = std::int64_t{px} * 16;
-            const std::int64_t w0 = edge(b->x, b->y, c->x, c->y, sx, sy);
-            const std::int64_t w1 = edge(c->x, c->y, a->x, a->y, sx, sy);
-            const std::int64_t w2 = edge(a->x, a->y, b->x, b->y, sx, sy);
+    // Funções de aresta incrementais: cada pixel à direita soma dx, cada
+    // linha abaixo soma dy (inteiros, mesmo valor de edge() no pixel).
+    auto start = [&](const Vertex* p, const Vertex* q) {
+        return edge(p->x, p->y, q->x, q->y, std::int64_t{minX} * 16, std::int64_t{minY} * 16);
+    };
+    auto stepX = [](const Vertex* p, const Vertex* q) { return -std::int64_t{q->y - p->y} * 16; };
+    auto stepY = [](const Vertex* p, const Vertex* q) { return std::int64_t{q->x - p->x} * 16; };
+    std::int64_t row0 = start(b, c), row1 = start(c, a), row2 = start(a, b);
+    const std::int64_t dx0 = stepX(b, c), dx1 = stepX(c, a), dx2 = stepX(a, b);
+    const std::int64_t dy0 = stepY(b, c), dy1 = stepY(c, a), dy2 = stepY(a, b);
+
+    for (int py = minY; py <= maxY; ++py, row0 += dy0, row1 += dy1, row2 += dy2) {
+        std::int64_t w0 = row0, w1 = row1, w2 = row2;
+        for (int px = minX; px <= maxX; ++px, w0 += dx0, w1 += dx1, w2 += dx2) {
             if (w0 + bias0 < 0 || w1 + bias1 < 0 || w2 + bias2 < 0) continue;
-            const Attr at = lerp3(A, B, C, static_cast<double>(w0) * inv, static_cast<double>(w1) * inv,
-                                  static_cast<double>(w2) * inv);
+            const double wa = static_cast<double>(w0) * inv, wb = static_cast<double>(w1) * inv,
+                         wc = static_cast<double>(w2) * inv;
+            auto m = [&](double Attr::*fld) { return A.*fld * wa + B.*fld * wb + C.*fld * wc; };
             Fragment f;
-            f.z = toZ(at.z);
+            f.z = toZ(m(&Attr::z));
             if (e.iip) {
-                f.r = toColor(at.r);
-                f.g = toColor(at.g);
-                f.b = toColor(at.b);
-                f.a = toColor(at.a);
+                f.r = toColor(m(&Attr::r));
+                f.g = toColor(m(&Attr::g));
+                f.b = toColor(m(&Attr::b));
+                f.a = toColor(m(&Attr::a));
             } else {
                 f.r = last.r;
                 f.g = last.g;
                 f.b = last.b;
                 f.a = last.a;
             }
-            f.s = static_cast<float>(at.s);
-            f.t = static_cast<float>(at.t);
-            f.q = static_cast<float>(at.q);
-            f.u = static_cast<float>(at.u);
-            f.v = static_cast<float>(at.v);
-            f.fog = toColor(at.fog);
+            if (needST) {
+                f.s = static_cast<float>(m(&Attr::s));
+                f.t = static_cast<float>(m(&Attr::t));
+                f.q = static_cast<float>(m(&Attr::q));
+            }
+            if (needUV) {
+                f.u = static_cast<float>(m(&Attr::u));
+                f.v = static_cast<float>(m(&Attr::v));
+            }
+            if (e.fge) f.fog = toColor(m(&Attr::fog));
             shadePixel(e, px, py, f);
         }
     }
@@ -643,23 +667,33 @@ void Gs::drawSprite(const DrawEnv& e, const Vertex& v0, const Vertex& v1) {
     if (minX > maxX || minY > maxY) return;
     const Attr a0 = attrOf(v0), a1 = attrOf(v1);
     const double spanX = v1.x - v0.x, spanY = v1.y - v0.y;
+    // S/U só dependem da coluna e T/V só da linha: calculados uma vez.
+    const auto cols = static_cast<std::size_t>(maxX - minX + 1);
+    std::vector<float> colS(cols), colU(cols);
+    for (int px = minX; px <= maxX; ++px) {
+        const double tx = spanX != 0 ? (px * 16.0 - v0.x) / spanX : 0.0;
+        colS[static_cast<std::size_t>(px - minX)] = static_cast<float>(a0.s + (a1.s - a0.s) * tx);
+        colU[static_cast<std::size_t>(px - minX)] = static_cast<float>(a0.u + (a1.u - a0.u) * tx);
+    }
+    Fragment f;
+    f.z = v1.z;
+    f.r = v1.r;
+    f.g = v1.g;
+    f.b = v1.b;
+    f.a = v1.a;
+    f.fog = v1.fog;
+    f.q = static_cast<float>(a1.q);
     for (int py = minY; py <= maxY; ++py) {
         const double ty = spanY != 0 ? (py * 16.0 - v0.y) / spanY : 0.0;
+        const auto rowT = static_cast<float>(a0.t + (a1.t - a0.t) * ty);
+        const auto rowV = static_cast<float>(a0.v + (a1.v - a0.v) * ty);
         for (int px = minX; px <= maxX; ++px) {
-            const double tx = spanX != 0 ? (px * 16.0 - v0.x) / spanX : 0.0;
-            Fragment f;
-            f.z = v1.z;
-            f.r = v1.r;
-            f.g = v1.g;
-            f.b = v1.b;
-            f.a = v1.a;
-            f.fog = v1.fog;
-            f.s = static_cast<float>(a0.s + (a1.s - a0.s) * tx);
-            f.t = static_cast<float>(a0.t + (a1.t - a0.t) * ty);
-            f.q = static_cast<float>(a1.q);
-            f.u = static_cast<float>(a0.u + (a1.u - a0.u) * tx);
-            f.v = static_cast<float>(a0.v + (a1.v - a0.v) * ty);
-            shadePixel(e, px, py, f);
+            Fragment p = f;
+            p.s = colS[static_cast<std::size_t>(px - minX)];
+            p.u = colU[static_cast<std::size_t>(px - minX)];
+            p.t = rowT;
+            p.v = rowV;
+            shadePixel(e, px, py, p);
         }
     }
 }

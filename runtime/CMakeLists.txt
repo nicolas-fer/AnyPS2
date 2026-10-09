@@ -31,6 +31,7 @@ add_library(anyps2_runtime STATIC
     src/kernel.cpp
     src/kernel_threads.cpp
     src/host_thread.cpp
+    src/host_profile.cpp
     src/hardware.cpp
     src/ipu.cpp
     src/ipu_mpeg.cpp

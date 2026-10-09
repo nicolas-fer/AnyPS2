@@ -8,6 +8,7 @@
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/ipu_mpeg.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
@@ -349,6 +350,7 @@ bool Ipu::attempt(Body&& body) {
 }
 
 void Ipu::run(std::uint32_t pc) {
+    const HostProfile::Scope prof(HostProfile::Ipu);
     pc_ = pc;
     running_ = true;
     const unsigned c = cmd_ >> 28;

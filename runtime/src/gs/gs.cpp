@@ -179,9 +179,7 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
             csr_ &= ~(value & 0x1F);
             return;
         case 0x1010: setImr(value); return;
-        case 0x1040:
-            if (value & 1) unsupported("BUSDIR = 1 (leitura LOCAL→HOST pelo FIFO) não suportado ainda", pc);
-            return;
+        case 0x1040: busdir_ = value & 1; return;  // BUSDIR
         case 0x1080: siglblid_ = value; return;
         default: break;
     }
@@ -428,7 +426,8 @@ void Gs::startTransfer(std::uint32_t pc) {
             return;
         }
         case 1:
-            unsupported("transferência LOCAL→HOST (TRXDIR=1) ainda não suportada", pc);
+            localToHost(pc);
+            return;
         case 2:
             localToLocal(pc);
             return;
@@ -497,6 +496,48 @@ void Gs::localToLocal(std::uint32_t pc) {
         for (std::uint32_t x = 0; x < w; ++x) tmp[std::size_t{y} * w + x] = vram_.readPixel(spsm, sbp, sbw, sx + x, sy + y);
     for (std::uint32_t y = 0; y < h; ++y)
         for (std::uint32_t x = 0; x < w; ++x) vram_.writePixel(dpsm, dbp, dbw, dx + x, dy + y, tmp[std::size_t{y} * w + x]);
+}
+
+void Gs::localToHost(std::uint32_t pc) {
+    const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
+    const auto sbp = static_cast<std::uint32_t>(bits(buf, 0, 14));
+    const auto sbw = static_cast<std::uint32_t>(bits(buf, 16, 6));
+    const auto spsm = static_cast<std::uint32_t>(bits(buf, 24, 6));
+    const auto sx = static_cast<std::uint32_t>(bits(pos, 0, 11));
+    const auto sy = static_cast<std::uint32_t>(bits(pos, 16, 11));
+    const auto w = static_cast<std::uint32_t>(bits(rr, 0, 12));
+    const auto h = static_cast<std::uint32_t>(bits(rr, 32, 12));
+    if (!isValidPsm(spsm)) unsupported("transferência LOCAL→HOST com " + psmName(spsm), pc);
+    // Mesmo empacotamento da HOST→LOCAL: o primeiro pixel nos bits baixos;
+    // 24 bits atravessam os bytes.
+    const unsigned bpp = psmTransferBits(spsm);
+    download_.clear();
+    downloadPos_ = 0;
+    std::uint64_t acc = 0;
+    unsigned nbits = 0;
+    for (std::uint32_t y = 0; y < h; ++y) {
+        for (std::uint32_t x = 0; x < w; ++x) {
+            const std::uint64_t v = vram_.readPixel(spsm, sbp, sbw, sx + x, sy + y) & ((1ull << bpp) - 1);
+            acc |= v << nbits;
+            nbits += bpp;
+            while (nbits >= 8) {
+                download_.push_back(static_cast<std::uint8_t>(acc));
+                acc >>= 8;
+                nbits -= 8;
+            }
+        }
+    }
+    if (nbits) download_.push_back(static_cast<std::uint8_t>(acc));
+    download_.resize((download_.size() + 15) & ~std::size_t{15}, 0);
+    addWork(download_.size() / 8);
+}
+
+void Gs::readDownload(std::uint8_t* dst, std::size_t qwords) {
+    const std::size_t want = qwords * 16;
+    const std::size_t have = std::min(want, download_.size() - downloadPos_);
+    std::memcpy(dst, download_.data() + downloadPos_, have);
+    std::memset(dst + have, 0, want - have);
+    downloadPos_ += have;
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/hardware.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/input.h"
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/iop/iop.h"
@@ -66,6 +67,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     std::memset(static_cast<void*>(ctx_.get()), 0, sizeof(Context));
     ctx_->mem = mem_.get();
     ctx_->rt = this;
+    if (options_.profile) HostProfile::enable();
     input_ = std::make_unique<Input>();
     if (!options_.padScript.empty()) input_->loadScript(options_.padScript);
     hw_ = std::make_unique<Hardware>(*this);
@@ -105,6 +107,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
 
 Runtime::~Runtime() {
     printProfile();
+    if (options_.profile) std::fputs(HostProfile::report().c_str(), stderr);
 }
 
 void Runtime::onVblank(std::uint32_t pc) {
@@ -117,6 +120,16 @@ void Runtime::onVblank(std::uint32_t pc) {
         char suffix[32];
         std::snprintf(suffix, sizeof suffix, "_%06llu.png", static_cast<unsigned long long>(vblanks_));
         writePng(base + suffix, gs_->display());
+    }
+    if (options_.profile && vblanks_ % 500 == 0) {
+        std::fputs(HostProfile::interval(vblanks_).c_str(), stderr);
+        // Pares de VU desde o começo: compilados × interpretados (microcódigo
+        // que só existe em tempo de execução cai no interpretador).
+        std::fprintf(stderr, "[perfil] pares de VU: VU0 %llu compilados / %llu interpretados; VU1 %llu / %llu\n",
+                     static_cast<unsigned long long>(vu0_->compiledPairs()),
+                     static_cast<unsigned long long>(vu0_->interpretedPairs()),
+                     static_cast<unsigned long long>(vu1_->compiledPairs()),
+                     static_cast<unsigned long long>(vu1_->interpretedPairs()));
     }
     if (options_.frames && vblanks_ >= options_.frames) {
         if (options_.traceThreads) {

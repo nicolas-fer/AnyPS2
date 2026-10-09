@@ -6,6 +6,7 @@
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
@@ -266,7 +267,16 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
         case kVif0: case kGif: case kToSpr: case kToIpu: break;
         case kVif1:
             if (!(c.chcr & kChcrDir)) {
-                throw Unimplemented("DMA VIF1→memória (leitura de dados do GS) ainda não suportado", pc);
+                // VIF1 → memória: os dados de uma transferência LOCAL→HOST do GS.
+                if (mod != 0) throw Unimplemented("DMA VIF1→memória em modo chain/interleave", pc);
+                if (!rt_.gs().busDirToHost()) {
+                    throw GuestError("DMA VIF1→memória com BUSDIR = 0 (o GS não está mandando dados)", pc);
+                }
+                if (c.qwc) rt_.gs().readDownload(hostAddress(c.madr, c.qwc, ch, pc), c.qwc);
+                c.madr += c.qwc * 16;
+                c.qwc = 0;
+                finish(ch);
+                return;
             }
             break;
         case kFromSpr:

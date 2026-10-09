@@ -172,6 +172,49 @@ TEST_CASE(gs, local_to_local) {
     CHECK_EQ(g.vram().readPixel(PSMCT32, 32, 1, 4, 4), 0xBBBBBBBBu);
 }
 
+// LOCAL→HOST: o retângulo sai empacotado como numa HOST→LOCAL do mesmo PSM
+// (completado até quadword), pelo DMA do VIF1 com DIR=0 ou pelo VIF1_FIFO,
+// com BUSDIR = 1.
+TEST_CASE(gs, local_to_host_download) {
+    const ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    Runtime rt(info, RuntimeOptions{});
+    Gs& g = rt.gs();
+    Memory& m = rt.memory();
+    for (unsigned y = 0; y < 2; ++y) {
+        for (unsigned x = 0; x < 3; ++x) g.vram().writePixel(PSMCT32, 0, 1, 10 + x, 20 + y, 0x01000000u * (y * 3 + x + 1) | 0xABCDu);
+    }
+    // Origem: BP 0, BW 1, PSMCT32, (10,20), 3×2; sobram 8 bytes no último quadword.
+    g.writeRegister(BITBLTBUF, 0 | (1ull << 16) | (std::uint64_t{PSMCT32} << 24), 0);
+    g.writeRegister(TRXPOS, 10 | (20ull << 16), 0);
+    g.writeRegister(TRXREG, 3 | (2ull << 32), 0);
+    g.writeRegister(TRXDIR, 1, 0);
+    CHECK_EQ(g.downloadRemaining(), 2u);
+    // Sem BUSDIR o DMA é erro do programa.
+    m.write<std::uint32_t>(0x10009010, 0x00300000, 0);
+    m.write<std::uint32_t>(0x10009020, 2, 0);
+    CHECK_THROWS_WITH(m.write<std::uint32_t>(0x10009000, 0x100, 0), "BUSDIR");
+    g.writePrivileged(0x12001040, 1, 0);
+    m.write<std::uint32_t>(0x10003C00, 1u << 23, 0);  // VIF1_STAT.FDR
+    CHECK_EQ(m.read<std::uint32_t>(0x10003C00, 0) & (1u << 23), 1u << 23);
+    m.write<std::uint32_t>(0x10009000, 0x100, 0);  // DIR=0, normal, STR
+    CHECK_EQ(m.read<std::uint32_t>(0x10009000, 0) & 0x100, 0u);
+    CHECK_EQ(m.read<std::uint32_t>(0x10009010, 0), 0x00300020u);
+    for (unsigned i = 0; i < 6; ++i) CHECK_EQ(m.read<std::uint32_t>(0x00300000 + 4 * i, 0), 0x01000000u * (i + 1) | 0xABCDu);
+    CHECK_EQ(m.read<std::uint64_t>(0x00300018, 0), 0ull);  // enchimento
+    CHECK_EQ(g.downloadRemaining(), 0u);
+    // PSMCT16 pelo VIF1_FIFO: 8 pixels de 16 bits num quadword, o primeiro nos bits baixos.
+    for (unsigned x = 0; x < 8; ++x) g.vram().writePixel(PSMCT16, 64, 1, x, 0, 0x1000u + x);
+    g.writeRegister(BITBLTBUF, 64 | (1ull << 16) | (std::uint64_t{PSMCT16} << 24), 0);
+    g.writeRegister(TRXPOS, 0, 0);
+    g.writeRegister(TRXREG, 8 | (1ull << 32), 0);
+    g.writeRegister(TRXDIR, 1, 0);
+    Reg128 q{};
+    m.read128(0x10005000, q, 0);
+    for (unsigned x = 0; x < 8; ++x) CHECK_EQ(q.uh[x], 0x1000u + x);
+    g.writePrivileged(0x12001040, 0, 0);
+    CHECK_THROWS_WITH(m.read128(0x10005000, q, 0), "BUSDIR");
+}
+
 // ---------------------------------------------------------------------------
 // Rasterização
 // ---------------------------------------------------------------------------

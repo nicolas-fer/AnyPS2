@@ -256,7 +256,7 @@ Limitações e riscos:
   rasterizador (como o renderer em software do PCSX2) ou fazer o backend por
   hardware.
 - Não emulado (com aviso ou erro explícito): antialiasing AA1 (aviso, desenha
-  sem AA), transferência LOCAL→HOST e leitura dos FIFOs, MFIFO, modo
+  sem AA), leitura dos FIFOs do GIF/VIF0, MFIFO, modo
   interleave, PACK e saída RGB16 do IPU, espera de PATH3 mascarado,
   `TEX1.MTBA`.
 - O DMA termina instantaneamente: programas que medem a duração de uma
@@ -722,9 +722,30 @@ Marco 7 — o vídeo de abertura (em andamento):
   vídeos em repetição decodificados pelo IPU), **Car Selection** (mapa dos
   fabricantes) e a **vitrine 3D de um carro (Lotus Elise)** — e para numa
   transferência **LOCAL→HOST do GS** (TRXDIR=1, ler a VRAM).
-- Próximos passos: a transferência LOCAL→HOST do GS; as listras nos
-  vídeos de fundo (mistura de campos?) e os padrões tênues no branco. O
-  som continua mudo (pdispu2/rt_ac exigem executar o código do IOP).
+- ✅ **Transferência LOCAL→HOST do GS** (download da VRAM): com TRXDIR=1
+  o retângulo de origem (SBP/SBW/SPSM, SSAX/SSAY, TRXREG) é empacotado como
+  numa HOST→LOCAL do mesmo PSM e completado até quadword; com BUSDIR=1 sai
+  pelo VIF1 — DMA do canal 1 com DIR=0 (modo normal) ou leitura do
+  VIF1_FIFO. VIF1_STAT.FDR gravável. Sem BUSDIR, erro claro. Teste
+  `gs.local_to_host_download`. O GT4 usa assim: o TRXDIR chega num DIRECT
+  do VIF1 e a interrupção seguinte liga FDR/BUSDIR e o DMA de volta.
+- Onde o GT4 está: passa da vitrine e **começa uma corrida** (Nürburgring,
+  com o Lotus Elise, os adversários, o mapa da pista e o painel), lenta
+  com o GS em software; até o quadro 11150 (limite de 25 min do
+  `jogos/run_gt4.sh`) nenhum erro. Há defeitos de textura (partes dos
+  carros pretas).
+- ✅ Medição de desempenho (`ANYPS2_PROFILE=1`): tempo do host por parte e
+  pares de VU compilados × interpretados. No GT4: menus 16–25 VBlanks/s
+  (GS 60–80%), vitrine 2,4 (GS 55%, VU1 39%), corrida ~2 (GS 72–77%, VU1
+  18–23%; o VU1 já roda todo compilado, ~2 M pares por quadro). Ajustes do
+  rasterizador sem mudar nenhum pixel (arestas incrementais, só os
+  atributos usados, sprite por coluna/linha, log2 do LOD só quando muda o
+  filtro): ~8–10% nos menus. O microcódigo do VU1 da corrida entrou no
+  projeto do GT4 com `--vu-dumps`.
+- Próximos passos: os defeitos de textura nos carros; velocidade do GS
+  (paralelizar o rasterizador ou backend por hardware); as listras nos
+  vídeos de fundo e os padrões tênues no branco. O som continua mudo
+  (pdispu2/rt_ac exigem executar o código do IOP).
 
 - ⬜ A partir de um dump do usuário: análise do ELF principal e de overlays
   (muitos jogos carregam código extra do disco), configuração TOML por jogo.

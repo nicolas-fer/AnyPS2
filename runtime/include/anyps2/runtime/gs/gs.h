@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -67,6 +68,13 @@ public:
     void writeRegister(std::uint8_t reg, std::uint64_t value, std::uint32_t pc);
     // Dados de transferência HOST→LOCAL (HWREG ou modo IMAGE do GIF): 64 bits.
     void writeTransferData(std::uint64_t data, std::uint32_t pc);
+    // Transferência LOCAL→HOST (TRXDIR=1): o retângulo de origem, empacotado
+    // como numa HOST→LOCAL do mesmo PSM e completado até quadword, sai pelo
+    // VIF1 (DMA do canal 1 com DIR=0 ou leitura do VIF1_FIFO) com BUSDIR=1.
+    // Copia `qwords` quadwords para dst (zeros depois do fim dos dados).
+    void readDownload(std::uint8_t* dst, std::size_t qwords);
+    std::size_t downloadRemaining() const { return (download_.size() - downloadPos_) / 16; }
+    bool busDirToHost() const { return busdir_ != 0; }
     std::uint64_t reg(std::uint8_t r) const { return regs_[r]; }
 
     // ---- Eventos de vídeo ----------------------------------------------------
@@ -107,6 +115,7 @@ private:
     void loadClut(std::uint64_t tex0, std::uint32_t pc);
     void startTransfer(std::uint32_t pc);
     void localToLocal(std::uint32_t pc);
+    void localToHost(std::uint32_t pc);
     [[noreturn]] void unsupported(const std::string& what, std::uint32_t pc) const;
     void warnOnce(const std::string& what);
 
@@ -144,6 +153,11 @@ private:
         std::uint64_t bits = 0;  // dados de 24 bits/4 bits pendentes
         unsigned nbits = 0;
     } xfer_;
+
+    // Transferência LOCAL→HOST: dados prontos para o VIF1 e quanto já saiu.
+    std::vector<std::uint8_t> download_;
+    std::size_t downloadPos_ = 0;
+    std::uint64_t busdir_ = 0;  // BUSDIR (0x1200_1040): 1 = GS → EE
 
     // Registradores privilegiados
     std::array<std::uint64_t, 16> priv_{};  // 0x1200_0000 + i*0x10 (PMODE..BGCOLOR)

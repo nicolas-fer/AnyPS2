@@ -26,8 +26,9 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > pelos drivers da Polyphony (em HLE, sem som) e, guiado por um roteiro de
 > controle, passa pela seleção de idioma, cria o save no memory card, recebe
 > o nome do jogador, toca o vídeo de abertura (MPEG-2 decodificado pelo IPU
-> emulado) e chega ao modo Arcade: menu com fundos em vídeo, seleção de
-> carro e a vitrine 3D do carro escolhido. Jogos
+> emulado), entra no modo Arcade (menu com fundos em vídeo, seleção de carro,
+> vitrine 3D) e começa uma corrida, ainda lenta e com defeitos de textura.
+> Jogos
 > comerciais ainda não são jogáveis: eles trazem drivers próprios para o
 > IOP, que ainda não executa código (ver [O que falta](#o-que-falta)). Veja o
 > [PLANO.md](PLANO.md) para o roteiro completo.
@@ -201,7 +202,7 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_HOST_DIR=dir` | raiz do dispositivo `host:` (padrão: diretório atual) |
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
-| `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes ao terminar (onde o programa gasta tempo ou fica girando) |
+| `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes no fim; também mede o tempo do host por parte (EE, GIF, GS, VU0, VU1, IPU — exclusivo: um desenho disparado pelo VU1 conta para o GS) e imprime, a cada 500 VBlanks, a velocidade, a divisão do tempo e os pares de VU compilados × interpretados |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 
 ### Fase 1 — ELF e decodificador
@@ -286,7 +287,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `runtime_ops` | semântica por instrução: aritmética, divisão por zero, overflow, shifts, loads parciais, MMI, FPU do PS2, mapa de memória, registradores de hardware |
 | `codegen` | descoberta de funções, rótulos/entradas, C++ gerado, imagem |
 | `timing` | relógio virtual/real, timers (prescaler, COMP, ZRET, overflow, flags), VBlank/`GS_CSR`, alarmes (e os números das syscalls de alarme de cada libkernel) |
-| `gs` | 22 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR) |
+| `gs` | 22 casos: layout da VRAM por formato, cobertura de triângulos (sem pixel duplicado em aresta compartilhada), sprites, Gouraud, Z, blending, testes de alfa, CLUT, bilinear, perspectiva, saída de vídeo, GIF (PACKED/REGLIST/IMAGE), VIF (UNPACK, máscara, MPG, DIRECT), DMAC (chain, normal, SPR), download LOCAL→HOST pelo VIF1 |
 | `e2e_hello`, `e2e_cputest`, `e2e_threads`, `e2e_fileio`, `e2e_timers`, `e2e_timers_real` | homebrews do ps2dev recompilados, compilados e executados; saída comparada (relógio virtual, e `timers` também no real) |
 | `e2e_gfx2d`, `e2e_cube3d`, `e2e_gskit` | homebrews gráficos; saída de texto **e imagem final** (PNG) comparadas byte a byte com `expected.png` |
 | `ipu` | registradores do IPU, FIFO de entrada e ponteiro de bits (BP/FP/IFC), FDEC atravessando quadwords, comandos esperando dados, SETIQ/SETVQ/SETTH, CTRL.RST, DMA toIPU sob demanda (normal, chain, acréscimo de tags com o canal pausado), tabelas VLC e IDCT do MPEG-2, VDEC, BDEC intra/não intra (RAW16, SCD), FIFO de saída e fromIPU, comando que recomeça quando os dados chegam, CSC (RGB32, limiares do SETTH), IDEC (fatia intra, predição do DC entre macroblocos, MBAI) |

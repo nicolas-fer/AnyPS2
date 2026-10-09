@@ -1,4 +1,5 @@
 #include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/host_profile.h"
 
 #include <cstdio>
 #include <cstring>
@@ -85,6 +86,7 @@ void Gif::writeReglist(unsigned desc, std::uint64_t data, std::uint32_t pc) {
 }
 
 void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, std::uint32_t pc) {
+    const HostProfile::Scope prof(HostProfile::Gif);
     Path& p = paths_[path - 1];
     for (std::size_t i = 0; i < qwords; ++i) {
         std::uint64_t lo, hi;

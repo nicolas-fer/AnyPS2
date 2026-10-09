@@ -23,6 +23,7 @@ constexpr std::uint32_t kStatVfs = 1u << 9;   // parado por ForceBreak
 constexpr std::uint32_t kStatVis = 1u << 10;  // parado pelo bit I
 constexpr std::uint32_t kStatInt = 1u << 11;  // interrupção do bit I
 constexpr std::uint32_t kStatEr0 = 1u << 12, kStatEr1 = 1u << 13;
+constexpr std::uint32_t kStatFdr = 1u << 23;  // VIF1: sentido VIF → memória (download do GS)
 constexpr std::uint32_t kStatStall = kStatVss | kStatVfs | kStatVis;
 constexpr std::uint32_t kErrMii = 1;  // ERR.MII: ignora o bit I
 
@@ -398,6 +399,9 @@ std::uint32_t Vif::readRegister(std::uint32_t addr, std::uint32_t pc) {
 void Vif::writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
     const std::uint32_t off = addr & 0x3FF;
     switch (off) {
+        case 0x00:  // STAT: só o FDR (sentido VIF1 → memória) é gravável
+            if (unit_ == 1) stat_ = (stat_ & ~kStatFdr) | (value & kStatFdr);
+            return;
         case 0x10:  // FBRST: RST, FBK, STP, STC
             if (value & 1) {
                 reset();

@@ -191,6 +191,15 @@ void Hardware::read(std::uint32_t addr, void* out, unsigned size, std::uint32_t 
         std::memcpy(out, qw, 16);
         return;
     }
+    if (size == 16 && (addr & ~0xFFFu) == 0x10005000u) {  // VIF1_FIFO: download do GS
+        if (!rt_.gs().busDirToHost()) {
+            throw GuestError("leitura do VIF1_FIFO com BUSDIR = 0 (o GS não está mandando dados)", pc);
+        }
+        std::uint8_t qw[16];
+        rt_.gs().readDownload(qw, 1);
+        std::memcpy(out, qw, 16);
+        return;
+    }
     if (size == 16) {
         const std::uint64_t lo = read64(addr, 8, pc);
         std::memcpy(out, &lo, 8);

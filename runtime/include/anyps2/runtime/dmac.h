@@ -17,9 +17,9 @@ class Runtime;
 //
 // Suportado: modo normal e chain de origem (refe/cnt/next/ref/refs/call/
 // ret/end, com TTE para os VIFs, IRQ+TIE, pilha ASR0/ASR1) nos canais VIF0,
-// VIF1, GIF, toIPU e toSPR; modo normal no fromSPR e no fromIPU. SIF por
-// registradores, MFIFO, interleave e VIF1→memória lançam erro dizendo o que
-// faltou.
+// VIF1, GIF, toIPU e toSPR; modo normal no fromSPR, no fromIPU e no VIF1 →
+// memória (download do GS). SIF por registradores, MFIFO e interleave lançam
+// erro dizendo o que faltou.
 //
 // Exceção à transferência instantânea: se o VIF para (VIFcode com bit I), o
 // canal pausa no ponto exato (MADR/QWC/TADR, STR continua ligado) e só

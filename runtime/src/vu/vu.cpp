@@ -1,4 +1,5 @@
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/host_profile.h"
 
 #include <filesystem>
 #include <fstream>
@@ -318,6 +319,7 @@ void Vu::interpret(std::uint32_t pc, std::uint32_t eePc) {
 }
 
 void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
+    const HostProfile::Scope prof(unit_ == 0 ? HostProfile::Vu0 : HostProfile::Vu1);
     startPc_ = pc & (microSize_ - 8);
     eePc_ = eePc;
     pairs_ = 0;
