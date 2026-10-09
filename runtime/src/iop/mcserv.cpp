@@ -108,7 +108,7 @@ void McServ::reset() {
 
 fs::path McServ::root(unsigned port) const {
     fs::path base;
-    if (const char* d = std::getenv("ANYPS2_MC_DIR")) {
+    if (const std::string& d = iop_.runtime().options().memcardDir; !d.empty()) {
         base = d;
     } else {
         const char* host = std::getenv("ANYPS2_HOST_DIR");

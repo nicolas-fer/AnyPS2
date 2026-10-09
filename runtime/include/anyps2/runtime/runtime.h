@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "anyps2/runtime/context.h"
+#include "anyps2/runtime/input.h"
 #include "anyps2/runtime/memory.h"
 
 namespace anyps2::rt {
@@ -95,6 +96,14 @@ struct RuntimeOptions {
     // grava o som num WAV.
     std::string audio;
     std::string audioWav;
+    // ANYPS2_MC_DIR: pasta dos cartões (mc0, mc1). Vazia = $ANYPS2_HOST_DIR/memcard.
+    std::string memcardDir;
+    // ANYPS2_VIDEO_SCALE=1..4: tamanho inicial da janela (640x480 vezes o valor).
+    int videoScale = 1;
+    // Teclado e controles de cada porta (arquivo de configuração).
+    PadBindings pad = PadBindings::defaults();
+    // Padrões, depois o arquivo de configuração (ANYPS2_CONFIG ou
+    // anyps2.ini), depois as variáveis de ambiente (ver config.h).
     static RuntimeOptions fromEnvironment();
 };
 

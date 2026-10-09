@@ -4,7 +4,7 @@
 
 namespace anyps2::rt {
 
-std::unique_ptr<Video> createSdlVideo(const std::string&, bool, Input*, std::string& error) {
+std::unique_ptr<Video> createSdlVideo(const RuntimeOptions&, const std::string&, Input*, std::string& error) {
     error = "o runtime foi compilado sem SDL2 (ANYPS2_WITH_SDL=OFF)";
     return nullptr;
 }

@@ -25,8 +25,9 @@ public:
 // input: recebe teclado/controles da janela (pode ser nullptr).
 std::unique_ptr<Video> createVideo(const RuntimeOptions& options, const std::string& title, Input* input);
 // Backend SDL2; nullptr se o runtime foi compilado sem SDL ou não há display.
-// requireDisplay: recusa drivers sem tela (offscreen/dummy) — modo automático.
-std::unique_ptr<Video> createSdlVideo(const std::string& title, bool requireDisplay, Input* input,
+// Com options.video vazio (automático), recusa drivers sem tela (offscreen/dummy).
+// options.videoScale e options.pad configuram a janela e as ligações.
+std::unique_ptr<Video> createSdlVideo(const RuntimeOptions& options, const std::string& title, Input* input,
                                       std::string& error);
 
 // Grava a imagem como PNG RGB de 8 bits. A compressão é determinística: a

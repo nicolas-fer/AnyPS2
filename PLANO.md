@@ -735,3 +735,26 @@ Riscos (alto): mesmo um jogo "simples" exercita quase todo o hardware. É
 realista esperar que o primeiro jogo comercial jogável leve muito mais tempo
 que as fases anteriores somadas; overlays de código carregados do disco
 exigem recompilar também esses binários (a partir do mesmo dump).
+
+## Configuração do host (anyps2.ini) 🚧
+
+Primeiro passo da UI de configuração: a camada de configuração, ainda sem
+interface gráfica. A ordem é **variável de ambiente > arquivo > padrão**, e
+sem arquivo o comportamento é o de sempre.
+
+- ✅ Arquivo INI escrito à mão, sem dependência nova (`ANYPS2_CONFIG` ou
+  `anyps2.ini` no diretório atual): `[memcard] dir`, `[disc] iso`,
+  `[video] mode/scale`, `[audio] mode/wav`, e as ligações de teclado
+  (`[keyboard.1]`, `[keyboard.2]`) e de controle SDL (`[gamepad.1]`,
+  `[gamepad.2]`) para cada botão do DS2 e para os analógicos lx ly rx ry.
+  Erros de sintaxe dizem arquivo, linha e motivo.
+- ✅ A janela usa as ligações configuradas (padrões = o mapeamento fixo de
+  antes). Nome de tecla ou botão desconhecido vira aviso e é ignorado.
+- ✅ Novas variáveis: `ANYPS2_CONFIG`, `ANYPS2_VIDEO_SCALE`, `ANYPS2_MC_DIR`
+  (esta última antes lida direto no memory card).
+- ✅ Testes: leitura e comentários, erros com linha, prioridade
+  env > arquivo > padrão, e padrões iguais ao mapeamento fixo (`config.*`).
+- ⬜ Interface gráfica de menus dentro da janela (proposta em avaliação: Dear
+  ImGui sobre SDL2; depende de aprovar a nova dependência).
+- ⬜ Gravar a configuração pela própria interface, com "aguardando tecla"
+  para remapear, e escolher a ISO e a pasta dos cartões por diálogo.

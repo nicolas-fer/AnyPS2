@@ -47,6 +47,7 @@ add_library(anyps2_runtime STATIC
     src/iop/audsrv.cpp
     src/audio.cpp
     src/input.cpp
+    src/config.cpp
     src/timing.cpp
     src/dmac.cpp
     src/gif.cpp

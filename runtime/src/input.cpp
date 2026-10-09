@@ -34,6 +34,40 @@ std::uint16_t parsePadButtons(const std::string& text) {
     return bits;
 }
 
+int padButtonIndex(const std::string& name) {
+    for (int i = 0; i < 16; ++i) {
+        if (name == kPadButtonNames[i]) return i;
+    }
+    return -1;
+}
+
+PadBindings PadBindings::defaults() {
+    PadBindings b;
+    // Teclado: setas, Z X A S = ✕ ○ □ △, Q/W = L1/R1, 1/2 = L2/R2; só a porta 1.
+    const std::pair<const char*, const char*> keys[] = {
+        {"up", "Up"},     {"down", "Down"},   {"left", "Left"},   {"right", "Right"}, {"cross", "Z"},
+        {"circle", "X"},  {"square", "A"},    {"triangle", "S"},  {"l1", "Q"},        {"r1", "W"},
+        {"l2", "1"},      {"r2", "2"},        {"start", "Return"}, {"select", "Backspace"},
+    };
+    for (const auto& [button, key] : keys) b.key[0][padButtonIndex(button)] = key;
+    // Controle SDL: o mesmo para as duas portas; os gatilhos são eixos
+    // (L2/R2 digitais acima de um limiar, como antes).
+    const std::pair<const char*, const char*> pads[] = {
+        {"cross", "a"},     {"circle", "b"},     {"square", "x"},      {"triangle", "y"},
+        {"select", "back"}, {"start", "start"},  {"l3", "leftstick"},  {"r3", "rightstick"},
+        {"l1", "leftshoulder"}, {"r1", "rightshoulder"}, {"up", "dpup"}, {"down", "dpdown"},
+        {"left", "dpleft"}, {"right", "dpright"}, {"l2", "lefttrigger"}, {"r2", "righttrigger"},
+    };
+    const std::pair<const char*, const char*> analogs[] = {
+        {"lx", "leftx"}, {"ly", "lefty"}, {"rx", "rightx"}, {"ry", "righty"},
+    };
+    for (unsigned port = 0; port < 2; ++port) {
+        for (const auto& [button, name] : pads) b.button[port][padButtonIndex(button)] = name;
+        for (int i = 0; i < 4; ++i) b.analog[port][i] = analogs[i].second;
+    }
+    return b;
+}
+
 void Input::setHost(unsigned port, const PadInput& state) {
     if (port > 1) return;
     std::lock_guard lock(mutex_);
