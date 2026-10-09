@@ -1,6 +1,6 @@
 // IOP em HLE (Fase 6): cabeçalho de IRX, roteiro dos controles, leitura de
 // ISO 9660, decodificação ADPCM e envelope/mixagem do SPU2; o leitor de
-// vídeos (Program Stream) do MPG1.
+// vídeos (Program Stream) do MPG1; o driver de som da Polyphony (PDISPU2).
 
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +15,7 @@
 #include "anyps2/runtime/iop/cdvd.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/iop/movie.h"
+#include "anyps2/runtime/iop/pdispu2.h"
 #include "anyps2/runtime/iop/spu2.h"
 #include "irx_builder.h"
 #include "minitest.h"
@@ -353,4 +354,195 @@ TEST_CASE(iop, movie_program_stream_loop) {
     auto ps2 = streamOf(silent, true);
     CHECK(!ps2.nextVideo(got, 0));
     CHECK(ps2.ended());
+}
+
+// --- PDISPU2: o bloco de registradores de 960 bytes do driver de som ---
+
+namespace {
+
+// Monta o bloco que o EE manda (fn 4 do SPUP): dois núcleos de 464 bytes.
+struct SpuBlock {
+    std::vector<std::uint8_t> b = std::vector<std::uint8_t>(PdiSpu2::kBlockSize, 0);
+    void w16(std::size_t off, std::uint32_t x) {
+        b[off] = static_cast<std::uint8_t>(x);
+        b[off + 1] = static_cast<std::uint8_t>(x >> 8);
+    }
+    void w32(std::size_t off, std::uint32_t x) {
+        w16(off, x & 0xFFFF);
+        w16(off + 2, x >> 16);
+    }
+    std::uint32_t r32(std::size_t off) const {
+        return std::uint32_t{b[off]} | std::uint32_t{b[off + 1]} << 8 | std::uint32_t{b[off + 2]} << 16 |
+               std::uint32_t{b[off + 3]} << 24;
+    }
+    static std::size_t voiceOff(unsigned core, unsigned i) { return core * PdiSpu2::kCoreSize + 8 + 16 * i; }
+    // Configura a voz como o jogo faz antes de um key-on.
+    void voice(unsigned core, unsigned i, std::uint32_t flags, std::uint32_t pitch, std::uint32_t volL,
+               std::uint32_t volR, std::uint32_t ssa, std::uint32_t adsr1, std::uint32_t adsr2) {
+        const std::size_t o = voiceOff(core, i);
+        w16(o, flags);
+        w16(o + 2, pitch);
+        w16(o + 4, volL);
+        w16(o + 6, volR);
+        w32(o + 8, ssa);
+        w16(o + 12, adsr1);
+        w16(o + 14, adsr2);
+        const std::size_t m = core * PdiSpu2::kCoreSize + 4;
+        w32(m, r32(m) | 1u << i);
+    }
+    void keyOn(unsigned core, std::uint32_t mask) {
+        const std::size_t c = core * PdiSpu2::kCoreSize;
+        w32(c, r32(c) | 0x800);
+        w32(c + 436, mask);
+    }
+    void keyOff(unsigned core, std::uint32_t mask) {
+        const std::size_t c = core * PdiSpu2::kCoreSize;
+        w32(c, r32(c) | 0x1000);
+        w32(c + 440, mask);
+    }
+};
+
+// Dois blocos ADPCM de amostra constante (+0x2000); o segundo é o fim com
+// repetição ("loop" do começo ao fim), para a voz seguir tocando.
+void writeLoopSample(Spu2& spu, std::uint32_t addr) {
+    std::uint8_t d[32] = {};
+    d[0] = 0x01;
+    d[1] = 0x04;  // início do loop
+    for (int i = 2; i < 16; ++i) d[i] = 0x44;
+    d[16] = 0x01;
+    d[17] = 0x03;  // fim + repetir
+    for (int i = 18; i < 32; ++i) d[i] = 0x44;
+    REQUIRE(spu.writeRam(addr, d, sizeof(d)));
+}
+
+std::int32_t peakLeft(Spu2& spu, std::size_t frames) {
+    std::vector<std::int32_t> mix(2 * frames, 0);
+    spu.render(mix.data(), frames);
+    std::int32_t peak = 0;
+    for (std::size_t i = 0; i < frames; ++i) peak = std::max(peak, mix[2 * i]);
+    return peak;
+}
+
+}  // namespace
+
+TEST_CASE(iop, pdispu2_key_on_plays_with_block_registers) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    writeLoopSample(spu, 0x6000);
+    SpuBlock blk;
+    // Núcleo 1, voz 3 (= voz 27 do Spu2): endereço inicial exige a marca 0x40+0x8.
+    blk.voice(1, 3, 0x40 | 0x8 | 0x1 | 0x2 | 0x4 | 0x10 | 0x20, 0x1000, 0x3FFF, 0x3FFF, 0x6000, 0x000F, 0x0000);
+    blk.keyOn(1, 1u << 3);
+    drv.apply(blk.b.data(), blk.b.size());
+    CHECK(spu.active(27));
+    CHECK(!spu.active(3));
+    CHECK_EQ(spu.startAddress(27), 0x6000u);
+    // 0x2000 * envelope (~0x7FFF) * volume (0x7FFE) ~ 0x1FFF
+    const std::int32_t peak = peakLeft(spu, 400);
+    CHECK(peak > 0x1F00 && peak <= 0x2000);
+}
+
+TEST_CASE(iop, pdispu2_mute_flag_restores_volume_and_mask_filters_voices) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    writeLoopSample(spu, 0x6000);
+    SpuBlock blk;
+    // Voz 0: volume máximo só à esquerda, pela marca 0x40 (zera durante a
+    // atualização e devolve o VOLL/VOLR do bloco no fim).
+    blk.voice(0, 0, 0x40 | 0x8 | 0x1 | 0x10 | 0x20, 0x1000, 0x3FFF, 0, 0x6000, 0x000F, 0);
+    // Voz 1: os campos estão no bloco, mas a máscara de vozes alteradas (+4)
+    // não a inclui; o key-on usa os registradores padrão (tudo zero).
+    const std::size_t v1 = SpuBlock::voiceOff(0, 1);
+    blk.w16(v1, 0x40 | 0x8 | 0x1 | 0x2 | 0x4);
+    blk.w16(v1 + 2, 0x1000);
+    blk.w16(v1 + 4, 0x3FFF);
+    blk.w16(v1 + 6, 0x3FFF);
+    blk.w32(v1 + 8, 0x6000);
+    blk.keyOn(0, 0x3);
+    drv.apply(blk.b.data(), blk.b.size());
+    CHECK(spu.active(0));
+    std::vector<std::int32_t> mix(2 * 400, 0);
+    spu.render(mix.data(), 400);
+    std::int32_t l = 0, r = 0;
+    for (std::size_t i = 0; i < 400; ++i) {
+        l = std::max(l, mix[2 * i]);
+        r = std::max(r, mix[2 * i + 1]);
+    }
+    CHECK(l > 0x1F00);  // só a voz 0 soa (a voz 1 ficou com pitch e volume 0)
+    CHECK_EQ(r, 0);
+}
+
+TEST_CASE(iop, pdispu2_key_off_wins_only_without_key_on) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    writeLoopSample(spu, 0x6000);
+    SpuBlock on;
+    on.voice(0, 0, 0x40 | 0x8 | 0x1 | 0x10 | 0x20, 0x1000, 0x3FFF, 0x3FFF, 0x6000, 0x000F, 0x0005);
+    on.keyOn(0, 1);
+    drv.apply(on.b.data(), on.b.size());
+    CHECK(spu.active(0));
+    // key-off sozinho: release (ADSR2 = 5, rápido) até parar
+    SpuBlock off;
+    off.keyOff(0, 1);
+    drv.apply(off.b.data(), off.b.size());
+    peakLeft(spu, 3000);
+    CHECK(!spu.active(0));
+    // key-on e key-off da mesma voz no mesmo bloco: vence o key-on
+    SpuBlock both;
+    both.keyOn(0, 1);
+    both.keyOff(0, 1);
+    drv.apply(both.b.data(), both.b.size());
+    peakLeft(spu, 3000);
+    CHECK(spu.active(0));
+}
+
+TEST_CASE(iop, pdispu2_live_voice_gets_new_volume_and_envelope) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    writeLoopSample(spu, 0x6000);
+    SpuBlock on;
+    on.voice(0, 5, 0x40 | 0x8 | 0x1 | 0x10 | 0x20, 0x1000, 0x3FFF, 0x3FFF, 0x6000, 0x000F, 0x0000);
+    on.keyOn(0, 1u << 5);
+    drv.apply(on.b.data(), on.b.size());
+    CHECK(peakLeft(spu, 400) > 0x1F00);
+    // Muda só o VOLL, para a metade, sem novo key-on (a voz toca sem parar).
+    SpuBlock chg;
+    chg.voice(0, 5, 0x2, 0, 0x1FFF, 0, 0, 0, 0);
+    drv.apply(chg.b.data(), chg.b.size());
+    const std::int32_t half = peakLeft(spu, 400);
+    CHECK(half > 0xF00 && half < 0x1100);
+}
+
+TEST_CASE(iop, pdispu2_status_reports_envelope_and_end) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    // Um bloco de amostra com fim sem repetir.
+    std::uint8_t d[16] = {};
+    d[0] = 0x01;
+    d[1] = 0x01;
+    for (int i = 2; i < 16; ++i) d[i] = 0x44;
+    REQUIRE(spu.writeRam(0x7000, d, sizeof(d)));
+    SpuBlock blk;
+    blk.voice(1, 0, 0x40 | 0x8 | 0x1 | 0x10 | 0x20, 0x1000, 0x3FFF, 0x3FFF, 0x7000, 0x000F, 0);
+    blk.keyOn(1, 1);
+    const auto st0 = drv.apply(blk.b.data(), blk.b.size());
+    CHECK_EQ(st0.size(), static_cast<std::size_t>(PdiSpu2::kStatusSize));
+    peakLeft(spu, 200);
+    const auto st = drv.status();
+    // núcleo 1 começa em 52; ENDX tem o bit 0; ENVX da voz 0 em 56
+    const auto u32 = [&st](std::size_t o) {
+        return std::uint32_t{st[o]} | std::uint32_t{st[o + 1]} << 8 | std::uint32_t{st[o + 2]} << 16 |
+               std::uint32_t{st[o + 3]} << 24;
+    };
+    CHECK_EQ(u32(52), 1u);
+    CHECK_EQ(u32(0), 0u);
+    // enquanto a amostra tocava, o envelope esteve alto; depois de parar, ENVX = 0
+    CHECK_EQ(st[56] | st[57] << 8, 0);
+}
+
+TEST_CASE(iop, pdispu2_rejects_short_block) {
+    Spu2 spu;
+    PdiSpu2 drv(spu);
+    std::vector<std::uint8_t> small(100, 0);
+    CHECK_THROWS_WITH(drv.apply(small.data(), small.size()), "bloco de registradores");
 }

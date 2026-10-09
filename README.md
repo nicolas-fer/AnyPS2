@@ -23,7 +23,8 @@ ELF do PS2  ──▶  C++ gerado  ──▶  compilador nativo  ──▶  exec
 > Gran Turismo 4 (dump do usuário) recompilado desenha a tela de copyright,
 > descomprime e executa o programa principal (também recompilado: 1,4 M
 > instruções), inicializa controles e memory card, lê os dados do disco
-> pelos drivers da Polyphony (em HLE, sem som) e, guiado por um roteiro de
+> pelos drivers da Polyphony (em HLE; o driver de som já toca os efeitos dos
+> menus, ainda sem a música) e, guiado por um roteiro de
 > controle, passa pela seleção de idioma, cria o save no memory card, recebe
 > o nome do jogador, toca o vídeo de abertura (MPEG-2 decodificado pelo IPU
 > emulado) e chega ao modo Arcade: menu com fundos em vídeo, seleção de
@@ -294,7 +295,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `vu` | 12 casos do núcleo do VU com valores calculados à mão (truncamento, flags, latências, stalls, Q/P, upper/lower em paralelo, bit E, desvios, EFU, XGKICK, MSCAL com double buffering) |
 | `vu_diff` | **diferencial** interpretador × microcódigo recompilado: 16 microprogramas aleatórios × 48 estados; também realocado para outra base e com um par alterado na micro memória |
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
-| `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release), leitor de vídeos do MPG1 (Program Stream, repetição e fatias para o EE) |
+| `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release), leitor de vídeos do MPG1 (Program Stream, repetição e fatias para o EE), bloco de registradores do driver de som da Polyphony (PDISPU2: key-on/off, volumes, estado ENDX/ENVX) |
 | `e2e_modules`, `e2e_modules_unknown`, `e2e_modules_rom` | carregar módulos de `rom0:` e IRX embutido; IRX/ROM sem HLE têm de parar com o erro esperado |
 | `e2e_dbcpad` | controles do SDK 3.0 (dbcman/libdbc/libpad2) com roteiro de controle, `sceMcGetSlotMax` |
 | `e2e_execps2`, `e2e_execps2_missing`, `cli_ram2elf` | boot que copia outro programa para a memória e chama `ExecPS2` (recompilado com `--extra`: argv e kernel zerado; sem `--extra`: erro claro), ELF sintético a partir da RAM |

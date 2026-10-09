@@ -93,6 +93,11 @@ void Spu2::setPitch(unsigned voice, std::uint16_t pitch) {
     voices_[voice].pitch = pitch;
 }
 
+void Spu2::setEnvelope(unsigned voice, std::uint16_t adsr1, std::uint16_t adsr2) {
+    voices_[voice].adsr1 = adsr1;
+    voices_[voice].adsr2 = adsr2;
+}
+
 void Spu2::nextSample(Voice& v) {
     if (v.index >= 28) {
         if (v.stopAtBlockEnd) {
@@ -107,6 +112,7 @@ void Spu2::nextSample(Voice& v) {
         decodeBlock(b, v.block, v.s1, v.s2);
         v.index = 0;
         if (v.blockFlags & 1) {
+            v.ended = true;
             // Fim do sample: com "repetir" volta ao loop; sem, encerra
             // depois de tocar este bloco.
             v.addr = v.loop;

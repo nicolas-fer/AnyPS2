@@ -7,8 +7,11 @@
 //   handle, 0 = erro.
 //   fn 4 (ler): {handle, destino no EE, tamanho}: o IOP escreve os dados na
 //   memória do EE e avança a posição; sem resposta.
-//   fn 5 (ler para o IOP): {handle, destino na RAM do IOP, tamanho} — dados
-//   que ficam no IOP (som); o HLE do som é mudo, mas os dados são copiados.
+//   fn 5 (ler para o SPU2): {handle, destino na RAM do SPU2, tamanho} — os
+//   bancos de som (amostras ADPCM). O IRX chama pdispu2_35 (PDISPU2.IRX), que
+//   passa os dados por um FIFO e os envia ao SPU2 por sceSdVoiceTrans; os
+//   destinos vistos (0x5040, 0x71ef0, 0x8b060, 0xa7040, 0x1e0000) são
+//   endereços de som, a partir de 0x5000, e não da RAM do IOP.
 //   fn 2 (fechar): {handle}.
 // O resto (abrir por caminho, fn 1/6/8/9) ainda não foi visto em uso e para
 // com erro claro.
@@ -38,6 +41,7 @@
 #include "anyps2/runtime/iop/cdvd.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/iop/movie.h"
+#include "anyps2/runtime/iop/spu2.h"
 #include "anyps2/runtime/memory.h"
 #include "anyps2/runtime/runtime.h"
 
@@ -239,14 +243,14 @@ void registerPdiStr(Iop& iop) {
                 }
                 case 4:
                 case 5: {
-                    const bool toIop = fn == 5;
+                    const bool toSpu = fn == 5;
                     const std::uint32_t h = rd32(in, 0), dest = rd32(in, 4), size = rd32(in, 8);
                     auto it = st->streams.find(h);
                     if (it == st->streams.end()) {
                         throw GuestError("pdistr: leitura do stream " + std::to_string(h) + ", que não está aberto",
                                          pc);
                     }
-                    if (!dest && !toIop) {
+                    if (!dest && !toSpu) {
                         throw Unimplemented("pdistr: leitura de " + std::to_string(size) +
                                                 " bytes sem destino (endereço 0) — semântica desconhecida",
                                             pc);
@@ -262,10 +266,17 @@ void registerPdiStr(Iop& iop) {
                     }
                     if (trace) {
                         std::fprintf(stderr, "[iop] pdistr: stream %u lê %u bytes (posição %u) para 0x%08x (%s)\n", h,
-                                     size, s.pos, dest, toIop ? "IOP" : "EE");
+                                     size, s.pos, dest, toSpu ? "SPU2" : "EE");
                     }
-                    if (size && toIop) std::memcpy(iop.iopPointer(dest, size, pc), buf.data(), size);
-                    else if (size) iop.runtime().memory().copyToGuest(dest, buf.data(), size, pc);
+                    if (size && toSpu) {
+                        if (!iop.spu2().writeRam(dest, buf.data(), size)) {
+                            throw GuestError("pdistr: " + std::to_string(size) + " bytes para o endereço 0x" +
+                                                 anyps2::hex(dest) + " passam dos 2 MB da RAM do SPU2",
+                                             pc);
+                        }
+                    } else if (size) {
+                        iop.runtime().memory().copyToGuest(dest, buf.data(), size, pc);
+                    }
                     s.pos += size;
                     return out;
                 }

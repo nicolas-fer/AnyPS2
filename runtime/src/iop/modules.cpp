@@ -46,6 +46,8 @@ const std::vector<ModuleDef>& moduleTable() {
         {"libpdi", {"PDI_Library"}, {}},
         {"pdicdvd", {"PDI_CDVD_Manager"}, {}},
         {"pdistr", {"PDI_Streaming_service"}, {}},
+        // Driver de som (SPU2) da Polyphony: servidores SPUP e SPUT.
+        {"pdispu2", {"PDI_SPU2_Manager"}, {}},
         // Volante Logitech: o HLE responde sem volante conectado.
         {"lgdev", {"LgDev_tb_rb_Driver"}, {}},
         // SIF RPC multi-thread da Sony (libmrpc no EE): bind/call no próprio
