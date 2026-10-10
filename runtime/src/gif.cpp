@@ -88,6 +88,7 @@ void Gif::writeReglist(unsigned desc, std::uint64_t data, std::uint32_t pc) {
 void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, std::uint32_t pc) {
     const HostProfile::Scope prof(HostProfile::Gif);
     Path& p = paths_[path - 1];
+    gs_.setSource(path);  // só para o diagnóstico do GS (origem das escritas na VRAM)
     for (std::size_t i = 0; i < qwords; ++i) {
         std::uint64_t lo, hi;
         std::memcpy(&lo, data + i * 16, 8);
@@ -146,6 +147,7 @@ void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, 
 
 void Gif::kick(const std::uint8_t* mem, std::uint32_t size, std::uint32_t addr, std::uint32_t pc) {
     const Path& p = paths_[0];
+    gs_.noteXgkick();
     for (std::uint32_t n = 0; n <= size / 16; ++n) {
         transfer(1, mem + (addr & (size - 16)), 1, pc);
         addr += 16;

@@ -133,6 +133,13 @@ public:
     // Rastreador de desenhos (gs_trace.h). Criado sob demanda; sem as variáveis de
     // ambiente ele fica inativo e o desenho não gasta nada com ele.
     GsTrace& trace();
+    // Origem dos dados que o GIF entrega agora (só para o diagnóstico): 1 a 3 =
+    // PATH1 (XGKICK do VU1), PATH2 (DIRECT do VIF1), PATH3 (DMA); 0 = escrita
+    // direta no Gs, sem passar pelo GIF. noteXgkick conta os XGKICK do VU1.
+    void setSource(unsigned path) { source_ = path; }
+    void noteXgkick() { ++xgkicks_; }
+    unsigned source() const { return source_; }
+    std::uint64_t xgkicks() const { return xgkicks_; }
     // Pixels que os desenhos escreveriam pela conta analítica (produtor) e os que
     // o rasterizador de fato escreveu depois do SCISSOR e do SCANMSK (worker).
     // Têm de ser iguais: é o que o teste gs_coverage confere.
@@ -258,6 +265,8 @@ private:
     // Diagnóstico: VBlanks recebidos (vblankStart) e o rastreador, nulo sem as
     // variáveis de ambiente. O produtor é o único que mexe nisto.
     std::uint64_t vblanks_ = 0;
+    unsigned source_ = 0;
+    std::uint64_t xgkicks_ = 0;
     std::unique_ptr<GsTrace> trace_;
 };
 

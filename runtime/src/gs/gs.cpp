@@ -404,7 +404,10 @@ void Gs::writeTex0(unsigned n, std::uint64_t v, std::uint32_t pc) {
         default:
             unsupported("TEX0.CLD = " + std::to_string(bits(v, 61, 3)) + " (reservado)", pc);
     }
-    if (load && indexed) loadClut(v, pc);
+    if (load && indexed) {
+        if (trace_) trace_->vramClutLoad(*this, v, pc);
+        loadClut(v, pc);
+    }
 }
 
 void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
@@ -508,6 +511,7 @@ void Gs::startTransfer(std::uint32_t pc) {
             t.h = static_cast<std::uint32_t>(bits(rr, 32, 12));
             if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
             if (t.w == 0 || t.h == 0) t.active = false;
+            if (trace_ && t.active) trace_->vramHostStart(*this, t, pc);
             submit([this, t] { xfer_ = t; });
             return;
         }
@@ -526,6 +530,7 @@ void Gs::startTransfer(std::uint32_t pc) {
 void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
     (void)pc;
     addWork(1);  // 64 bits: meio ciclo do barramento
+    if (trace_) trace_->vramHostWord(*this);
     // Quem sabe se a transferência ainda está ativa é o worker; aqui só se
     // junta a palavra ao lote. Palavras depois do fim são descartadas lá.
     hostBatch_.push_back(data);
@@ -585,6 +590,7 @@ void Gs::localToLocal(std::uint32_t pc) {
                         " (tamanhos de pixel diferentes)",
                     pc);
     }
+    if (trace_) trace_->vramLocalCopy(*this, c, pc);
     submit([this, c] { copyLocal(c); });
 }
 
