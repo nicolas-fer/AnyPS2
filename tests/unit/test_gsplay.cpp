@@ -26,7 +26,6 @@ void put64(std::vector<std::uint8_t>& v, std::uint64_t x) {
     put32(v, static_cast<std::uint32_t>(x));
     put32(v, static_cast<std::uint32_t>(x >> 32));
 }
-void setAt64(std::vector<std::uint8_t>& v, std::size_t at, std::uint64_t x) { std::memcpy(v.data() + at, &x, 8); }
 
 constexpr std::uint32_t kSentinelWord = 0xCAFEF00Du;
 constexpr std::size_t kSentinelAddr = 0x10000;  // byte da VRAM fora da área desenhada
