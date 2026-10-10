@@ -31,6 +31,8 @@ struct RowRange {
     bool empty() const { return lo > hi; }
 };
 RowRange drawRows(const DrawWindow& w, unsigned type, const Vertex& v0, const Vertex& v1, const Vertex& v2);
+// O mesmo para as colunas (lo/hi em x), cortadas pela janela.
+RowRange drawCols(const DrawWindow& w, unsigned type, const Vertex& v0, const Vertex& v1, const Vertex& v2);
 
 // Páginas de um retângulo de pixels: linhas rowLo..rowHi, colunas 0..cols-1, num
 // buffer de base `base` (páginas) e largura bw (em unidades de 64 pixels), no

@@ -763,8 +763,30 @@ Marco 7 — o vídeo de abertura (em andamento):
   DISPFB a cada campo (renderização por campo); as capturas não têm padrão
   de linha. Na janela, a saída mostra um campo por VBlank (bob); se houver
   tremor, a correção é combinar os dois campos (weave).
-- Próximos passos: GS em faixas (várias threads); as partes pretas dos
-  carros e os polígonos pretos no cenário da corrida. O som: ver o marco 8.
+- ✅ **GS em faixas** (`gs_bands.h/.cpp`, `gs_access.h`): `ANYPS2_GS_THREADS=N`
+  threads (padrão de 2 a 4), cada uma dona dos blocos de 16 linhas
+  (y/16) % N, com fila própria na ordem do GIF. Transferências, CLUT e reset
+  são barreiras ordenadas. O produtor guarda as páginas da VRAM acessadas
+  desde a última barreira: um desenho que lê (textura) ou escreve o que outro
+  pendente escreve espera com uma barreira; um desenho cuja textura cai no
+  próprio FRAME/ZBUF, ou cujo endereço dá a volta (x além de FBW·64), vai
+  numa faixa só. No GT4, 91% dos desenhos vão para as faixas, as capturas
+  são idênticas às do caminho síncrono e a corrida sobe de 4,8–7,0 para
+  6,8–11,8 VBlanks/s (máquina livre; 1 faixa contra 4). Agora o VU1 é o
+  gargalo na corrida (52–73% do tempo do EE).
+- ✅ **ZTE=0 não escreve Z** (como no GSdx). O GT4 deixa o ZBUF no endereço
+  do FRAME nos desenhos 2D; escrever Z apagava a cor: eram os polígonos
+  pretos que cobriam a vitrine e o menu de opções antes da corrida.
+- ✅ Sonda do GS: `ANYPS2_GS_PROBE=x,y` (estado de cada desenho que toca o
+  pixel, com a cor e o Z antes e depois) e `ANYPS2_GS_DRAWLOG` (uma linha
+  por desenho), para diagnosticar defeitos de imagem.
+- Partes pretas dos carros (sonda no buffer 0xF0, onde a cena 3D é desenhada
+  antes de ser copiada para a tela): a pintura entra escura (cor de vértice
+  19,19,20 em MODULATE) e um triângulo grande com cor de vértice (0,0,0) e Z
+  maior que o da carroceria (GEQUAL) cobre o pixel. As cores e o Z vêm do
+  microcódigo do VU1: o próximo passo é conferir a saída do VU1 desses desenhos.
+- Próximos passos: as partes pretas dos carros (com a sonda); o VU1 da
+  corrida; o cache de texturas. O som: ver o marco 8.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
 (efeitos; a música de fundo e o áudio dos vídeos ainda não):

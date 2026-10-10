@@ -79,6 +79,53 @@ RowRange drawRows(const DrawWindow& w, unsigned type, const Vertex& v0, const Ve
     return r;
 }
 
+RowRange drawCols(const DrawWindow& w, unsigned type, const Vertex& v0, const Vertex& v1, const Vertex& v2) {
+    RowRange r;
+    constexpr int kNone = 1 << 30;
+    r.lo = kNone;
+    r.hi = -kNone;
+    switch (type) {
+        case 0: {  // ponto
+            const int x = (v0.x + 8) >> 4;
+            r.lo = r.hi = x;
+            break;
+        }
+        case 1:
+        case 2: {  // linha: as colunas dos pixels amostrados
+            const int steps = lineSteps(v0, v1);
+            for (int i = 0; i < std::max(steps, 1); ++i) {
+                const int px = lineSample(v0, v1, steps, i).px;
+                r.lo = std::min(r.lo, px);
+                r.hi = std::max(r.hi, px);
+            }
+            break;
+        }
+        case 3:
+        case 4:
+        case 5: {
+            const TriangleSetup t = triangleSetup(w, v0, v1, v2);
+            if (t.valid) {
+                r.lo = t.minX;
+                r.hi = t.maxX;
+            }
+            break;
+        }
+        case 6: {
+            const SpriteRect s = spriteRect(w, v0, v1);
+            if (!s.empty()) {
+                r.lo = s.minX;
+                r.hi = s.maxX;
+            }
+            break;
+        }
+        default:
+            return RowRange{};
+    }
+    r.lo = std::max(r.lo, w.x0);
+    r.hi = std::min(r.hi, w.x1);
+    return r;
+}
+
 VramSpan pageSpan(std::uint32_t psm, std::uint32_t base, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
                   unsigned cols) {
     // Endereçamento de vram.cpp, pixel (x, y) no bloco bp + k·32 + ordem, com

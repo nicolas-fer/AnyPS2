@@ -248,28 +248,37 @@ void Gs::draw(std::uint32_t pc) {
     // é nulo. beginDraw lê o pixel antes e endDraw depois do desenho enfileirado.
     const bool traced = trace_ && trace_->beginDraw(*this, pc, e.type, w, v0, v1, v2);
 
-    // Acessos à VRAM. Escritas de FRAME/ZBUF usam colunas até o SCISSOR; leituras
-    // de textura usam o tamanho da textura (ou tudo, com REGION_CLAMP/REPEAT).
+    // Acessos à VRAM. Escritas de FRAME/ZBUF usam a caixa do desenho (cortada pelo
+    // SCISSOR); leituras de textura, o maior texel que o modo de CLAMP alcança.
+    const RowRange colRange = drawCols(w, e.type, v0, v1, v2);
+    if (colRange.empty()) return;
     const auto rowLo = static_cast<unsigned>(rows.lo), rowHi = static_cast<unsigned>(rows.hi);
-    const auto cols = static_cast<unsigned>(std::max(e.scax1, 0)) + 1;
+    const auto cols = static_cast<unsigned>(colRange.hi) + 1;
     VramAccess writes[2];
     unsigned nw = 0;
     VramAccess reads[8];
     unsigned nr = 0;
     writes[nw++] = VramAccess{pageSpan(e.fpsm, e.fbp / 32, e.fbw, rowLo, rowHi, cols), true, 0, e.fbp / 32,
                               e.fbw, e.fpsm};
-    if (!e.zmsk) {
+    if (e.zte && !e.zmsk) {
         writes[nw++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), true, 1, e.zbp / 32,
                                   e.fbw, e.zpsm};
-    } else if (e.zte) {
+    } else if (e.zte && e.ztst >= 2) {
         reads[nr++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), false, 1, e.zbp / 32,
                                  e.fbw, e.zpsm};
     }
     if (e.tme) {
         for (unsigned l = 0; l <= e.mxl; ++l) {
             const unsigned wl = std::max(1u, (1u << e.tw) >> l), hl = std::max(1u, (1u << e.th) >> l);
-            const unsigned colsU = e.wms >= 2 ? 1024u : wl;
-            const unsigned rowsV = e.wmt >= 2 ? 1024u : hl;
+            // Maior coordenada + 1 por modo (fetchTexel): REPEAT/CLAMP ficam no
+            // tamanho do nível; REGION_CLAMP vai até MAX >> nível; REGION_REPEAT
+            // é (c & MSK) | FIX, no máximo MSK | FIX. O endereço é cortado em 2047.
+            auto reach = [l](unsigned mode, unsigned size, unsigned mn, unsigned mx) {
+                const unsigned r = mode == 2 ? (mx >> l) + 1 : mode == 3 ? (mn | mx) + 1 : size;
+                return std::min(std::max(r, 1u), 2048u);
+            };
+            const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
+            const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
             reads[nr++] = VramAccess{pageSpan(e.tpsm, e.tbp[l] / 32, e.tbw[l], 0, rowsV - 1, colsU), false, 2,
                                      e.tbp[l] / 32, e.tbw[l], e.tpsm};
         }
@@ -492,7 +501,9 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
     }
 
     // Teste de alfa
-    bool writeFb = true, writeZ = !e.zmsk, writeAlpha = true;
+    // Sem o teste de Z (ZTE=0) o Z não é escrito, como no GSdx: muitos jogos
+    // deixam o ZBUF apontando para o próprio FRAME nos desenhos 2D.
+    bool writeFb = true, writeZ = e.zte && !e.zmsk, writeAlpha = true;
     if (e.ate) {
         bool pass = true;
         const auto ua = static_cast<unsigned>(a);
@@ -526,7 +537,7 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
         if (e.fpsm != PSMCT24 && e.fpsm != PSMZ24 && bit != e.datm) return;
     }
 
-    // Teste de Z (ZTE=0 é proibido no hardware; tratado como ALWAYS)
+    // Teste de Z (ZTE=0 desliga o teste e a escrita de Z)
     std::uint32_t z = f.z;
     if (e.zpsm == PSMZ24) z = std::min(z, 0xFFFFFFu);
     else if (e.zpsm == PSMZ16 || e.zpsm == PSMZ16S) z = std::min(z, 0xFFFFu);
@@ -598,7 +609,7 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
         }
         vram_.writePixel(e.fpsm, e.fbp, e.fbw, ux, uy, value);
     }
-    if (writeZ && (e.zte || !e.zmsk)) vram_.writePixel(e.zpsm, e.zbp, e.fbw, ux, uy, z);
+    if (writeZ) vram_.writePixel(e.zpsm, e.zbp, e.fbw, ux, uy, z);
 }
 
 // ---------------------------------------------------------------------------

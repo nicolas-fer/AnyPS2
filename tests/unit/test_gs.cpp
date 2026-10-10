@@ -352,6 +352,32 @@ TEST_CASE(gs, depth_test) {
     CHECK_EQ(g.vram().readPixel(PSMZ24, 8 * 32, 1, 0, 0), 0xFFFFFFu);
 }
 
+TEST_CASE(gs, z_test_off_does_not_write_z) {
+    // ZTE=0 desliga também a escrita de Z. Jogos (o GT4, nos desenhos 2D) deixam
+    // o ZBUF no mesmo endereço do FRAME com ZMSK=0: escrever Z apagaria a cor.
+    Gs g(nullptr);
+    setupFb(g);
+    g.writeRegister(ZBUF_1, 0 | (std::uint64_t{PSMZ32 & 0xF} << 24), 0);  // ZBP=0 = FRAME, ZMSK=0
+    g.writeRegister(TEST_1, 0, 0);                                      // ZTE=0
+    g.writeRegister(PRIM, prim(6), 0);
+    g.writeRegister(RGBAQ, rgbaq(10, 20, 30, 0x80), 0);
+    g.writeRegister(XYZ2, xyzPx(0, 0, 0x1234), 0);
+    g.writeRegister(XYZ2, xyzPx(8, 8, 0x1234), 0);
+    // O Z32 arruma os blocos de outro jeito que o CT32: o Z de (1, 1) cairia em
+    // outro pixel da página. Nenhum pixel da página pode ter o valor do Z.
+    unsigned zs = 0;
+    for (unsigned y = 0; y < 32; ++y) {
+        for (unsigned x = 0; x < 64; ++x) zs += px(g, x, y) == 0x1234u;
+    }
+    CHECK_EQ(zs, 0u);
+    CHECK_EQ(px(g, 1, 1), 0x801E140Au);
+    // Com ZTE=1 (ALWAYS) o Z volta a ser escrito.
+    g.writeRegister(TEST_1, kTestZAlways, 0);
+    g.writeRegister(XYZ2, xyzPx(0, 0, 0x1234), 0);
+    g.writeRegister(XYZ2, xyzPx(8, 8, 0x1234), 0);
+    CHECK_EQ(g.vram().readPixel(PSMZ32, 0, 1, 1, 1), 0x1234u);
+}
+
 TEST_CASE(gs, alpha_blending_and_tests) {
     Gs g(nullptr);
     setupFb(g);
