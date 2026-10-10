@@ -142,11 +142,12 @@ private:
     const vu::Instr& fetch(std::uint32_t pc);
     void dumpMicro();
 
-    // Parte comum de todo par, fora de linha (não depende da operação):
+    // Parte comum de todo par (não depende da operação), inline em vu_exec.h:
     // validação, flags/Q/P prontos e stalls antes; escrita do upper, flags
     // pendentes, LOI e ciclo depois.
     void pairBegin(const vu::Instr& in, std::uint32_t pc);
     void pairEnd(const vu::Instr& in, const vucore::UpperResult& ur);
+    void pairRejected(const vu::Instr& in, std::uint32_t pc) const;  // caminho de erro, fora de linha
 
     void commitReady();
     void commitPending();
@@ -158,6 +159,7 @@ private:
         if (c > cycle_) cycle_ = c;
     }
     Reg128& mem(std::uint32_t qwordIndex, std::uint32_t pc);
+    Reg128& memVu0Cross(std::uint32_t index, std::uint32_t pc);  // VU0 → registradores do VU1
     void execLower(const vu::Instr& in, std::uint32_t pc, Flow& flow);
     template <vu::L Op>
     void execLowerOp(const vu::Instr& in, std::uint32_t pc, Flow& flow);

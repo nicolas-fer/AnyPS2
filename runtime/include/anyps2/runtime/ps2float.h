@@ -62,9 +62,18 @@ inline Out out(float f) {
     return {b, false, false};
 }
 
-// Recua um ulp em direção a zero.
+// Recua um ulp em direção a zero. Com o campo de magnitude em bits (sinal
+// fora), "um ulp menor" é só decrementar: vale também nos denormais (o
+// menor vira ±0) e no salto de 0x7F800000 (infinito) para ±Fmax. std::nextafter
+// faz o mesmo, mas chamada fora de linha num caminho quente do FMAC.
+// ±0 e NaN voltam como estão (nunca são chamados assim: o resultado é finito e
+// diferente de zero quando há o que recuar).
 inline float towardZero(float r) {
-    return std::nextafter(r, 0.0f);
+    std::uint32_t b = toBits(r);
+    const std::uint32_t mag = b & 0x7FFFFFFFu;
+    if (mag == 0 || mag > 0x7F800000u) return r;
+    b = (b & 0x80000000u) | (mag - 1);
+    return fromBits(b);
 }
 
 inline float add(float a, float b) {

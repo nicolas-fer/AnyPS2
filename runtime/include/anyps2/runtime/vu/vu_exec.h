@@ -49,6 +49,66 @@ ANYPS2_VU_INLINE void Vu::stallOn(unsigned vf) {
     if (vf != 0) stallUntil(vfReady_[vf]);
 }
 
+// Início do par: só o caminho comum fica aqui (inline, com `in` constante no
+// código recompilado, o switch de stalls some). Os erros vão para
+// pairRejected, fora de linha. É inline comum, não forçado: com __forceinline
+// o código gerado do microcódigo cresce e a vazão caiu (~10 para ~8 Mpares/s).
+inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
+    if (in.upper.op == vu::U::INVALID || in.d || in.t) [[unlikely]] pairRejected(in, pc);
+    commitReady();
+
+    // Stalls pelos operandos do upper.
+    const vu::Upper& u = in.upper;
+    if (u.op != vu::U::NOP) {
+        stallOn(u.fs);
+        stallOn(u.ft);
+        switch (u.op) {
+            case vu::U::MADD: case vu::U::MSUB: case vu::U::MADDbc: case vu::U::MSUBbc: case vu::U::MADDq:
+            case vu::U::MSUBq: case vu::U::MADDi: case vu::U::MSUBi: case vu::U::MADDA: case vu::U::MSUBA:
+            case vu::U::MADDAbc: case vu::U::MSUBAbc: case vu::U::MADDAq: case vu::U::MSUBAq:
+            case vu::U::MADDAi: case vu::U::MSUBAi: case vu::U::OPMSUB:
+                stallUntil(accReady_);
+                break;
+            default:
+                break;
+        }
+        commitReady();
+    }
+}
+
+// Fim do par: escrita do upper, flags pendentes (4 ciclos depois), LOI e o
+// ciclo. A ordem é observável (o upper vence o lower no mesmo VF; as flags
+// valem 4 ciclos depois) e não pode ser trocada.
+inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
+    // O upper é escrito depois do lower (se ambos escrevem o mesmo VF, vale o upper).
+    if (ur.writes) {
+        vucore::writeUpper(regs_, ur);
+        if (ur.toAcc) accReady_ = cycle_ + vuexec::kFmacLatency;
+        else if (ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
+    }
+    if (ur.setsFlags || ur.setsClip) {
+        if (pendCount_ == kPending) [[unlikely]] {  // nunca deveria acontecer (latência fixa)
+            stallUntil(pending_[pendHead_].ready);
+            commitReady();
+        }
+        PendingFlags& p = pending_[(pendHead_ + pendCount_) % kPending];
+        p = {cycle_ + vuexec::kFmacLatency, ur.setsFlags, ur.mac, ur.setsClip, ur.clip};
+        ++pendCount_;
+        nextCommit_ = std::min(nextCommit_, p.ready);
+    }
+    if (in.i) regs_.vi[vucore::reg::I] = in.lowerWord;  // LOI
+    ++cycle_;
+}
+
+// Memória de dados (qword): o caminho comum é um índice; os registradores do
+// VU1 vistos pelo VU0 (0x4000–0x43FF) ficam fora de linha.
+ANYPS2_VU_INLINE Reg128& Vu::mem(std::uint32_t index, std::uint32_t pc) {
+    if (unit_ == 0 && (index & 0x400u)) return memVu0Cross(index, pc);
+    const std::uint32_t qwords = dataSize_ / 16;
+    Reg128* base = reinterpret_cast<Reg128*>(data_);
+    return base[index & (qwords - 1)];
+}
+
 // UOp/LOp: operação conhecida em tempo de compilação (código recompilado) ou
 // COUNT_ = escolhida pela instrução em tempo de execução (interpretador).
 template <vu::U UOp, vu::L LOp>

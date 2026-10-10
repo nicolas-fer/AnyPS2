@@ -122,6 +122,40 @@ TEST_CASE(vu, ps2float_truncation_matches_host_round_to_zero) {
     CHECK_EQ(fb(ps2f::in(0x7F800000u)), ps2f::kFmax);  // "Inf" → Fmax
 }
 
+// towardZero (recuar um ulp) sem std::nextafter: bordas de expoente, denormais,
+// infinitos e zeros, além de uma varredura de bits aleatórios.
+TEST_CASE(vu, ps2float_towardzero_edges) {
+    auto ref = [](float r) { return std::nextafter(r, 0.0f); };
+    const std::uint32_t edges[] = {0x00000001u, 0x80000001u, 0x00400000u, 0x007FFFFFu, 0x00800000u,
+                                   0x80800000u, 0x3F800000u, 0xBF800000u, 0x7F7FFFFFu, 0xFF7FFFFFu,
+                                   0x7F800000u, 0xFF800000u, 0x40000000u, 0x33800000u};
+    int bad = 0;
+    for (const std::uint32_t b : edges) {
+        if (fb(ps2f::towardZero(bf(b))) != fb(ref(bf(b)))) ++bad;
+    }
+    CHECK_EQ(bad, 0);
+    // ±0 ficam como estão: o truncamento de -0 é -0 (nextafter devolveria +0).
+    CHECK_EQ(fb(ps2f::towardZero(0.0f)), 0u);
+    CHECK_EQ(fb(ps2f::towardZero(-0.0f)), 0x80000000u);
+    // O menor denormal recua para ±0, sem passar para o menor normal.
+    CHECK_EQ(fb(ps2f::towardZero(bf(0x00000001u))), 0u);
+    CHECK_EQ(fb(ps2f::towardZero(bf(0x80000001u))), 0x80000000u);
+    // O menor normal recua para o maior denormal.
+    CHECK_EQ(fb(ps2f::towardZero(bf(0x00800000u))), 0x007FFFFFu);
+    // Infinito recua para ±Fmax; 1.0 recua um ulp.
+    CHECK_EQ(fb(ps2f::towardZero(bf(0x7F800000u))), ps2f::kFmax);
+    CHECK_EQ(fb(ps2f::towardZero(bf(0xFF800000u))), 0xFF7FFFFFu);
+    CHECK_EQ(fb(ps2f::towardZero(1.0f)), 0x3F7FFFFFu);
+    std::mt19937 rng(77);
+    std::uniform_int_distribution<std::uint32_t> any;
+    for (int i = 0; i < 200000; ++i) {
+        const float r = bf(any(rng));
+        if (!std::isfinite(r) || r == 0.0f) continue;
+        if (fb(ps2f::towardZero(r)) != fb(ref(r))) ++bad;
+    }
+    CHECK_EQ(bad, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Modo macro (COP2)
 // ---------------------------------------------------------------------------
