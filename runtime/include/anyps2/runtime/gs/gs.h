@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "anyps2/runtime/gs/gs_access.h"
 #include "anyps2/runtime/gs/gs_worker.h"
 #include "anyps2/runtime/gs/vram.h"
 
@@ -55,20 +56,25 @@ struct Frame {
 // regras do hardware (cobertura top-left, Z de 32 bits inteiro, blending
 // (A−B)·C/128+D, texturas com CLUT/TEXA etc.).
 //
-// O desenho roda numa thread própria (GsWorker): o EE só faz a parte que tem
-// de acontecer no ponto do GIF (validação, tempo, contagem de pixels) e enfileira
-// o resto na ordem do programa. Quem lê a memória local pela API pública espera
-// o worker ficar ocioso antes; ANYPS2_GS_THREAD=0 volta ao caminho síncrono.
+// O desenho roda em faixas, cada uma numa thread (GsWorker, gs_bands.h): o EE só
+// faz a parte que tem de acontecer no ponto do GIF (validação, tempo, contagem de
+// pixels) e enfileira o resto na ordem do programa. Quem lê a memória local pela
+// API pública espera as faixas ficarem ociosas antes. ANYPS2_GS_THREAD=0 volta ao
+// caminho síncrono; ANYPS2_GS_THREADS=N escolhe o número de faixas.
 class Gs {
 public:
+    // Limite de faixas (ANYPS2_GS_THREADS é limitado a este valor).
+    static constexpr unsigned kMaxLanes = 16;
+
     explicit Gs(Runtime* rt);
     ~Gs();
     Gs(const Gs&) = delete;
     Gs& operator=(const Gs&) = delete;
 
-    // Espera o worker terminar tudo o que já foi enfileirado.
+    // Espera as faixas terminarem tudo o que já foi enfileirado.
     void waitIdle();
     bool threaded() const { return worker_->threaded(); }
+    unsigned lanes() const { return worker_->lanes(); }
 
     // ---- Registradores privilegiados (0x1200_0000) --------------------------
     std::uint64_t readPrivileged(std::uint32_t addr, std::uint32_t pc);
@@ -151,11 +157,12 @@ private:
     [[noreturn]] void unsupported(const std::string& what, std::uint32_t pc) const;
     void warnOnce(const std::string& what);
 
-    // Operações enfileiradas (executadas pelo worker, na ordem do GIF).
+    // Operações enfileiradas (executadas pelas faixas, na ordem do GIF).
     // syncConst: a espera de leituras feitas por métodos const. Não muda o estado
     // observável; o único efeito é enfileirar o lote pendente e drená-lo.
     void syncConst() const { const_cast<Gs*>(this)->waitIdle(); }
-    void submit(GsWorker::Task task);
+    // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
+    void submit(GsWorker::Op op);
     void flushHost();
     void hostWord(std::uint64_t data);
     void copyLocal(const LocalCopy& c);
@@ -164,6 +171,7 @@ private:
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
     void setupEnv(DrawEnv& e, std::uint32_t pc);
+    void rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2);
     void drawPoint(const DrawEnv& e, const Vertex& v);
     void drawLine(const DrawEnv& e, const Vertex& a, const Vertex& b);
     void drawTriangle(const DrawEnv& e, const Vertex& a, const Vertex& b, const Vertex& c);
@@ -173,11 +181,13 @@ private:
     std::uint32_t sampleTexture(const DrawEnv& e, float u, float v, float lod) const;
     std::uint32_t fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const;
 
-    // Thread do GS. Tudo que está abaixo de "worker" é dele: o EE só mexe nesses
-    // campos depois de waitIdle() ou dentro de uma operação enfileirada.
+    // Faixas do GS. Tudo que está abaixo de "faixas" é delas: o EE só mexe nesses
+    // campos depois de waitIdle() ou dentro de uma operação global (barreira).
     static constexpr std::size_t kHostBatch = 4096;  // palavras HOST→LOCAL por tarefa
     std::unique_ptr<GsWorker> worker_;
     std::vector<std::uint64_t> hostBatch_;  // palavras HOST→LOCAL ainda não enfileiradas
+    // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
+    PendingAccess pending_;
 
     Runtime* rt_;
     Vram vram_;  // worker
@@ -228,7 +238,12 @@ private:
 
     std::uint64_t drawCount_ = 0;
     std::uint64_t coveredTotal_ = 0;  // pixels da conta analítica, sem reset
-    std::uint64_t shaded_ = 0;        // pixels escritos pelo rasterizador (worker)
+    // Pixels escritos pelo rasterizador, por faixa (cada faixa soma a sua; em
+    // linhas separadas da cache para não disputar a mesma linha).
+    struct alignas(64) LaneCount {
+        std::uint64_t shaded = 0;
+    };
+    std::array<LaneCount, kMaxLanes> laneShaded_{};
     std::set<std::string> warned_;
 };
 

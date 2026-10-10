@@ -20,6 +20,7 @@
 
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/gs/gs_bands.h"
 #include "anyps2/runtime/gs/gs_coverage.h"
 #include "anyps2/runtime/host_profile.h"
 
@@ -49,6 +50,10 @@ struct Gs::DrawEnv {
     unsigned type = 0;
     bool iip = false, tme = false, fge = false, abe = false, fst = false;
     unsigned ctxt = 0;
+    // Faixa que executa o desenho: só sombreia as linhas que lhe cabem (gs_bands.h).
+    // O produtor deixa 0 de 1 (todas as linhas); cada faixa põe a sua antes de desenhar.
+    unsigned lane = 0, lanes = 1;
+    bool owns(int y) const { return rowInLane(lane, lanes, y); }
     // Frame/Z
     std::uint32_t fbp = 0, fbw = 0, fpsm = 0, fbmsk = 0;
     std::uint32_t zbp = 0, zpsm = 0;
@@ -203,26 +208,106 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
     }
 }
 
+void Gs::rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2) {
+    switch (e.type) {
+        case 0: drawPoint(e, v0); break;
+        case 1: case 2: drawLine(e, v0, v1); break;
+        case 3: case 4: case 5: drawTriangle(e, v0, v1, v2); break;
+        case 6: drawSprite(e, v0, v1); break;
+        default: break;
+    }
+}
+
+// Regra de ordem entre desenhos (gs_bands.h): um desenho só entra nas faixas
+// junto com os pendentes se não colide com eles na VRAM. Para isso o produtor
+// anota as páginas que o desenho escreve (FRAME, e ZBUF quando há escrita de Z)
+// e lê (texturas, níveis de mipmap incluídos); o que cai em cima de algo
+// pendente vira uma barreira. Se a textura cai em cima do próprio FRAME/ZBUF
+// do desenho, o desenho inteiro roda como operação global, numa faixa só.
+// CLUT e transferências já são barreiras (submit), então não entram aqui.
 void Gs::draw(std::uint32_t pc) {
     // Só o trabalho do EE entra no perfil: o HostProfile não é seguro entre
-    // threads, e o rasterizador roda no worker.
+    // threads, e o rasterizador roda nas faixas.
     const HostProfile::Scope prof(HostProfile::Gs);
     DrawEnv e;
     setupEnv(e, pc);
     ++drawCount_;
     // O tempo do GS usa a contagem analítica, feita aqui na ordem do programa
-    // (o worker ainda não desenhou nada disto).
+    // (as faixas ainda não desenharam nada disto).
     const DrawWindow w{e.scax0, e.scax1, e.scay0, e.scay1, e.scanmsk};
     const Vertex v0 = queue_[0], v1 = queue_[1], v2 = queue_[2];
     const std::uint64_t covered = coveredPixels(w, e.type, v0, v1, v2);
     pixels_ += covered;
     coveredTotal_ += covered;
-    switch (e.type) {
-        case 0: submit([this, e, v0] { drawPoint(e, v0); }); break;
-        case 1: case 2: submit([this, e, v0, v1] { drawLine(e, v0, v1); }); break;
-        case 3: case 4: case 5: submit([this, e, v0, v1, v2] { drawTriangle(e, v0, v1, v2); }); break;
-        case 6: submit([this, e, v0, v1] { drawSprite(e, v0, v1); }); break;
-        default: break;
+    if (e.type > 6) return;  // tipo 7 já foi recusado em vertexKick
+    const RowRange rows = drawRows(w, e.type, v0, v1, v2);
+    if (rows.empty()) return;  // nada cai dentro do SCISSOR: nada a fazer
+
+    // Acessos à VRAM. Escritas de FRAME/ZBUF usam colunas até o SCISSOR; leituras
+    // de textura usam o tamanho da textura (ou tudo, com REGION_CLAMP/REPEAT).
+    const auto rowLo = static_cast<unsigned>(rows.lo), rowHi = static_cast<unsigned>(rows.hi);
+    const auto cols = static_cast<unsigned>(std::max(e.scax1, 0)) + 1;
+    VramAccess writes[2];
+    unsigned nw = 0;
+    VramAccess reads[8];
+    unsigned nr = 0;
+    writes[nw++] = VramAccess{pageSpan(e.fpsm, e.fbp / 32, e.fbw, rowLo, rowHi, cols), true, 0, e.fbp / 32,
+                              e.fbw, e.fpsm};
+    if (!e.zmsk) {
+        writes[nw++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), true, 1, e.zbp / 32,
+                                  e.fbw, e.zpsm};
+    } else if (e.zte) {
+        reads[nr++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), false, 1, e.zbp / 32,
+                                 e.fbw, e.zpsm};
+    }
+    if (e.tme) {
+        for (unsigned l = 0; l <= e.mxl; ++l) {
+            const unsigned wl = std::max(1u, (1u << e.tw) >> l), hl = std::max(1u, (1u << e.th) >> l);
+            const unsigned colsU = e.wms >= 2 ? 1024u : wl;
+            const unsigned rowsV = e.wmt >= 2 ? 1024u : hl;
+            reads[nr++] = VramAccess{pageSpan(e.tpsm, e.tbp[l] / 32, e.tbw[l], 0, rowsV - 1, colsU), false, 2,
+                                     e.tbp[l] / 32, e.tbw[l], e.tpsm};
+        }
+    }
+
+    // Colisão dentro do próprio desenho: textura sobre o próprio FRAME/ZBUF, ou
+    // FRAME e ZBUF sobrepostos. Pixels de faixas diferentes se leriam ou se
+    // escreveriam na ordem errada, então o desenho vai sozinho.
+    bool selfClash = false;
+    for (unsigned i = 0; i < nw; ++i) {
+        for (unsigned j = 0; j < nr; ++j) selfClash = selfClash || clashes(reads[j], writes[i]);
+        for (unsigned j = i + 1; j < nw; ++j) selfClash = selfClash || clashes(writes[i], writes[j]);
+    }
+    if (selfClash) {
+        submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); });
+        return;
+    }
+
+    // Colisão com o que está pendente: barreira antes do desenho (as faixas
+    // terminam o que já têm). Depois, o desenho entra como pendente.
+    flushHost();  // HOST→LOCAL anterior precisa vir antes deste desenho
+    bool conflict = pending_.full();
+    for (unsigned i = 0; i < nw && !conflict; ++i) conflict = pending_.clashesWith(writes[i]);
+    for (unsigned j = 0; j < nr && !conflict; ++j) conflict = pending_.clashesWith(reads[j]);
+    if (conflict) {
+        pending_.clear();
+        worker_->barrier([] {});
+    }
+    for (unsigned i = 0; i < nw; ++i) pending_.add(writes[i]);
+    for (unsigned j = 0; j < nr; ++j) pending_.add(reads[j]);
+
+    // Uma tarefa só para as faixas que têm linhas do desenho; cada uma recebe o
+    // seu índice e sombreia só as suas linhas.
+    const std::uint32_t mask = laneMask(rows.lo, rows.hi, worker_->lanes());
+    const auto task = std::make_shared<const GsWorker::Task>(
+        [this, e, v0, v1, v2](unsigned lane, unsigned lanes) {
+            DrawEnv d = e;
+            d.lane = lane;
+            d.lanes = lanes;
+            rasterize(d, v0, v1, v2);
+        });
+    for (unsigned lane = 0; lane < worker_->lanes(); ++lane) {
+        if (mask & (1u << lane)) worker_->push(lane, task);
     }
 }
 
@@ -333,10 +418,11 @@ std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) c
 // ---------------------------------------------------------------------------
 
 void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
+    if (!e.owns(y)) return;  // linha de outra faixa
     if (x < e.scax0 || x > e.scax1 || y < e.scay0 || y > e.scay1) return;
     if ((e.scanmsk == 2 && (y & 1)) || (e.scanmsk == 3 && !(y & 1))) return;
     // Mesmo ponto em que gs_coverage conta: confere a conta analítica.
-    ++shaded_;
+    ++laneShaded_[e.lane].shaded;
     int r = f.r, g = f.g, b = f.b, a = f.a;
 
     if (e.tme) {
@@ -603,7 +689,11 @@ void Gs::drawTriangle(const DrawEnv& e, const Vertex& v0, const Vertex& v1, cons
     const std::int64_t dx0 = t.dx[0], dx1 = t.dx[1], dx2 = t.dx[2];
     const std::int64_t dy0 = t.dy[0], dy1 = t.dy[1], dy2 = t.dy[2];
 
+    // Uma linha que não é da faixa pula só o sombreamento: os acumuladores de
+    // aresta (row0..2) andam no cabeçalho do laço, então as linhas seguintes
+    // ficam iguais às do desenho inteiro.
     for (int py = minY; py <= maxY; ++py, row0 += dy0, row1 += dy1, row2 += dy2) {
+        if (!e.owns(py)) continue;
         std::int64_t w0 = row0, w1 = row1, w2 = row2;
         for (int px = minX; px <= maxX; ++px, w0 += dx0, w1 += dx1, w2 += dx2) {
             if (w0 + bias0 < 0 || w1 + bias1 < 0 || w2 + bias2 < 0) continue;
@@ -661,6 +751,7 @@ void Gs::drawSprite(const DrawEnv& e, const Vertex& v0, const Vertex& v1) {
     f.fog = v1.fog;
     f.q = static_cast<float>(a1.q);
     for (int py = minY; py <= maxY; ++py) {
+        if (!e.owns(py)) continue;
         const double ty = spanY != 0 ? (py * 16.0 - v0.y) / spanY : 0.0;
         const auto rowT = static_cast<float>(a0.t + (a1.t - a0.t) * ty);
         const auto rowV = static_cast<float>(a0.v + (a1.v - a0.v) * ty);

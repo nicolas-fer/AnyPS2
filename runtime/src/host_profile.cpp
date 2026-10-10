@@ -49,9 +49,13 @@ std::string HostProfile::report() {
                       static_cast<double>(ns_[i]) / 1e9, kNames[i]);
         s += line;
     }
-    std::snprintf(line, sizeof line, "[perfil] worker do GS ocupado: %.2f s (%.0f%% do tempo do host)\n",
-                  static_cast<double>(workerNs_.load()) / 1e9,
-                  total ? 100.0 * static_cast<double>(workerNs_.load()) / static_cast<double>(total) : 0.0);
+    const unsigned lanes = workerLanes_.load();
+    const double busy = static_cast<double>(workerNs_.load());
+    std::snprintf(line, sizeof line,
+                  "[perfil] faixas do GS ocupadas: %.2f s somados (%.0f%% do tempo do host); "
+                  "média por faixa %.0f%% (%u faixas)\n",
+                  busy / 1e9, total ? 100.0 * busy / static_cast<double>(total) : 0.0,
+                  total ? 100.0 * busy / (static_cast<double>(lanes) * static_cast<double>(total)) : 0.0, lanes);
     s += line;
     return s;
 }
@@ -75,8 +79,9 @@ std::string HostProfile::interval(std::uint64_t vblank) {
     }
     const std::int64_t worker = workerNs_.load() - workerMark_;
     workerMark_ += worker;
-    std::snprintf(line, sizeof line, "; worker GS %.0f%%",
-                  total ? 100.0 * static_cast<double>(worker) / static_cast<double>(total) : 0.0);
+    const double lanes = static_cast<double>(workerLanes_.load());
+    std::snprintf(line, sizeof line, "; GS por faixa %.0f%%",
+                  total ? 100.0 * static_cast<double>(worker) / (lanes * static_cast<double>(total)) : 0.0);
     s += line;
     markVblank_ = vblank;
     return s + "\n";
