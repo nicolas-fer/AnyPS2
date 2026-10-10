@@ -6,7 +6,12 @@
 //    caixa (depois do SCISSOR) contém um ponto da sonda, grava o estado do
 //    desenho e a cor e o Z de cada ponto antes e depois dele;
 //  * log de desenhos (ANYPS2_GS_DRAWLOG): uma linha por desenho do intervalo,
-//    sem ler a VRAM.
+//    sem ler a VRAM;
+//  * despejo de texturas (ANYPS2_GS_TEXDUMP e _DRAWS): nos desenhos listados,
+//    grava a textura do nível 0 (índices e RGBA final) e a CLUT em uso;
+//  * log de escritas na VRAM (ANYPS2_GS_VRAMLOG): toda transferência, cópia,
+//    desenho (FRAME/ZBUF) e carga de CLUT que toca as faixas de blocos escolhidas,
+//    com o caminho do GIF de onde veio e o contador de XGKICK do VU1.
 // Sem as variáveis o Gs não cria o rastreador (trace_ é nulo) e o desenho não
 // paga nada além de um teste de ponteiro.
 
@@ -37,6 +42,16 @@ struct GsTraceConfig {
     std::string probeOut = "gs_probe.txt";
     std::string drawLog;  // vazio: sem log de desenhos
     std::uint64_t drawFrom = 0, drawTo = ~std::uint64_t{0};
+    // Despejo de texturas: arquivo de texto (e um PNG por desenho, ao lado, com o
+    // nome do arquivo sem a extensão + "_desenhoN.png") e os desenhos pedidos, como
+    // intervalos inclusivos de drawCount (um número n é o intervalo n..n).
+    std::string texDump;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> texDumpDraws;
+    // Log de escritas na VRAM: arquivo, faixas de blocos (inclusivas, em blocos de
+    // 256 bytes como TBP/DBP/CBP) e intervalo de VBlanks.
+    std::string vramLog;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> vramBlocks;
+    std::uint64_t vramFrom = 0, vramTo = ~std::uint64_t{0};
 };
 
 // Registradores que definem um desenho, copiados no momento em que ele é feito.
@@ -58,14 +73,18 @@ class GsTrace {
 public:
     static constexpr std::size_t kMaxPoints = 8;
 
-    // Lê ANYPS2_GS_PROBE, _FROM, _TO, _FBP, _OUT e ANYPS2_GS_DRAWLOG, _FROM, _TO.
-    // Devolve nulo se nenhuma das duas saídas está ligada (ou não pôde abrir os arquivos).
+    // Lê ANYPS2_GS_PROBE (_FROM, _TO, _FBP, _OUT), ANYPS2_GS_DRAWLOG (_FROM, _TO),
+    // ANYPS2_GS_TEXDUMP (_DRAWS) e ANYPS2_GS_VRAMLOG (_BLOCKS, _FROM, _TO).
+    // Devolve nulo se nenhuma saída está ligada (ou não pôde abrir os arquivos).
     static std::unique_ptr<GsTrace> fromEnv();
 
     // Troca a configuração e abre (zerando) os arquivos de saída. Sem pontos nem
     // log, o rastreador fica desligado.
     void configure(const GsTraceConfig& cfg);
-    bool active() const { return !points_.empty() || log_.is_open(); }
+    bool active() const {
+        return !points_.empty() || log_.is_open() || texDump_.is_open() || vramLog_.is_open();
+    }
+    bool vramLogActive() const { return vramLog_.is_open(); }
 
     // Ganchos de Gs::draw. beginDraw devolve true se algum ponto da sonda cai
     // no desenho: então endDraw tem de ser chamado depois de o desenho ser
@@ -73,6 +92,13 @@ public:
     bool beginDraw(Gs& gs, std::uint32_t pc, unsigned type, const DrawWindow& w, const Vertex& v0,
                    const Vertex& v1, const Vertex& v2);
     void endDraw(Gs& gs);
+
+    // Ganchos do log de escritas na VRAM (o produtor chama na ordem do programa,
+    // por isso as linhas saem na ordem em que o GS recebeu os dados).
+    void vramHostStart(const Gs& gs, const Gs::Transfer& t, std::uint32_t pc);
+    void vramHostWord(const Gs& gs);
+    void vramLocalCopy(const Gs& gs, const Gs::LocalCopy& c, std::uint32_t pc);
+    void vramClutLoad(const Gs& gs, std::uint64_t tex0, std::uint32_t pc);
 
 private:
     struct Hit {
@@ -91,6 +117,11 @@ private:
     };
 
     static DrawState capture(const Gs& gs);
+    void dumpTexture(Gs& gs, std::uint32_t pc, const DrawState& s);
+    void vramDraw(const Gs& gs, std::uint32_t pc, const DrawState& s, unsigned type, const DrawWindow& w,
+                  const Vertex& v0, const Vertex& v1, const Vertex& v2);
+    bool blocksHit(std::uint32_t first, std::uint32_t last) const;
+    std::string vramPrefix(const Gs& gs, std::uint32_t pc) const;
     void writeLogLine(std::uint64_t vblank, std::uint64_t draw, std::uint32_t pc, unsigned type,
                       const DrawState& s);
     void writeProbe();
@@ -102,6 +133,15 @@ private:
     std::uint64_t drawFrom_ = 0, drawTo_ = 0;
     std::ofstream probe_;
     std::ofstream log_;
+    std::ofstream texDump_;
+    std::string texDumpStem_;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> texDumpDraws_;
+    std::ofstream vramLog_;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> vramBlocks_;
+    std::uint64_t vramFrom_ = 0, vramTo_ = 0;
+    // Transferência HOST→LOCAL registrada que ainda espera dados (palavras de 64 bits).
+    std::uint64_t hostLeft_ = 0;
+    std::string hostEnd_;
     Pending pending_;
 };
 
