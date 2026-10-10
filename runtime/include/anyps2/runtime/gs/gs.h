@@ -240,8 +240,10 @@ private:
     std::uint64_t coveredTotal_ = 0;  // pixels da conta analítica, sem reset
     // Pixels escritos pelo rasterizador, por faixa (cada faixa soma a sua; em
     // linhas separadas da cache para não disputar a mesma linha).
-    struct alignas(64) LaneCount {
+    // (preenchimento explícito: alignas num membro gera o aviso C4324 no MSVC)
+    struct LaneCount {
         std::uint64_t shaded = 0;
+        std::uint64_t pad[7] = {};
     };
     std::array<LaneCount, kMaxLanes> laneShaded_{};
     std::set<std::string> warned_;

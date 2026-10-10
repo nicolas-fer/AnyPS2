@@ -273,7 +273,16 @@ void Gs::draw(std::uint32_t pc) {
     // Colisão dentro do próprio desenho: textura sobre o próprio FRAME/ZBUF, ou
     // FRAME e ZBUF sobrepostos. Pixels de faixas diferentes se leriam ou se
     // escreveriam na ordem errada, então o desenho vai sozinho.
-    bool selfClash = false;
+    // Também vai sozinho o desenho cujo pixel→endereço não é injetivo: com x além
+    // da largura do buffer (FBW·64; FBW = 0) o endereço dá a volta para as linhas
+    // de baixo — (64, 0) e (0, 32) caem no mesmo lugar com FBW = 1 — e o mesmo
+    // acontece se o buffer passa do fim da VRAM. Pixels de linhas (e faixas)
+    // diferentes escreveriam o mesmo endereço sem ordem entre si.
+    constexpr std::uint32_t kPages = Vram::kSize / 8192;
+    bool selfClash = e.fbw == 0 || cols > e.fbw * 64;
+    for (unsigned i = 0; i < nw; ++i) {
+        selfClash = selfClash || (writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
+    }
     for (unsigned i = 0; i < nw; ++i) {
         for (unsigned j = 0; j < nr; ++j) selfClash = selfClash || clashes(reads[j], writes[i]);
         for (unsigned j = i + 1; j < nw; ++j) selfClash = selfClash || clashes(writes[i], writes[j]);

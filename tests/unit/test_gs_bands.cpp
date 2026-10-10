@@ -99,6 +99,10 @@ struct Render {
 };
 
 Render capture(Gs& g) {
+    // As renderizações mudam o ambiente do processo; as suítes seguintes têm de
+    // ver o padrão.
+    setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_THREADS", "");
     Render r;
     const std::uint8_t* d = g.vram().data();
     r.vram.assign(d, d + Vram::kSize);
@@ -388,6 +392,46 @@ TEST_CASE(gs_bands, random_draws_are_identical_for_any_lane_count) {
         CHECK_EQ(got.shaded, got.covered);
         CHECK_EQ(got.covered, ref.covered);
         CHECK(got.vram == ref.vram);
+    }
+}
+
+// FRAME mais estreito que o SCISSOR: com FBW = 1 o pixel (64 + x, y) cai no
+// mesmo endereço que (x, y + 32), que é de outra faixa. A ordem das escritas só
+// é a do programa se o desenho não for dividido entre as faixas.
+Render renderAliased(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    g.writeRegister(FRAME_1, frameReg(0, 1, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);  // ZMSK
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 63), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    for (unsigned i = 0; i < 6; ++i) {
+        // Gouraud: cada pixel tem uma cor diferente, então a ordem aparece.
+        g.writeRegister(PRIM, prim(3, true), 0);
+        vertex(g, 0, i, rgbaq(40 * i, 0, 200, 0));
+        vertex(g, 127, 2 + i, rgbaq(0, 250 - 40 * i, 0, 0));
+        vertex(g, 30 + 10 * i, 63, rgbaq(9 * i, 99, 199, 0));
+        g.writeRegister(PRIM, prim(6), 0);
+        vertex(g, 70 + i, 1 + i, rgbaq(255, 7 * i, 0, 0));
+        vertex(g, 120, 30 - i, rgbaq(255, 7 * i, 0, 0));
+        g.writeRegister(PRIM, prim(6), 0);
+        vertex(g, 5 + i, 33 + i, rgbaq(0, 255, 7 * i, 0));
+        vertex(g, 60, 62 - i, rgbaq(0, 255, 7 * i, 0));
+    }
+    return capture(g);
+}
+
+TEST_CASE(gs_bands, frame_narrower_than_scissor_is_identical) {
+    const Render sync = renderAliased(false, 1);
+    // Corrida depende do tempo das threads: repete para ela ter chance de aparecer.
+    for (unsigned rep = 0; rep < 20; ++rep) {
+        for (unsigned lanes = 2; lanes <= 4; ++lanes) {
+            const Render r = renderAliased(true, lanes);
+            CHECK(r.vram == sync.vram);
+        }
     }
 }
 

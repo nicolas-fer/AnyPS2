@@ -29,8 +29,7 @@ bool threadedFromEnv() {
     return !(v && std::strcmp(v, "0") == 0);
 }
 
-// ANYPS2_GS_THREADS=N escolhe as faixas (1 = uma thread, como antes da divisão
-// em faixas). Sem a variável: min(4, núcleos − 2), no mínimo 2, para deixar
+// ANYPS2_GS_THREADS=N escolhe as faixas (1 = todas as linhas numa faixa só, com um único worker). Sem a variável: min(4, núcleos − 2), no mínimo 2, para deixar
 // núcleos para o EE e o VU1.
 unsigned lanesFromEnv() {
     const char* v = std::getenv("ANYPS2_GS_THREADS");
