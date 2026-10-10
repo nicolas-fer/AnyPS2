@@ -1,6 +1,11 @@
 #include "anyps2/runtime/host_profile.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <string>
+#include <vector>
+
+#include "anyps2/runtime/gs/gs.h"
 
 namespace anyps2::rt {
 
@@ -13,6 +18,7 @@ void HostProfile::enable() {
     markVblank_ = 0;
     workerNs_ = 0;
     workerMark_ = 0;
+    bandsMarkVblank_ = 0;
 }
 
 void HostProfile::charge(Clock::time_point now) {
@@ -85,6 +91,102 @@ std::string HostProfile::interval(std::uint64_t vblank) {
     s += line;
     markVblank_ = vblank;
     return s + "\n";
+}
+
+namespace {
+
+using gs::BandStats;
+
+// Marca do último relatório de trecho (cópia dos contadores acumulados).
+BandStats& bandsMark() {
+    static BandStats mark;
+    return mark;
+}
+
+std::uint64_t diff(std::uint64_t cur, std::uint64_t prev) {
+    return cur >= prev ? cur - prev : 0;
+}
+
+// Os `max` pares mais frequentes de `cur` no trecho (cur − prev), "FBP→TBP0 xN".
+std::string topPairs(const BandStats::PairTable& cur, const BandStats::PairTable& prev, double per, unsigned max) {
+    std::vector<BandStats::Pair> v;
+    for (std::size_t i = 0; i < cur.used; ++i) {
+        const std::uint64_t n = diff(cur.items[i].n, prev.count(cur.items[i].fbp, cur.items[i].tbp));
+        if (n) v.push_back(BandStats::Pair{cur.items[i].fbp, cur.items[i].tbp, n});
+    }
+    std::sort(v.begin(), v.end(), [](const BandStats::Pair& a, const BandStats::Pair& b) { return a.n > b.n; });
+    if (v.empty()) return " -";
+    std::string s;
+    char buf[96];
+    for (std::size_t i = 0; i < v.size() && i < max; ++i) {
+        std::snprintf(buf, sizeof buf, " %X>%X x%.1f", v[i].fbp, v[i].tbp, static_cast<double>(v[i].n) / per);
+        s += buf;
+    }
+    return s;
+}
+
+// `per`: divisor das contagens (VBlanks do trecho; 1 no total).
+std::string formatBands(const BandStats& cur, const BandStats& prev, double per, const char* unit) {
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    char buf[160];
+    std::string s = "[perfil] faixas";
+    s += unit;
+    s += ":";
+    const std::uint64_t draws = diff(cur.bandDraws, prev.bandDraws);
+    std::snprintf(buf, sizeof buf, " desenhos nas faixas %.1f (%.2f faixas/desenho);", d(cur.bandDraws, prev.bandDraws),
+                  draws ? static_cast<double>(diff(cur.lanesTouched, prev.lanesTouched)) / static_cast<double>(draws)
+                        : 0.0);
+    s += buf;
+    std::snprintf(buf, sizeof buf, " sozinhos: volta %.1f, textura no FRAME/ZBUF %.1f, FRAME×ZBUF %.1f;",
+                  d(cur.self[0], prev.self[0]), d(cur.self[1], prev.self[1]), d(cur.self[2], prev.self[2]));
+    s += buf;
+    std::snprintf(buf, sizeof buf, " barreiras de conflito: fila cheia %.1f, escrita %.1f, textura %.1f;",
+                  d(cur.conflict[0], prev.conflict[0]), d(cur.conflict[1], prev.conflict[1]),
+                  d(cur.conflict[2], prev.conflict[2]));
+    s += buf;
+    std::snprintf(buf, sizeof buf,
+                  " barreiras de submit: HOST início %.1f, HOST fim %.1f, LOCAL→LOCAL %.1f, CLUT %.1f, reset %.1f, "
+                  "desenho %.1f; lotes HOST→LOCAL %.1f;",
+                  d(cur.submit[0], prev.submit[0]), d(cur.submit[1], prev.submit[1]), d(cur.submit[2], prev.submit[2]),
+                  d(cur.submit[3], prev.submit[3]), d(cur.submit[4], prev.submit[4]), d(cur.submit[5], prev.submit[5]),
+                  d(cur.hostBatches, prev.hostBatches));
+    s += buf;
+    static const char* kWait[BandStats::WaitCount] = {"vídeo", "vram()", "LOCAL→HOST", "SIGNAL", "FINISH", "outros"};
+    s += " esperas do EE (n, ms):";
+    for (unsigned i = 0; i < BandStats::WaitCount; ++i) {
+        std::snprintf(buf, sizeof buf, " %s %.1f/%.2f%s", kWait[i], d(cur.waits[i], prev.waits[i]),
+                      static_cast<double>(cur.waitNs[i] - prev.waitNs[i]) / 1e6 / per,
+                      i + 1 < BandStats::WaitCount ? "," : ";");
+        s += buf;
+    }
+    s += " FBP>TBP0 sozinhos por textura:" + topPairs(cur.selfPairs, prev.selfPairs, per, 5) + ";";
+    s += " barreiras por textura:" + topPairs(cur.conflictPairs, prev.conflictPairs, per, 5);
+    if (cur.selfPairs.lost || cur.conflictPairs.lost) {
+        std::snprintf(buf, sizeof buf, " (pares fora da tabela: %llu, %llu)",
+                      static_cast<unsigned long long>(cur.selfPairs.lost),
+                      static_cast<unsigned long long>(cur.conflictPairs.lost));
+        s += buf;
+    }
+    return s + "\n";
+}
+
+}  // namespace
+
+std::string HostProfile::bandsInterval(const gs::BandStats& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    const std::uint64_t n = vblank > bandsMarkVblank_ ? vblank - bandsMarkVblank_ : 1;
+    BandStats& mark = bandsMark();
+    const std::string s = formatBands(total, mark, static_cast<double>(n), " (por VBlank)");
+    mark = total;
+    bandsMarkVblank_ = vblank;
+    return s;
+}
+
+std::string HostProfile::bandsReport(const gs::BandStats& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    char unit[48];
+    std::snprintf(unit, sizeof unit, " (total, %llu VBlanks)", static_cast<unsigned long long>(vblank));
+    return formatBands(total, BandStats{}, 1.0, unit);
 }
 
 }  // namespace anyps2::rt

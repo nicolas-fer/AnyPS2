@@ -1,6 +1,7 @@
 #include "anyps2/runtime/gs/gs.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -101,21 +102,31 @@ GsTrace& Gs::trace() {
     return *trace_;
 }
 
-void Gs::waitIdle() {
+void Gs::waitIdle(BandStats::WaitReason why) {
     flushHost();
     if (!worker_->threaded()) return;
+    // Conta as esperas do EE pelas faixas (no modo síncrono não há espera).
+    ++bandStats_.waits[why];
     const HostProfile::Scope prof(HostProfile::GsWait);
+    if (!HostProfile::enabled()) {
+        worker_->drain();
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
     worker_->drain();
+    bandStats_.waitNs[why] +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
 std::uint64_t Gs::pixelsShaded() const {
-    syncConst();
+    syncConst(BandStats::WaitOther);
     std::uint64_t n = 0;
     for (const LaneCount& c : laneShaded_) n += c.shaded;
     return n;
 }
 
-void Gs::submit(GsWorker::Op op) {
+void Gs::submit(GsWorker::Op op, BandStats::SubmitKind kind) {
+    ++bandStats_.submit[kind];
     // Dados HOST→LOCAL acumulados vêm antes desta operação na ordem do GIF.
     flushHost();
     // A operação global espera as faixas, então nada pendente sobrevive a ela.
@@ -126,6 +137,7 @@ void Gs::submit(GsWorker::Op op) {
 void Gs::flushHost() {
     if (hostBatch_.empty()) return;
     // Escrita na VRAM de largura desconhecida: é uma barreira (ver submit).
+    ++bandStats_.hostBatches;
     pending_.clear();
     worker_->barrier([this, words = std::move(hostBatch_)] {
         for (const std::uint64_t d : words) hostWord(d);
@@ -237,7 +249,7 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 // Os desenhos já enfileirados terminam antes (no hardware e na
                 // versão síncrona eles já tinham sido feitos); só o estado de
                 // transferência é zerado, pela própria fila, na mesma ordem.
-                submit([this] { xfer_ = {}; });
+                submit([this] { xfer_ = {}; }, BandStats::SubmitReset);
                 waitIdle();
                 queued_ = 0;
                 csr_ &= kCsrField;
@@ -354,7 +366,7 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             const std::uint64_t mask = v >> 32;
             siglblid_ = (siglblid_ & ~mask) | (v & mask & 0xFFFFFFFFull);
             // O sinal vale depois de todos os desenhos anteriores.
-            waitIdle();
+            waitIdle(BandStats::WaitSignal);
             raiseEvent(kSignal);
             return;
         }
@@ -362,7 +374,7 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             // Com relógio real o FINISH só aparece quando o trabalho do GS acabou
             // de fato, então quem o recebe já pode ler a memória. Com o relógio
             // virtual o tempo vem da conta analítica e o worker segue sem espera.
-            if (realTime_) waitIdle();
+            if (realTime_) waitIdle(BandStats::WaitFinish);
             if (!hsyncNow_) {
                 raiseEvent(kFinish);
                 return;
@@ -418,7 +430,7 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
     }
     if (csm2 && cpsm == PSMCT32) unsupported("CLUT CSM2 com CPSM=PSMCT32 (proibido pelo hardware)", pc);
     // TEXCLUT é lido agora, na ordem do programa; a carga em si é do worker.
-    submit([this, tex0, texclut = regs_[TEXCLUT]] { loadClutCells(tex0, texclut); });
+    submit([this, tex0, texclut = regs_[TEXCLUT]] { loadClutCells(tex0, texclut); }, BandStats::SubmitClut);
 }
 
 void Gs::loadClutCells(std::uint64_t tex0, std::uint64_t texclut) {
@@ -512,7 +524,7 @@ void Gs::startTransfer(std::uint32_t pc) {
             if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
             if (t.w == 0 || t.h == 0) t.active = false;
             if (trace_ && t.active) trace_->vramHostStart(*this, t, pc);
-            submit([this, t] { xfer_ = t; });
+            submit([this, t] { xfer_ = t; }, BandStats::SubmitHostStart);
             return;
         }
         case 1:
@@ -522,7 +534,7 @@ void Gs::startTransfer(std::uint32_t pc) {
             localToLocal(pc);
             return;
         default:
-            submit([this] { xfer_.active = false; });
+            submit([this] { xfer_.active = false; }, BandStats::SubmitHostEnd);
             return;
     }
 }
@@ -591,7 +603,7 @@ void Gs::localToLocal(std::uint32_t pc) {
                     pc);
     }
     if (trace_) trace_->vramLocalCopy(*this, c, pc);
-    submit([this, c] { copyLocal(c); });
+    submit([this, c] { copyLocal(c); }, BandStats::SubmitLocal);
 }
 
 void Gs::copyLocal(const LocalCopy& c) {
@@ -607,7 +619,7 @@ void Gs::copyLocal(const LocalCopy& c) {
 
 void Gs::localToHost(std::uint32_t pc) {
     // O EE lê a VRAM agora: tudo o que foi desenhado antes tem de estar pronto.
-    waitIdle();
+    waitIdle(BandStats::WaitDownload);
     const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
     const auto sbp = static_cast<std::uint32_t>(bits(buf, 0, 14));
     const auto sbw = static_cast<std::uint32_t>(bits(buf, 16, 6));
@@ -659,7 +671,7 @@ bool Gs::displayEnabled() const {
 
 Frame Gs::display() const {
     // A saída de vídeo lê a VRAM: os desenhos feitos até aqui já estão prontos.
-    syncConst();
+    syncConst(BandStats::WaitDisplay);
     struct Circuit {
         bool on = false;
         std::uint32_t fbp, fbw, psm, dbx, dby;

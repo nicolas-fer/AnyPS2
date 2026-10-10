@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -441,4 +442,187 @@ TEST_CASE(gs_bands, shaded_matches_covered_with_lanes) {
         const Render r = renderRandom(true, lanes, 0x5EED + lanes, 150);
         CHECK_EQ(r.shaded, r.covered);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Contadores de serialização (Gs::bandStats): cada motivo de espera, de desenho
+// solitário e de barreira cai no contador certo.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// GS com 4 faixas e o ambiente padrão restaurado depois (o Gs lê o ambiente só
+// na construção).
+struct StatsGs {
+    std::unique_ptr<Gs> gs;
+    StatsGs() {
+        setEnv("ANYPS2_GS_THREAD", "1");
+        setEnv("ANYPS2_GS_THREADS", "4");
+        gs = std::make_unique<Gs>(nullptr);
+        setEnv("ANYPS2_GS_THREAD", "");
+        setEnv("ANYPS2_GS_THREADS", "");
+        gs->writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+        gs->writeRegister(XYOFFSET_1, 0, 0);
+        gs->writeRegister(PRMODECONT, 1, 0);
+        gs->writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+        gs->writeRegister(ZBUF_1, 1ull << 32, 0);  // ZMSK: sem escrita de Z
+        gs->writeRegister(TEST_1, 0, 0);
+    }
+};
+
+void sprite(Gs& g, unsigned x0, unsigned y0, unsigned x1, unsigned y1, bool tme = false) {
+    g.writeRegister(PRIM, prim(6, false, tme, false, tme), 0);
+    vertex(g, x0, y0, rgbaq(200, 100, 50, 0x80), 0, uv(0, 0));
+    vertex(g, x1, y1, rgbaq(200, 100, 50, 0x80), 0, uv(x1 - x0, y1 - y0));
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, stats_count_draws_and_lanes) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    sprite(g, 0, 0, 100, 63);  // 4 blocos de 16 linhas: as 4 faixas
+    sprite(g, 0, 0, 20, 10);   // um bloco só: 1 faixa
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.bandDraws, 2u);
+    CHECK_EQ(s.lanesTouched, 5u);
+    CHECK_EQ(s.self[BandStats::SelfWrap] + s.self[BandStats::SelfTexture] + s.self[BandStats::SelfFrameZ], 0u);
+    CHECK_EQ(s.conflict[BandStats::ConflictFull] + s.conflict[BandStats::ConflictWrite] +
+                 s.conflict[BandStats::ConflictTexture],
+             0u);
+}
+
+TEST_CASE(gs_bands, stats_self_wrap) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.writeRegister(FRAME_1, frameReg(0, 0, PSMCT32), 0);  // FBW = 0
+    sprite(g, 0, 0, 20, 20);
+    g.writeRegister(FRAME_1, frameReg(0, 1, PSMCT32), 0);  // largura 64 < 100
+    sprite(g, 0, 0, 100, 20);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.self[BandStats::SelfWrap], 2u);
+    CHECK_EQ(s.submit[BandStats::SubmitDraw], 2u);
+    CHECK_EQ(s.bandDraws, 0u);
+}
+
+TEST_CASE(gs_bands, stats_self_texture_and_pairs) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.writeRegister(FRAME_1, frameReg(3, 1, PSMCT32), 0);
+    g.writeRegister(TEX0_1, tex0(3 * 32 + 4, 1, PSMCT32, 5, 5), 0);  // dentro do próprio FRAME
+    for (unsigned i = 0; i < 3; ++i) sprite(g, 0, 0, 30, 30, true);
+    g.writeRegister(TEX0_1, tex0(3 * 32, 1, PSMCT32, 5, 5), 0);
+    sprite(g, 0, 0, 30, 30, true);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.self[BandStats::SelfTexture], 4u);
+    CHECK_EQ(s.submit[BandStats::SubmitDraw], 4u);
+    CHECK_EQ(s.selfPairs.count(3, 3 * 32 + 4), 3u);
+    CHECK_EQ(s.selfPairs.count(3, 3 * 32), 1u);
+    CHECK_EQ(s.selfPairs.used, 2u);
+}
+
+TEST_CASE(gs_bands, stats_self_frame_z) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.writeRegister(ZBUF_1, 0, 0);                    // ZBP = FBP, com escrita de Z
+    g.writeRegister(TEST_1, (1ull << 16) | (1ull << 17), 0);  // ZTE, ZTST = ALWAYS
+    sprite(g, 0, 0, 20, 20);
+    CHECK_EQ(g.bandStats().self[BandStats::SelfFrameZ], 1u);
+    CHECK_EQ(g.bandStats().bandDraws, 0u);
+}
+
+TEST_CASE(gs_bands, stats_conflict_write) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    sprite(g, 0, 0, 20, 20);
+    g.writeRegister(FRAME_1, frameReg(0, 1, PSMCT32), 0);  // mesmas páginas, outro mapeamento
+    sprite(g, 0, 0, 20, 20);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.conflict[BandStats::ConflictWrite], 1u);
+    CHECK_EQ(s.conflict[BandStats::ConflictTexture], 0u);
+    CHECK_EQ(s.bandDraws, 2u);
+}
+
+TEST_CASE(gs_bands, stats_conflict_texture_and_pairs) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.writeRegister(FRAME_1, frameReg(32, 1, PSMCT32), 0);  // renderiza na textura
+    sprite(g, 0, 0, 63, 63);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(TEX0_1, tex0(32 * 32, 1, PSMCT32, 6, 6), 0);  // e a lê em seguida
+    sprite(g, 0, 0, 63, 63, true);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.conflict[BandStats::ConflictTexture], 1u);
+    CHECK_EQ(s.conflict[BandStats::ConflictWrite], 0u);
+    CHECK_EQ(s.conflictPairs.count(0, 32 * 32), 1u);
+    CHECK_EQ(s.self[BandStats::SelfTexture], 0u);
+}
+
+TEST_CASE(gs_bands, stats_conflict_full) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    // Cada desenho escreve numas páginas diferentes (o intervalo conservador cobre
+    // a página e a seguinte, então vão de 3 em 3): nada colide, mas a lista de
+    // acessos pendentes enche (64) e o desenho seguinte pede a barreira.
+    for (unsigned i = 0; i < 70; ++i) {
+        g.writeRegister(FRAME_1, frameReg(3 * i, 1, PSMCT32), 0);
+        sprite(g, 0, 0, 8, 8);
+    }
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.conflict[BandStats::ConflictFull], 1u);
+    CHECK_EQ(s.conflict[BandStats::ConflictWrite], 0u);
+    CHECK_EQ(s.bandDraws, 70u);
+}
+
+TEST_CASE(gs_bands, stats_submits_and_host_batches) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    hostToLocal(g, 0, 1, PSMCT32, 0, 0, 8, 8, std::vector<std::uint64_t>(32, 0x1234));
+    g.writeRegister(TRXDIR, 3, 0);  // cancela a transferência
+    // LOCAL→LOCAL
+    g.writeRegister(BITBLTBUF, (std::uint64_t{PSMCT32} << 24) | (1ull << 16) | (std::uint64_t{64} << 32) |
+                                   (1ull << 48) | (std::uint64_t{PSMCT32} << 56),
+                    0);
+    g.writeRegister(TRXPOS, 0, 0);
+    g.writeRegister(TRXREG, 8 | (8ull << 32), 0);
+    g.writeRegister(TRXDIR, 2, 0);
+    // CLUT (PSMT8 com CLD = 1)
+    g.writeRegister(TEX0_1, tex0(1280, 2, 0x13, 6, 6, 1536, PSMCT32, 1), 0);
+    // Reset do GS
+    g.writePrivileged(0x12001000u, 1ull << 9, 0);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 1u);
+    CHECK_EQ(s.submit[BandStats::SubmitHostEnd], 1u);
+    CHECK_EQ(s.submit[BandStats::SubmitLocal], 1u);
+    CHECK_EQ(s.submit[BandStats::SubmitClut], 1u);
+    CHECK_EQ(s.submit[BandStats::SubmitReset], 1u);
+    CHECK_EQ(s.submit[BandStats::SubmitDraw], 0u);
+    CHECK(s.hostBatches >= 1u);
+}
+
+TEST_CASE(gs_bands, stats_waits_by_reason) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.setRealTimeClock(true);
+    sprite(g, 0, 0, 20, 20);
+    const BandStats& s = g.bandStats();
+    for (unsigned i = 0; i < BandStats::WaitCount; ++i) CHECK_EQ(s.waits[i], 0u);
+
+    (void)g.display();
+    CHECK_EQ(s.waits[BandStats::WaitDisplay], 1u);
+    (void)g.vram();
+    const Gs& cg = g;
+    (void)cg.vram();
+    CHECK_EQ(s.waits[BandStats::WaitVram], 2u);
+    g.writeRegister(SIGNAL, 0xFFFFFFFF00000001ull, 0);
+    CHECK_EQ(s.waits[BandStats::WaitSignal], 1u);
+    g.writeRegister(FINISH, 0, 0);
+    CHECK_EQ(s.waits[BandStats::WaitFinish], 1u);
+    g.writeRegister(BITBLTBUF, (std::uint64_t{PSMCT32} << 24) | (1ull << 16), 0);
+    g.writeRegister(TRXPOS, 0, 0);
+    g.writeRegister(TRXREG, 8 | (8ull << 32), 0);
+    g.writeRegister(TRXDIR, 1, 0);  // LOCAL→HOST
+    CHECK_EQ(s.waits[BandStats::WaitDownload], 1u);
+    g.waitIdle();
+    CHECK_EQ(s.waits[BandStats::WaitOther], 1u);
 }
