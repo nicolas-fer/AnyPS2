@@ -53,6 +53,90 @@ struct Frame {
     std::vector<std::uint32_t> pixels;
 };
 
+// Contadores de serialização das faixas (diagnóstico do ANYPS2_PROFILE): por que o
+// EE espera o GS e por que os desenhos não se espalham pelas faixas. Inteiros
+// simples, incrementados só pelo produtor (a thread do EE); não mudam o
+// comportamento.
+struct BandStats {
+    // Desenhos que não entram nas faixas, mas rodam sozinhos (operação global).
+    enum SelfReason : unsigned {
+        SelfWrap,     // endereço que dá a volta (FBW = 0, largura > FBW·64, passa do fim da VRAM)
+        SelfTexture,  // textura caindo no próprio FRAME/ZBUF
+        SelfFrameZ,   // FRAME × ZBUF (ou leitura de Z sobre o FRAME)
+        SelfCount
+    };
+    // Barreiras postas antes de um desenho por conflito com acessos pendentes.
+    enum ConflictReason : unsigned {
+        ConflictFull,     // fila de acessos pendentes cheia
+        ConflictWrite,    // escrita × pendente
+        ConflictTexture,  // leitura × pendente (textura, ou Z lido)
+        ConflictCount
+    };
+    // Operações globais (Gs::submit).
+    enum SubmitKind : unsigned {
+        SubmitHostStart,  // início de transferência HOST→LOCAL
+        SubmitHostEnd,    // fim (TRXDIR = 3) de transferência
+        SubmitLocal,      // LOCAL→LOCAL
+        SubmitClut,       // carga de CLUT
+        SubmitReset,      // reset do GS
+        SubmitDraw,       // desenho sozinho
+        SubmitCount
+    };
+    // Esperas do EE pelas faixas (waitIdle).
+    enum WaitReason : unsigned {
+        WaitDisplay,   // saída de vídeo (VBlank/display)
+        WaitVram,      // vram() lida de fora
+        WaitDownload,  // LOCAL→HOST
+        WaitSignal,    // SIGNAL
+        WaitFinish,    // FINISH no relógio real
+        WaitOther,
+        WaitCount
+    };
+    // Os pares (FBP do desenho, TBP0 da textura) mais frequentes: tabela pequena
+    // de tamanho fixo; chaves novas com a tabela cheia só incrementam `lost`.
+    struct Pair {
+        std::uint32_t fbp = 0;  // página do FRAME (FBP)
+        std::uint32_t tbp = 0;  // TBP0 (blocos de 64 palavras)
+        std::uint64_t n = 0;
+    };
+    struct PairTable {
+        static constexpr std::size_t kMax = 48;
+        std::array<Pair, kMax> items{};
+        std::size_t used = 0;
+        std::uint64_t lost = 0;
+        void add(std::uint32_t fbp, std::uint32_t tbp) {
+            for (std::size_t i = 0; i < used; ++i) {
+                if (items[i].fbp == fbp && items[i].tbp == tbp) {
+                    ++items[i].n;
+                    return;
+                }
+            }
+            if (used < kMax) {
+                items[used++] = Pair{fbp, tbp, 1};
+            } else {
+                ++lost;
+            }
+        }
+        std::uint64_t count(std::uint32_t fbp, std::uint32_t tbp) const {
+            for (std::size_t i = 0; i < used; ++i) {
+                if (items[i].fbp == fbp && items[i].tbp == tbp) return items[i].n;
+            }
+            return 0;
+        }
+    };
+
+    std::uint64_t bandDraws = 0;     // desenhos enfileirados nas faixas
+    std::uint64_t lanesTouched = 0;  // soma de faixas tocadas por esses desenhos
+    std::uint64_t self[SelfCount] = {};
+    std::uint64_t conflict[ConflictCount] = {};
+    std::uint64_t submit[SubmitCount] = {};
+    std::uint64_t hostBatches = 0;  // lotes HOST→LOCAL (flushHost)
+    std::uint64_t waits[WaitCount] = {};
+    std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
+    PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
+    PairTable conflictPairs;              // barreiras por leitura de textura
+};
+
 // Graphics Synthesizer em software: estado completo dos registradores,
 // memória local, transferências e um rasterizador de referência que segue as
 // regras do hardware (cobertura top-left, Z de 32 bits inteiro, blending
@@ -74,7 +158,7 @@ public:
     Gs& operator=(const Gs&) = delete;
 
     // Espera as faixas terminarem tudo o que já foi enfileirado.
-    void waitIdle();
+    void waitIdle(BandStats::WaitReason why = BandStats::WaitOther);
     bool threaded() const { return worker_->threaded(); }
     unsigned lanes() const { return worker_->lanes(); }
 
@@ -122,11 +206,11 @@ public:
     // Memória local: espera o worker (quem lê ou escreve aqui vê os pixels já
     // desenhados pelo GIF até este ponto).
     Vram& vram() {
-        waitIdle();
+        waitIdle(BandStats::WaitVram);
         return vram_;
     }
     const Vram& vram() const {
-        syncConst();
+        syncConst(BandStats::WaitVram);
         return vram_;
     }
     std::uint64_t drawCount() const { return drawCount_; }
@@ -145,6 +229,8 @@ public:
     // Têm de ser iguais: é o que o teste gs_coverage confere.
     std::uint64_t pixelsCovered() const { return coveredTotal_; }
     std::uint64_t pixelsShaded() const;
+    // Contadores de serialização das faixas (só o produtor os altera; não espera).
+    const BandStats& bandStats() const { return bandStats_; }
 
 private:
     friend class GsTrace;
@@ -174,9 +260,11 @@ private:
     // Operações enfileiradas (executadas pelas faixas, na ordem do GIF).
     // syncConst: a espera de leituras feitas por métodos const. Não muda o estado
     // observável; o único efeito é enfileirar o lote pendente e drená-lo.
-    void syncConst() const { const_cast<Gs*>(this)->waitIdle(); }
+    void syncConst(BandStats::WaitReason why = BandStats::WaitOther) const {
+        const_cast<Gs*>(this)->waitIdle(why);
+    }
     // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
-    void submit(GsWorker::Op op);
+    void submit(GsWorker::Op op, BandStats::SubmitKind kind);
     void flushHost();
     void hostWord(std::uint64_t data);
     void copyLocal(const LocalCopy& c);
@@ -251,6 +339,7 @@ private:
     std::vector<std::uint64_t> finishDue_;  // FINISH pendentes (ordem crescente)
 
     std::uint64_t drawCount_ = 0;
+    BandStats bandStats_;  // produtor
     std::uint64_t coveredTotal_ = 0;  // pixels da conta analítica, sem reset
     // Pixels escritos pelo rasterizador, por faixa (cada faixa soma a sua; em
     // linhas separadas da cache para não disputar a mesma linha).

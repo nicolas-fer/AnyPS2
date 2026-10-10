@@ -293,16 +293,29 @@ void Gs::draw(std::uint32_t pc) {
     // acontece se o buffer passa do fim da VRAM. Pixels de linhas (e faixas)
     // diferentes escreveriam o mesmo endereço sem ordem entre si.
     constexpr std::uint32_t kPages = Vram::kSize / 8192;
-    bool selfClash = e.fbw == 0 || cols > e.fbw * 64;
+    bool selfWrap = e.fbw == 0 || cols > e.fbw * 64;
     for (unsigned i = 0; i < nw; ++i) {
-        selfClash = selfClash || (writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
+        selfWrap = selfWrap || (writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
     }
+    bool selfTexture = false, selfFrameZ = false;
     for (unsigned i = 0; i < nw; ++i) {
-        for (unsigned j = 0; j < nr; ++j) selfClash = selfClash || clashes(reads[j], writes[i]);
-        for (unsigned j = i + 1; j < nw; ++j) selfClash = selfClash || clashes(writes[i], writes[j]);
+        for (unsigned j = 0; j < nr; ++j) {
+            if (!clashes(reads[j], writes[i])) continue;
+            (reads[j].surface == 2 ? selfTexture : selfFrameZ) = true;
+        }
+        for (unsigned j = i + 1; j < nw; ++j) selfFrameZ = selfFrameZ || clashes(writes[i], writes[j]);
     }
-    if (selfClash) {
-        submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); });
+    if (selfWrap || selfTexture || selfFrameZ) {
+        // Um único motivo por desenho, na ordem de prioridade abaixo.
+        if (selfWrap) {
+            ++bandStats_.self[BandStats::SelfWrap];
+        } else if (selfTexture) {
+            ++bandStats_.self[BandStats::SelfTexture];
+            bandStats_.selfPairs.add(e.fbp / 32, e.tbp[0]);
+        } else {
+            ++bandStats_.self[BandStats::SelfFrameZ];
+        }
+        submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); }, BandStats::SubmitDraw);
         if (traced) trace_->endDraw(*this);
         return;
     }
@@ -310,9 +323,24 @@ void Gs::draw(std::uint32_t pc) {
     // Colisão com o que está pendente: barreira antes do desenho (as faixas
     // terminam o que já têm). Depois, o desenho entra como pendente.
     flushHost();  // HOST→LOCAL anterior precisa vir antes deste desenho
-    bool conflict = pending_.full();
-    for (unsigned i = 0; i < nw && !conflict; ++i) conflict = pending_.clashesWith(writes[i]);
-    for (unsigned j = 0; j < nr && !conflict; ++j) conflict = pending_.clashesWith(reads[j]);
+    bool conflict = false;
+    if (pending_.full()) {
+        conflict = true;
+        ++bandStats_.conflict[BandStats::ConflictFull];
+    }
+    for (unsigned i = 0; i < nw && !conflict; ++i) {
+        if (pending_.clashesWith(writes[i])) {
+            conflict = true;
+            ++bandStats_.conflict[BandStats::ConflictWrite];
+        }
+    }
+    for (unsigned j = 0; j < nr && !conflict; ++j) {
+        if (pending_.clashesWith(reads[j])) {
+            conflict = true;
+            ++bandStats_.conflict[BandStats::ConflictTexture];
+            if (reads[j].surface == 2) bandStats_.conflictPairs.add(e.fbp / 32, e.tbp[0]);
+        }
+    }
     if (conflict) {
         pending_.clear();
         worker_->barrier([] {});
@@ -330,8 +358,12 @@ void Gs::draw(std::uint32_t pc) {
             d.lanes = lanes;
             rasterize(d, v0, v1, v2);
         });
+    ++bandStats_.bandDraws;
     for (unsigned lane = 0; lane < worker_->lanes(); ++lane) {
-        if (mask & (1u << lane)) worker_->push(lane, task);
+        if (mask & (1u << lane)) {
+            ++bandStats_.lanesTouched;
+            worker_->push(lane, task);
+        }
     }
     if (traced) trace_->endDraw(*this);
 }

@@ -89,7 +89,10 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
 
 Runtime::~Runtime() {
     printProfile();
-    if (options_.profile) std::fputs(HostProfile::report().c_str(), stderr);
+    if (options_.profile) {
+        std::fputs(HostProfile::report().c_str(), stderr);
+        std::fputs(HostProfile::bandsReport(gs_->bandStats(), vblanks_).c_str(), stderr);
+    }
 }
 
 void Runtime::onVblank(std::uint32_t pc) {
@@ -105,6 +108,7 @@ void Runtime::onVblank(std::uint32_t pc) {
     }
     if (options_.profile && vblanks_ % 500 == 0) {
         std::fputs(HostProfile::interval(vblanks_).c_str(), stderr);
+        std::fputs(HostProfile::bandsInterval(gs_->bandStats(), vblanks_).c_str(), stderr);
         // Pares de VU desde o começo: compilados × interpretados (microcódigo
         // que só existe em tempo de execução cai no interpretador).
         std::fprintf(stderr, "[perfil] pares de VU: VU0 %llu compilados / %llu interpretados; VU1 %llu / %llu\n",
