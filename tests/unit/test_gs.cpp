@@ -458,6 +458,48 @@ TEST_CASE(gs, textures_clut_and_filters) {
     CHECK_EQ(px(g, 30, 30), 0xFF030303u);
 }
 
+TEST_CASE(gs, clut_csa_offset_8bit) {
+    // O CSA desloca a CLUT de 16 em 16 entradas também nas texturas de 8 bits
+    // (com volta em 256 no CPSM=32): a carga e a amostragem têm de concordar.
+    Gs g(nullptr);
+    setupFb(g);
+    std::vector<std::uint64_t> tex(2);
+    std::uint8_t idx[16];
+    for (unsigned i = 0; i < 16; ++i) idx[i] = static_cast<std::uint8_t>(i);
+    std::memcpy(tex.data(), idx, 16);
+    hostToLocal(g, 256, 2, PSMT8, 0, 0, 4, 4, tex);
+    std::vector<std::uint64_t> clut(128, 0);
+    for (unsigned p = 0; p < 256; ++p) {
+        const unsigned e = (p & ~0x18u) | ((p & 0x08u) << 1) | ((p & 0x10u) >> 1);
+        reinterpret_cast<std::uint32_t*>(clut.data())[p] = 0xFF000000u | (e * 0x010101u);
+    }
+    hostToLocal(g, 512, 1, PSMCT32, 0, 0, 16, 16, clut);
+    const std::uint64_t base = 256 | (2ull << 14) | (std::uint64_t{PSMT8} << 20) | (2ull << 26) | (2ull << 30) |
+                               (1ull << 34) | (1ull << 35) | (512ull << 37);
+    const auto drawQuad = [&](std::uint64_t tex0) {
+        g.writeRegister(TEX0_1, tex0, 0);
+        g.writeRegister(TEX1_1, 0, 0);
+        g.writeRegister(CLAMP_1, 0, 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        g.writeRegister(RGBAQ, rgbaq(128, 128, 128, 128), 0);
+        g.writeRegister(UV, 8 | (8u << 16), 0);
+        g.writeRegister(XYZ2, xyzPx(20, 20), 0);
+        g.writeRegister(UV, (4 * 16 + 8) | ((4u * 16 + 8) << 16), 0);
+        g.writeRegister(XYZ2, xyzPx(24, 24), 0);
+    };
+    // Carga e amostragem com CSA=2: o índice i dá a entrada i da CLUT na VRAM.
+    drawQuad(base | (2ull << 56) | (1ull << 61));
+    CHECK_EQ(px(g, 20, 20), 0xFF000000u);
+    CHECK_EQ(px(g, 21, 21), 0xFF050505u);
+    CHECK_EQ(px(g, 23, 23), 0xFF0F0F0Fu);
+    // Carga com CSA=0 e amostragem com CSA=2 sem recarregar (CLD=0): o índice
+    // i lê a entrada 32+i.
+    drawQuad(base | (1ull << 61));
+    drawQuad(base | (2ull << 56));
+    CHECK_EQ(px(g, 20, 20), 0xFF202020u);
+    CHECK_EQ(px(g, 23, 23), 0xFF2F2F2Fu);
+}
+
 TEST_CASE(gs, texture_psmct16_texa_and_bilinear) {
     Gs g(nullptr);
     setupFb(g);

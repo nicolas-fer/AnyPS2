@@ -246,9 +246,9 @@ std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) con
         case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S:
             return expand16(raw, e.ta0, e.ta1, e.aem);
         default: {
-            // Índice na CLUT.
-            const bool four = e.tpsm == PSMT4 || e.tpsm == PSMT4HL || e.tpsm == PSMT4HH;
-            const unsigned idx = four ? e.csa * 16 + raw : raw;
+            // Índice na CLUT. O CSA desloca a entrada em 16 em qualquer formato
+            // indexado, como na carga (loadClut); no CPSM=32 dá a volta em 256.
+            const unsigned idx = e.csa * 16 + raw;
             if (e.cpsm == PSMCT32) {
                 const unsigned i = idx & 255;
                 return static_cast<std::uint32_t>(clut_[i]) | (static_cast<std::uint32_t>(clut_[i + 256]) << 16);
