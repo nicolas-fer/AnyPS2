@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "anyps2/common/error.h"
@@ -16,6 +18,13 @@ namespace {
 
 constexpr std::uint64_t bits(std::uint64_t v, unsigned lo, unsigned n) {
     return (v >> lo) & ((n >= 64) ? ~0ull : ((1ull << n) - 1));
+}
+
+// ANYPS2_GS_THREAD=0 desliga o worker: todo desenho roda na thread do EE, como
+// antes. Serve para comparar a saída das duas formas.
+bool threadedFromEnv() {
+    const char* v = std::getenv("ANYPS2_GS_THREAD");
+    return !(v && std::strcmp(v, "0") == 0);
 }
 
 float asFloat(std::uint32_t u) {
@@ -60,9 +69,38 @@ const char* regName(std::uint8_t reg) {
     return "";
 }
 
-Gs::Gs(Runtime* rt) : rt_(rt) {
+Gs::Gs(Runtime* rt) : worker_(std::make_unique<GsWorker>(threadedFromEnv())), rt_(rt) {
     regs_[PRMODECONT] = 1;
     csr_ = 0;
+}
+
+Gs::~Gs() {
+    // Antes de qualquer membro ser destruído: o worker ainda usa a VRAM e o clut_.
+    worker_->stop();
+}
+
+void Gs::waitIdle() {
+    flushHost();
+    worker_->drain();
+}
+
+std::uint64_t Gs::pixelsShaded() const {
+    syncConst();
+    return shaded_;
+}
+
+void Gs::submit(GsWorker::Task task) {
+    // Dados HOST→LOCAL acumulados vêm antes desta operação na ordem do GIF.
+    flushHost();
+    worker_->push(std::move(task));
+}
+
+void Gs::flushHost() {
+    if (hostBatch_.empty()) return;
+    worker_->push([this, words = std::move(hostBatch_)] {
+        for (const std::uint64_t d : words) hostWord(d);
+    });
+    hostBatch_.clear();  // o que sobrou do movimento (vazio, mas o estado fica definido)
 }
 
 void Gs::unsupported(const std::string& what, std::uint32_t pc) const {
@@ -166,7 +204,11 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
         case 0x1000:
             if (value & kCsrReset) {
                 // Reset do GS: cancela transferência e fila de vértices, limpa eventos.
-                xfer_ = {};
+                // Os desenhos já enfileirados terminam antes (no hardware e na
+                // versão síncrona eles já tinham sido feitos); só o estado de
+                // transferência é zerado, pela própria fila, na mesma ordem.
+                submit([this] { xfer_ = {}; });
+                waitIdle();
                 queued_ = 0;
                 csr_ &= kCsrField;
                 finishDue_.clear();
@@ -280,10 +322,16 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
         case SIGNAL: {
             const std::uint64_t mask = v >> 32;
             siglblid_ = (siglblid_ & ~mask) | (v & mask & 0xFFFFFFFFull);
+            // O sinal vale depois de todos os desenhos anteriores.
+            waitIdle();
             raiseEvent(kSignal);
             return;
         }
         case FINISH: {
+            // Com relógio real o FINISH só aparece quando o trabalho do GS acabou
+            // de fato, então quem o recebe já pode ler a memória. Com o relógio
+            // virtual o tempo vem da conta analítica e o worker segue sem espera.
+            if (realTime_) waitIdle();
             if (!hsyncNow_) {
                 raiseEvent(kFinish);
                 return;
@@ -329,18 +377,24 @@ void Gs::writeTex0(unsigned n, std::uint64_t v, std::uint32_t pc) {
 }
 
 void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
+    const std::uint32_t cpsm = static_cast<std::uint32_t>(bits(tex0, 51, 4));
+    const bool csm2 = bits(tex0, 55, 1) != 0;
+    if (cpsm != PSMCT32 && cpsm != PSMCT16 && cpsm != PSMCT16S) {
+        unsupported("CLUT com CPSM inválido " + psmName(cpsm), pc);
+    }
+    if (csm2 && cpsm == PSMCT32) unsupported("CLUT CSM2 com CPSM=PSMCT32 (proibido pelo hardware)", pc);
+    // TEXCLUT é lido agora, na ordem do programa; a carga em si é do worker.
+    submit([this, tex0, texclut = regs_[TEXCLUT]] { loadClutCells(tex0, texclut); });
+}
+
+void Gs::loadClutCells(std::uint64_t tex0, std::uint64_t texclut) {
     const std::uint32_t psm = static_cast<std::uint32_t>(bits(tex0, 20, 6));
     const std::uint32_t cbp = static_cast<std::uint32_t>(bits(tex0, 37, 14));
     const std::uint32_t cpsm = static_cast<std::uint32_t>(bits(tex0, 51, 4));
     const bool csm2 = bits(tex0, 55, 1) != 0;
     const std::uint32_t csa = static_cast<std::uint32_t>(bits(tex0, 56, 5));
-    if (cpsm != PSMCT32 && cpsm != PSMCT16 && cpsm != PSMCT16S) {
-        unsupported("CLUT com CPSM inválido " + psmName(cpsm), pc);
-    }
     const bool eight = psm == PSMT8 || psm == PSMT8H;
     const unsigned count = eight ? 256 : 16;
-    const std::uint64_t texclut = regs_[TEXCLUT];
-    if (csm2 && cpsm == PSMCT32) unsupported("CLUT CSM2 com CPSM=PSMCT32 (proibido pelo hardware)", pc);
     for (unsigned i = 0; i < count; ++i) {
         std::uint32_t x, y, bw;
         if (csm2) {
@@ -412,17 +466,18 @@ void Gs::startTransfer(std::uint32_t pc) {
     const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
     switch (dir) {
         case 0: {  // HOST → LOCAL
-            xfer_ = {};
-            xfer_.active = true;
-            xfer_.dbp = static_cast<std::uint32_t>(bits(buf, 32, 14));
-            xfer_.dbw = static_cast<std::uint32_t>(bits(buf, 48, 6));
-            xfer_.psm = static_cast<std::uint32_t>(bits(buf, 56, 6));
-            xfer_.x0 = static_cast<std::uint32_t>(bits(pos, 32, 11));
-            xfer_.y0 = static_cast<std::uint32_t>(bits(pos, 48, 11));
-            xfer_.w = static_cast<std::uint32_t>(bits(rr, 0, 12));
-            xfer_.h = static_cast<std::uint32_t>(bits(rr, 32, 12));
-            if (!isValidPsm(xfer_.psm)) unsupported("transferência HOST→LOCAL com " + psmName(xfer_.psm), pc);
-            if (xfer_.w == 0 || xfer_.h == 0) xfer_.active = false;
+            Transfer t;
+            t.active = true;
+            t.dbp = static_cast<std::uint32_t>(bits(buf, 32, 14));
+            t.dbw = static_cast<std::uint32_t>(bits(buf, 48, 6));
+            t.psm = static_cast<std::uint32_t>(bits(buf, 56, 6));
+            t.x0 = static_cast<std::uint32_t>(bits(pos, 32, 11));
+            t.y0 = static_cast<std::uint32_t>(bits(pos, 48, 11));
+            t.w = static_cast<std::uint32_t>(bits(rr, 0, 12));
+            t.h = static_cast<std::uint32_t>(bits(rr, 32, 12));
+            if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
+            if (t.w == 0 || t.h == 0) t.active = false;
+            submit([this, t] { xfer_ = t; });
             return;
         }
         case 1:
@@ -432,19 +487,26 @@ void Gs::startTransfer(std::uint32_t pc) {
             localToLocal(pc);
             return;
         default:
-            xfer_.active = false;
+            submit([this] { xfer_.active = false; });
             return;
     }
 }
 
 void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
+    (void)pc;
     addWork(1);  // 64 bits: meio ciclo do barramento
+    // Quem sabe se a transferência ainda está ativa é o worker; aqui só se
+    // junta a palavra ao lote. Palavras depois do fim são descartadas lá.
+    hostBatch_.push_back(data);
+    if (hostBatch_.size() >= kHostBatch) flushHost();
+}
+
+void Gs::hostWord(std::uint64_t data) {
     if (!xfer_.active) {
         // Dados de preenchimento depois do fim de uma transferência são
         // descartados pelo hardware.
         return;
     }
-    (void)pc;
     const unsigned bpp = psmTransferBits(xfer_.psm);
     auto put = [&](std::uint32_t value) {
         if (!xfer_.active) return;
@@ -473,32 +535,42 @@ void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
 
 void Gs::localToLocal(std::uint32_t pc) {
     const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
-    const auto sbp = static_cast<std::uint32_t>(bits(buf, 0, 14));
-    const auto sbw = static_cast<std::uint32_t>(bits(buf, 16, 6));
-    const auto spsm = static_cast<std::uint32_t>(bits(buf, 24, 6));
-    const auto dbp = static_cast<std::uint32_t>(bits(buf, 32, 14));
-    const auto dbw = static_cast<std::uint32_t>(bits(buf, 48, 6));
-    const auto dpsm = static_cast<std::uint32_t>(bits(buf, 56, 6));
-    const auto sx = static_cast<std::uint32_t>(bits(pos, 0, 11));
-    const auto sy = static_cast<std::uint32_t>(bits(pos, 16, 11));
-    const auto dx = static_cast<std::uint32_t>(bits(pos, 32, 11));
-    const auto dy = static_cast<std::uint32_t>(bits(pos, 48, 11));
-    const auto w = static_cast<std::uint32_t>(bits(rr, 0, 12));
-    const auto h = static_cast<std::uint32_t>(bits(rr, 32, 12));
-    if (!isValidPsm(spsm) || !isValidPsm(dpsm)) unsupported("transferência LOCAL→LOCAL com PSM inválido", pc);
-    if (psmTransferBits(spsm) != psmTransferBits(dpsm)) {
-        unsupported("transferência LOCAL→LOCAL entre " + psmName(spsm) + " e " + psmName(dpsm) +
+    LocalCopy c{};
+    c.sbp = static_cast<std::uint32_t>(bits(buf, 0, 14));
+    c.sbw = static_cast<std::uint32_t>(bits(buf, 16, 6));
+    c.spsm = static_cast<std::uint32_t>(bits(buf, 24, 6));
+    c.dbp = static_cast<std::uint32_t>(bits(buf, 32, 14));
+    c.dbw = static_cast<std::uint32_t>(bits(buf, 48, 6));
+    c.dpsm = static_cast<std::uint32_t>(bits(buf, 56, 6));
+    c.sx = static_cast<std::uint32_t>(bits(pos, 0, 11));
+    c.sy = static_cast<std::uint32_t>(bits(pos, 16, 11));
+    c.dx = static_cast<std::uint32_t>(bits(pos, 32, 11));
+    c.dy = static_cast<std::uint32_t>(bits(pos, 48, 11));
+    c.w = static_cast<std::uint32_t>(bits(rr, 0, 12));
+    c.h = static_cast<std::uint32_t>(bits(rr, 32, 12));
+    if (!isValidPsm(c.spsm) || !isValidPsm(c.dpsm)) unsupported("transferência LOCAL→LOCAL com PSM inválido", pc);
+    if (psmTransferBits(c.spsm) != psmTransferBits(c.dpsm)) {
+        unsupported("transferência LOCAL→LOCAL entre " + psmName(c.spsm) + " e " + psmName(c.dpsm) +
                         " (tamanhos de pixel diferentes)",
                     pc);
     }
-    std::vector<std::uint32_t> tmp(std::size_t{w} * h);
-    for (std::uint32_t y = 0; y < h; ++y)
-        for (std::uint32_t x = 0; x < w; ++x) tmp[std::size_t{y} * w + x] = vram_.readPixel(spsm, sbp, sbw, sx + x, sy + y);
-    for (std::uint32_t y = 0; y < h; ++y)
-        for (std::uint32_t x = 0; x < w; ++x) vram_.writePixel(dpsm, dbp, dbw, dx + x, dy + y, tmp[std::size_t{y} * w + x]);
+    submit([this, c] { copyLocal(c); });
+}
+
+void Gs::copyLocal(const LocalCopy& c) {
+    // Lê tudo antes de escrever: origem e destino podem se sobrepor.
+    std::vector<std::uint32_t> tmp(std::size_t{c.w} * c.h);
+    for (std::uint32_t y = 0; y < c.h; ++y)
+        for (std::uint32_t x = 0; x < c.w; ++x)
+            tmp[std::size_t{y} * c.w + x] = vram_.readPixel(c.spsm, c.sbp, c.sbw, c.sx + x, c.sy + y);
+    for (std::uint32_t y = 0; y < c.h; ++y)
+        for (std::uint32_t x = 0; x < c.w; ++x)
+            vram_.writePixel(c.dpsm, c.dbp, c.dbw, c.dx + x, c.dy + y, tmp[std::size_t{y} * c.w + x]);
 }
 
 void Gs::localToHost(std::uint32_t pc) {
+    // O EE lê a VRAM agora: tudo o que foi desenhado antes tem de estar pronto.
+    waitIdle();
     const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
     const auto sbp = static_cast<std::uint32_t>(bits(buf, 0, 14));
     const auto sbw = static_cast<std::uint32_t>(bits(buf, 16, 6));
@@ -549,6 +621,8 @@ bool Gs::displayEnabled() const {
 }
 
 Frame Gs::display() const {
+    // A saída de vídeo lê a VRAM: os desenhos feitos até aqui já estão prontos.
+    syncConst();
     struct Circuit {
         bool on = false;
         std::uint32_t fbp, fbw, psm, dbx, dby;

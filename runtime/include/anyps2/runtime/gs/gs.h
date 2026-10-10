@@ -3,10 +3,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "anyps2/runtime/gs/gs_worker.h"
 #include "anyps2/runtime/gs/vram.h"
 
 namespace anyps2::rt {
@@ -52,9 +54,21 @@ struct Frame {
 // memória local, transferências e um rasterizador de referência que segue as
 // regras do hardware (cobertura top-left, Z de 32 bits inteiro, blending
 // (A−B)·C/128+D, texturas com CLUT/TEXA etc.).
+//
+// O desenho roda numa thread própria (GsWorker): o EE só faz a parte que tem
+// de acontecer no ponto do GIF (validação, tempo, contagem de pixels) e enfileira
+// o resto na ordem do programa. Quem lê a memória local pela API pública espera
+// o worker ficar ocioso antes; ANYPS2_GS_THREAD=0 volta ao caminho síncrono.
 class Gs {
 public:
     explicit Gs(Runtime* rt);
+    ~Gs();
+    Gs(const Gs&) = delete;
+    Gs& operator=(const Gs&) = delete;
+
+    // Espera o worker terminar tudo o que já foi enfileirado.
+    void waitIdle();
+    bool threaded() const { return worker_->threaded(); }
 
     // ---- Registradores privilegiados (0x1200_0000) --------------------------
     std::uint64_t readPrivileged(std::uint32_t addr, std::uint32_t pc);
@@ -97,14 +111,32 @@ public:
     Frame display() const;
     bool displayEnabled() const;
 
-    Vram& vram() { return vram_; }
-    const Vram& vram() const { return vram_; }
+    // Memória local: espera o worker (quem lê ou escreve aqui vê os pixels já
+    // desenhados pelo GIF até este ponto).
+    Vram& vram() {
+        waitIdle();
+        return vram_;
+    }
+    const Vram& vram() const {
+        syncConst();
+        return vram_;
+    }
     std::uint64_t drawCount() const { return drawCount_; }
+    // Pixels que os desenhos escreveriam pela conta analítica (produtor) e os que
+    // o rasterizador de fato escreveu depois do SCISSOR e do SCANMSK (worker).
+    // Têm de ser iguais: é o que o teste gs_coverage confere.
+    std::uint64_t pixelsCovered() const { return coveredTotal_; }
+    std::uint64_t pixelsShaded() const;
 
 private:
     struct Context {
         std::uint64_t tex0 = 0, tex1 = 0, clamp = 0, xyoffset = 0, miptbp1 = 0, miptbp2 = 0;
         std::uint64_t scissor = 0, alpha = 0, test = 0, fba = 0, frame = 0, zbuf = 0;
+    };
+
+    // Transferência LOCAL→LOCAL já validada no EE; o worker só copia.
+    struct LocalCopy {
+        std::uint32_t sbp, sbw, spsm, dbp, dbw, dpsm, sx, sy, dx, dy, w, h;
     };
 
     void raiseEvent(unsigned bit);
@@ -119,6 +151,16 @@ private:
     [[noreturn]] void unsupported(const std::string& what, std::uint32_t pc) const;
     void warnOnce(const std::string& what);
 
+    // Operações enfileiradas (executadas pelo worker, na ordem do GIF).
+    // syncConst: a espera de leituras feitas por métodos const. Não muda o estado
+    // observável; o único efeito é enfileirar o lote pendente e drená-lo.
+    void syncConst() const { const_cast<Gs*>(this)->waitIdle(); }
+    void submit(GsWorker::Task task);
+    void flushHost();
+    void hostWord(std::uint64_t data);
+    void copyLocal(const LocalCopy& c);
+    void loadClutCells(std::uint64_t tex0, std::uint64_t texclut);
+
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
     void setupEnv(DrawEnv& e, std::uint32_t pc);
@@ -131,11 +173,17 @@ private:
     std::uint32_t sampleTexture(const DrawEnv& e, float u, float v, float lod) const;
     std::uint32_t fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const;
 
+    // Thread do GS. Tudo que está abaixo de "worker" é dele: o EE só mexe nesses
+    // campos depois de waitIdle() ou dentro de uma operação enfileirada.
+    static constexpr std::size_t kHostBatch = 4096;  // palavras HOST→LOCAL por tarefa
+    std::unique_ptr<GsWorker> worker_;
+    std::vector<std::uint64_t> hostBatch_;  // palavras HOST→LOCAL ainda não enfileiradas
+
     Runtime* rt_;
-    Vram vram_;
+    Vram vram_;  // worker
     std::array<std::uint64_t, 256> regs_{};
     Context ctx_[2];
-    std::array<std::uint16_t, 512> clut_{};  // buffer de CLUT interno (1 KB)
+    std::array<std::uint16_t, 512> clut_{};  // buffer de CLUT interno (1 KB), worker
     std::uint32_t cbp0_ = 0, cbp1_ = 0;
 
     // Fila de vértices
@@ -144,7 +192,7 @@ private:
     unsigned queued_ = 0;
     unsigned fanFirst_ = 0;
 
-    // Transferência HOST→LOCAL em andamento
+    // Transferência HOST→LOCAL em andamento (worker)
     struct Transfer {
         bool active = false;
         std::uint32_t dbp = 0, dbw = 0, psm = 0;
@@ -154,7 +202,8 @@ private:
         unsigned nbits = 0;
     } xfer_;
 
-    // Transferência LOCAL→HOST: dados prontos para o VIF1 e quanto já saiu.
+    // Transferência LOCAL→HOST: dados prontos para o VIF1 e quanto já saiu
+    // (produtor: sai de uma leitura da VRAM feita depois de waitIdle()).
     std::vector<std::uint8_t> download_;
     std::size_t downloadPos_ = 0;
     std::uint64_t busdir_ = 0;  // BUSDIR (0x1200_1040): 1 = GS → EE
@@ -169,15 +218,17 @@ private:
     std::uint64_t cyclesPerLine_ = 0;
     std::uint64_t hsyncClearedAt_ = 0;
 
-    // Modelo de tempo do GS (em ciclos do EE)
+    // Modelo de tempo do GS (em ciclos do EE), tudo no produtor
     std::uint64_t work_ = 0;        // trabalho acumulado desde o último evento
-    std::uint64_t pixels_ = 0;      // pixels desenhados desde o último evento
+    std::uint64_t pixels_ = 0;      // pixels (conta analítica) desde o último evento
     std::uint64_t busyUntil_ = 0;   // fim do trabalho já agendado
     bool realTime_ = false;
     std::uint64_t workStart_ = 0;   // chegada do primeiro dado do lote atual
     std::vector<std::uint64_t> finishDue_;  // FINISH pendentes (ordem crescente)
 
     std::uint64_t drawCount_ = 0;
+    std::uint64_t coveredTotal_ = 0;  // pixels da conta analítica, sem reset
+    std::uint64_t shaded_ = 0;        // pixels escritos pelo rasterizador (worker)
     std::set<std::string> warned_;
 };
 

@@ -62,6 +62,8 @@ add_library(anyps2_runtime STATIC
     src/gs/vram.cpp
     src/gs/gs.cpp
     src/gs/gs_draw.cpp
+    src/gs/gs_worker.cpp
+    src/gs/gs_coverage.cpp
     src/video.cpp
     src/vu/vu.cpp
 )
