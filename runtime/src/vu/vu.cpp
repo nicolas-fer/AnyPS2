@@ -119,52 +119,13 @@ void Vu::commitPending() {
     if (p_.active) nextCommit_ = std::min(nextCommit_, p_.ready);
 }
 
-void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
+// Caminhos de erro de pairBegin, fora de linha: o caminho comum (em vu_exec.h)
+// só testa a condição e chama isto.
+void Vu::pairRejected(const vu::Instr& in, std::uint32_t pc) const {
     if (in.upper.op == U::INVALID) {
         fail("instrução upper inválida " + anyps2::hex(in.upperWord), pc);
     }
-    if (in.d || in.t) {
-        fail(std::string("bit ") + (in.d ? "D" : "T") + " (parada de depuração do VU) não emulado", pc);
-    }
-    commitReady();
-
-    // Stalls pelos operandos do upper.
-    const vu::Upper& u = in.upper;
-    if (u.op != U::NOP) {
-        stallOn(u.fs);
-        stallOn(u.ft);
-        switch (u.op) {
-            case U::MADD: case U::MSUB: case U::MADDbc: case U::MSUBbc: case U::MADDq: case U::MSUBq:
-            case U::MADDi: case U::MSUBi: case U::MADDA: case U::MSUBA: case U::MADDAbc: case U::MSUBAbc:
-            case U::MADDAq: case U::MSUBAq: case U::MADDAi: case U::MSUBAi: case U::OPMSUB:
-                stallUntil(accReady_);
-                break;
-            default:
-                break;
-        }
-        commitReady();
-    }
-}
-
-void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
-    // O upper é escrito depois do lower (se ambos escrevem o mesmo VF, vale o upper).
-    if (ur.writes) {
-        writeUpper(regs_, ur);
-        if (ur.toAcc) accReady_ = cycle_ + vuexec::kFmacLatency;
-        else if (ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
-    }
-    if (ur.setsFlags || ur.setsClip) {
-        if (pendCount_ == kPending) {  // nunca deveria acontecer (latência fixa)
-            stallUntil(pending_[pendHead_].ready);
-            commitReady();
-        }
-        PendingFlags& p = pending_[(pendHead_ + pendCount_) % kPending];
-        p = {cycle_ + vuexec::kFmacLatency, ur.setsFlags, ur.mac, ur.setsClip, ur.clip};
-        ++pendCount_;
-        nextCommit_ = std::min(nextCommit_, p.ready);
-    }
-    if (in.i) regs_.vi[reg::I] = in.lowerWord;  // LOI
-    ++cycle_;
+    fail(std::string("bit ") + (in.d ? "D" : "T") + " (parada de depuração do VU) não emulado", pc);
 }
 
 void Vu::finish() {
@@ -187,20 +148,17 @@ void Vu::tooManyPairs(std::uint32_t pc) const {
 // Memória de dados
 // ---------------------------------------------------------------------------
 
-Reg128& Vu::mem(std::uint32_t index, std::uint32_t pc) {
-    if (unit_ == 0 && (index & 0x400u)) {
-        // VU0 enxerga os registradores do VU1 em 0x4000–0x43FF.
-        if (!rt_) fail("acesso aos registradores do VU1 pelo VU0 sem runtime", pc);
-        const vucore::Regs& r1 = rt_->vu1().regs();
-        const std::uint32_t n = index & 0x3F;
-        if (n < 32) return r1.vf[n];
-        fail("acesso do VU0 aos registradores inteiros/controle do VU1 (" + anyps2::hex(index * 16, 4) +
-                 ") ainda não suportado",
-             pc);
-    }
-    const std::uint32_t qwords = dataSize_ / 16;
-    Reg128* base = reinterpret_cast<Reg128*>(data_);
-    return base[index & (qwords - 1)];
+// VU0 enxerga os registradores do VU1 em 0x4000–0x43FF. Fica fora de linha:
+// o acesso comum à memória de dados (mem, em vu_exec.h) nem chega aqui.
+Reg128& Vu::memVu0Cross(std::uint32_t index, std::uint32_t pc) {
+    if (!rt_) fail("acesso aos registradores do VU1 pelo VU0 sem runtime", pc);
+    const vucore::Regs& r1 = rt_->vu1().regs();
+    const std::uint32_t n = index & 0x3F;
+    if (n < 32) return r1.vf[n];
+    fail("acesso do VU0 aos registradores inteiros/controle do VU1 (" + anyps2::hex(index * 16, 4) +
+             ") ainda não suportado",
+         pc);
+    return r1.vf[0];  // inalcançável: fail() lança
 }
 
 // ---------------------------------------------------------------------------
