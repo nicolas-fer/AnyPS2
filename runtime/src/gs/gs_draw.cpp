@@ -22,6 +22,7 @@
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/gs/gs_bands.h"
 #include "anyps2/runtime/gs/gs_coverage.h"
+#include "anyps2/runtime/gs/gs_trace.h"
 #include "anyps2/runtime/host_profile.h"
 
 namespace anyps2::rt::gs {
@@ -243,6 +244,10 @@ void Gs::draw(std::uint32_t pc) {
     const RowRange rows = drawRows(w, e.type, v0, v1, v2);
     if (rows.empty()) return;  // nada cai dentro do SCISSOR: nada a fazer
 
+    // Diagnóstico (gs_trace.h): sem ANYPS2_GS_PROBE/ANYPS2_GS_DRAWLOG o rastreador
+    // é nulo. beginDraw lê o pixel antes e endDraw depois do desenho enfileirado.
+    const bool traced = trace_ && trace_->beginDraw(*this, pc, e.type, w, v0, v1, v2);
+
     // Acessos à VRAM. Escritas de FRAME/ZBUF usam colunas até o SCISSOR; leituras
     // de textura usam o tamanho da textura (ou tudo, com REGION_CLAMP/REPEAT).
     const auto rowLo = static_cast<unsigned>(rows.lo), rowHi = static_cast<unsigned>(rows.hi);
@@ -289,6 +294,7 @@ void Gs::draw(std::uint32_t pc) {
     }
     if (selfClash) {
         submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); });
+        if (traced) trace_->endDraw(*this);
         return;
     }
 
@@ -318,6 +324,7 @@ void Gs::draw(std::uint32_t pc) {
     for (unsigned lane = 0; lane < worker_->lanes(); ++lane) {
         if (mask & (1u << lane)) worker_->push(lane, task);
     }
+    if (traced) trace_->endDraw(*this);
 }
 
 // ---------------------------------------------------------------------------

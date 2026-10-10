@@ -205,6 +205,12 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
 | `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes no fim; também mede o tempo do host por parte (EE, GIF, GS no EE, GSesp = EE esperando o worker do GS, VU0, VU1, IPU — exclusivo: um desenho disparado pelo VU1 conta para o GS) e a ocupação do worker do GS, e imprime, a cada 500 VBlanks, a velocidade, a divisão do tempo e os pares de VU compilados × interpretados |
 | `ANYPS2_GS_THREAD=0` | desenha na thread do EE em vez das faixas do GS (para comparar; a imagem é a mesma); `ANYPS2_GS_THREADS=N` escolhe o número de faixas (padrão de 2 a 4, conforme os núcleos) |
+| `ANYPS2_GS_PROBE=x,y[,x2,y2...]` | sonda do GS, até 8 pontos em pixels do framebuffer (sem XYOFFSET): para cada desenho cuja caixa (depois do SCISSOR) contém um ponto, grava em `ANYPS2_GS_PROBE_OUT` o estado do desenho (PRIM, FRAME, ZBUF, TEST, ALPHA, TEX0 etc., vértices) e a cor e o Z de cada ponto antes e depois dele |
+| `ANYPS2_GS_PROBE_FROM=n`, `ANYPS2_GS_PROBE_TO=n` | intervalo de VBlanks da sonda, inclusivo (o VBlank n é o n-ésimo do GS; 0 é antes do primeiro; padrão: 0 até o fim) |
+| `ANYPS2_GS_PROBE_FBP=n` | só desenhos cujo FRAME.FBP vale n (o campo do registrador, em páginas de 8 KB); padrão: qualquer buffer |
+| `ANYPS2_GS_PROBE_OUT=arquivo` | arquivo de saída da sonda (padrão: `gs_probe.txt`) |
+| `ANYPS2_GS_DRAWLOG=arquivo` | uma linha compacta por desenho do intervalo `ANYPS2_GS_DRAWLOG_FROM`..`_TO` (VBlanks), sem ler a VRAM; para ver a sequência de passadas de um quadro |
+| `ANYPS2_GS_DRAWLOG_FROM=n`, `ANYPS2_GS_DRAWLOG_TO=n` | intervalo de VBlanks do log de desenhos, inclusivo (padrão: 0 até o fim) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 | `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
 | `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |

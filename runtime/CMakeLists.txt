@@ -65,6 +65,7 @@ add_library(anyps2_runtime STATIC
     src/gs/gs_worker.cpp
     src/gs/gs_coverage.cpp
     src/gs/gs_bands.cpp
+    src/gs/gs_trace.cpp
     src/video.cpp
     src/vu/vu.cpp
 )
