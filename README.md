@@ -204,7 +204,7 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_IMAGE=arquivo` | imagem do programa (padrão: ao lado do executável) |
 | `ANYPS2_IOP_ACCEPT_MISSING=1` | exploração: aceita módulos do IOP sem HLE (com aviso) para ver até onde o programa vai; servidor RPC inexistente vira um servidor que responde zeros e registra cada chamada (para levantar protocolos) |
 | `ANYPS2_PROFILE=1` | amostra o PC do EE nos safepoints e imprime os 20 mais frequentes no fim; também mede o tempo do host por parte (EE, GIF, GS no EE, GSesp = EE esperando o worker do GS, VU0, VU1, IPU — exclusivo: um desenho disparado pelo VU1 conta para o GS) e a ocupação do worker do GS, e imprime, a cada 500 VBlanks, a velocidade, a divisão do tempo e os pares de VU compilados × interpretados |
-| `ANYPS2_GS_THREAD=0` | desenha na thread do EE em vez da thread própria do GS (para comparar; a imagem é a mesma) |
+| `ANYPS2_GS_THREAD=0` | desenha na thread do EE em vez das faixas do GS (para comparar; a imagem é a mesma); `ANYPS2_GS_THREADS=N` escolhe o número de faixas (padrão de 2 a 4, conforme os núcleos) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 | `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
 | `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,18 @@ constexpr std::uint64_t bits(std::uint64_t v, unsigned lo, unsigned n) {
 bool threadedFromEnv() {
     const char* v = std::getenv("ANYPS2_GS_THREAD");
     return !(v && std::strcmp(v, "0") == 0);
+}
+
+// ANYPS2_GS_THREADS=N escolhe as faixas (1 = todas as linhas numa faixa só, com um único worker). Sem a variável: min(4, núcleos − 2), no mínimo 2, para deixar
+// núcleos para o EE e o VU1.
+unsigned lanesFromEnv() {
+    const char* v = std::getenv("ANYPS2_GS_THREADS");
+    if (v && *v) {
+        const long n = std::strtol(v, nullptr, 10);
+        if (n >= 1) return static_cast<unsigned>(std::min<long>(n, Gs::kMaxLanes));
+    }
+    const auto cores = static_cast<int>(std::thread::hardware_concurrency());
+    return static_cast<unsigned>(std::max(2, std::min(4, cores - 2)));
 }
 
 float asFloat(std::uint32_t u) {
@@ -70,13 +83,14 @@ const char* regName(std::uint8_t reg) {
     return "";
 }
 
-Gs::Gs(Runtime* rt) : worker_(std::make_unique<GsWorker>(threadedFromEnv())), rt_(rt) {
+Gs::Gs(Runtime* rt)
+    : worker_(std::make_unique<GsWorker>(threadedFromEnv(), lanesFromEnv())), rt_(rt) {
     regs_[PRMODECONT] = 1;
     csr_ = 0;
 }
 
 Gs::~Gs() {
-    // Antes de qualquer membro ser destruído: o worker ainda usa a VRAM e o clut_.
+    // Antes de qualquer membro ser destruído: as faixas ainda usam a VRAM e o clut_.
     worker_->stop();
 }
 
@@ -89,18 +103,24 @@ void Gs::waitIdle() {
 
 std::uint64_t Gs::pixelsShaded() const {
     syncConst();
-    return shaded_;
+    std::uint64_t n = 0;
+    for (const LaneCount& c : laneShaded_) n += c.shaded;
+    return n;
 }
 
-void Gs::submit(GsWorker::Task task) {
+void Gs::submit(GsWorker::Op op) {
     // Dados HOST→LOCAL acumulados vêm antes desta operação na ordem do GIF.
     flushHost();
-    worker_->push(std::move(task));
+    // A operação global espera as faixas, então nada pendente sobrevive a ela.
+    pending_.clear();
+    worker_->barrier(std::move(op));
 }
 
 void Gs::flushHost() {
     if (hostBatch_.empty()) return;
-    worker_->push([this, words = std::move(hostBatch_)] {
+    // Escrita na VRAM de largura desconhecida: é uma barreira (ver submit).
+    pending_.clear();
+    worker_->barrier([this, words = std::move(hostBatch_)] {
         for (const std::uint64_t d : words) hostWord(d);
     });
     hostBatch_.clear();  // o que sobrou do movimento (vazio, mas o estado fica definido)

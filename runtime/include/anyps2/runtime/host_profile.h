@@ -28,6 +28,9 @@ public:
     static std::string interval(std::uint64_t vblank);
     // Tempo gasto pelo worker do GS (chamado da thread dele).
     static void addWorker(std::int64_t ns) { workerNs_.fetch_add(ns, std::memory_order_relaxed); }
+    // Faixas do GS (threads) que somam em addWorker: o relatório divide a soma
+    // pelo número de faixas para dar a ocupação média por faixa.
+    static void setWorkerLanes(unsigned lanes) { workerLanes_ = lanes ? lanes : 1; }
 
     class Scope {
     public:
@@ -58,6 +61,7 @@ private:
     static inline std::int64_t mark_[Count] = {};
     static inline std::uint64_t markVblank_ = 0;
     static inline std::atomic<std::int64_t> workerNs_{0};
+    static inline std::atomic<unsigned> workerLanes_{1};
     static inline std::int64_t workerMark_ = 0;
 };
 
