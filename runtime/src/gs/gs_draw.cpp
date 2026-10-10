@@ -20,6 +20,7 @@
 
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/gs/gs_coverage.h"
 #include "anyps2/runtime/host_profile.h"
 
 namespace anyps2::rt::gs {
@@ -203,16 +204,24 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
 }
 
 void Gs::draw(std::uint32_t pc) {
+    // Só o trabalho do EE entra no perfil: o HostProfile não é seguro entre
+    // threads, e o rasterizador roda no worker.
     const HostProfile::Scope prof(HostProfile::Gs);
     DrawEnv e;
     setupEnv(e, pc);
     ++drawCount_;
+    // O tempo do GS usa a contagem analítica, feita aqui na ordem do programa
+    // (o worker ainda não desenhou nada disto).
+    const DrawWindow w{e.scax0, e.scax1, e.scay0, e.scay1, e.scanmsk};
+    const Vertex v0 = queue_[0], v1 = queue_[1], v2 = queue_[2];
+    const std::uint64_t covered = coveredPixels(w, e.type, v0, v1, v2);
+    pixels_ += covered;
+    coveredTotal_ += covered;
     switch (e.type) {
-        case 0: drawPoint(e, queue_[0]); break;
-        case 1: case 2: drawLine(e, queue_[0], queue_[1]); break;
-        case 3: case 4: drawTriangle(e, queue_[0], queue_[1], queue_[2]); break;
-        case 5: drawTriangle(e, queue_[0], queue_[1], queue_[2]); break;
-        case 6: drawSprite(e, queue_[0], queue_[1]); break;
+        case 0: submit([this, e, v0] { drawPoint(e, v0); }); break;
+        case 1: case 2: submit([this, e, v0, v1] { drawLine(e, v0, v1); }); break;
+        case 3: case 4: case 5: submit([this, e, v0, v1, v2] { drawTriangle(e, v0, v1, v2); }); break;
+        case 6: submit([this, e, v0, v1] { drawSprite(e, v0, v1); }); break;
         default: break;
     }
 }
@@ -326,7 +335,8 @@ std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) c
 void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
     if (x < e.scax0 || x > e.scax1 || y < e.scay0 || y > e.scay1) return;
     if ((e.scanmsk == 2 && (y & 1)) || (e.scanmsk == 3 && !(y & 1))) return;
-    ++pixels_;
+    // Mesmo ponto em que gs_coverage conta: confere a conta analítica.
+    ++shaded_;
     int r = f.r, g = f.g, b = f.b, a = f.a;
 
     if (e.tme) {
@@ -543,14 +553,12 @@ void Gs::drawPoint(const DrawEnv& e, const Vertex& v) {
 }
 
 void Gs::drawLine(const DrawEnv& e, const Vertex& v0, const Vertex& v1) {
-    const int x0 = v0.x, y0 = v0.y, x1 = v1.x, y1 = v1.y;
-    const int dx = x1 - x0, dy = y1 - y0;
-    const int steps = std::max(std::abs(dx), std::abs(dy)) >> 4;
+    const int steps = lineSteps(v0, v1);
     const Attr a0 = attrOf(v0), a1 = attrOf(v1);
     for (int i = 0; i < std::max(steps, 1); ++i) {
-        const double t = steps > 0 ? static_cast<double>(i) / steps : 0.0;
-        const int px = (x0 + static_cast<int>(std::lround(dx * t)) + 8) >> 4;
-        const int py = (y0 + static_cast<int>(std::lround(dy * t)) + 8) >> 4;
+        const LineSample s = lineSample(v0, v1, steps, i);
+        const double t = s.t;
+        const int px = s.px, py = s.py;
         const Attr at = lerp3(a0, a1, a1, 1 - t, t, 0);
         Fragment f;
         f.z = toZ(at.z);
@@ -576,36 +584,14 @@ void Gs::drawLine(const DrawEnv& e, const Vertex& v0, const Vertex& v1) {
 }
 
 void Gs::drawTriangle(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2) {
-    // Área com sinal (12.4 → 8 bits de fração no produto).
-    auto edge = [](std::int64_t ax, std::int64_t ay, std::int64_t bx, std::int64_t by, std::int64_t px,
-                   std::int64_t py) { return (bx - ax) * (py - ay) - (by - ay) * (px - ax); };
-    const Vertex* a = &v0;
-    const Vertex* b = &v1;
-    const Vertex* c = &v2;
-    std::int64_t area = edge(a->x, a->y, b->x, b->y, c->x, c->y);
-    if (area == 0) return;
-    if (area < 0) {
-        std::swap(b, c);
-        area = -area;
-    }
-    const int minX = std::max(e.scax0, (std::min({a->x, b->x, c->x}) + 15) >> 4);
-    const int maxX = std::min(e.scax1, std::max({a->x, b->x, c->x}) >> 4);
-    const int minY = std::max(e.scay0, (std::min({a->y, b->y, c->y}) + 15) >> 4);
-    const int maxY = std::min(e.scay1, std::max({a->y, b->y, c->y}) >> 4);
-    if (minX > maxX || minY > maxY) return;
-
-    // Regra top-left: arestas "de cima" ou "da esquerda" incluem pixels
-    // exatamente sobre elas; as demais não (bias de −1).
-    auto isTopLeft = [](const Vertex* p, const Vertex* q) {
-        const int ex = q->x - p->x, ey = q->y - p->y;
-        return (ey < 0) || (ey == 0 && ex > 0);
-    };
-    // Com y crescendo para baixo e área positiva = sentido horário na tela.
-    const std::int64_t bias0 = isTopLeft(b, c) ? 0 : -1;
-    const std::int64_t bias1 = isTopLeft(c, a) ? 0 : -1;
-    const std::int64_t bias2 = isTopLeft(a, b) ? 0 : -1;
-    const Attr A = attrOf(*a), B = attrOf(*b), C = attrOf(*c);
-    const double inv = 1.0 / static_cast<double>(area);
+    // Geometria (ordem, caixa, arestas e regra top-left) vem de gs_coverage, que
+    // também conta os pixels; as duas coisas não podem divergir.
+    const TriangleSetup t = triangleSetup(DrawWindow{e.scax0, e.scax1, e.scay0, e.scay1, e.scanmsk}, v0, v1, v2);
+    if (!t.valid) return;
+    const int minX = t.minX, maxX = t.maxX, minY = t.minY, maxY = t.maxY;
+    const std::int64_t bias0 = t.bias[0], bias1 = t.bias[1], bias2 = t.bias[2];
+    const Attr A = attrOf(t.v[0]), B = attrOf(t.v[1]), C = attrOf(t.v[2]);
+    const double inv = 1.0 / static_cast<double>(t.area);
     const Vertex& last = v2;  // cor flat: último vértice
     // Só o que o pixel vai usar é interpolado (mesma fórmula do lerp3, então
     // os mesmos valores).
@@ -613,14 +599,9 @@ void Gs::drawTriangle(const DrawEnv& e, const Vertex& v0, const Vertex& v1, cons
 
     // Funções de aresta incrementais: cada pixel à direita soma dx, cada
     // linha abaixo soma dy (inteiros, mesmo valor de edge() no pixel).
-    auto start = [&](const Vertex* p, const Vertex* q) {
-        return edge(p->x, p->y, q->x, q->y, std::int64_t{minX} * 16, std::int64_t{minY} * 16);
-    };
-    auto stepX = [](const Vertex* p, const Vertex* q) { return -std::int64_t{q->y - p->y} * 16; };
-    auto stepY = [](const Vertex* p, const Vertex* q) { return std::int64_t{q->x - p->x} * 16; };
-    std::int64_t row0 = start(b, c), row1 = start(c, a), row2 = start(a, b);
-    const std::int64_t dx0 = stepX(b, c), dx1 = stepX(c, a), dx2 = stepX(a, b);
-    const std::int64_t dy0 = stepY(b, c), dy1 = stepY(c, a), dy2 = stepY(a, b);
+    std::int64_t row0 = t.row[0], row1 = t.row[1], row2 = t.row[2];
+    const std::int64_t dx0 = t.dx[0], dx1 = t.dx[1], dx2 = t.dx[2];
+    const std::int64_t dy0 = t.dy[0], dy1 = t.dy[1], dy2 = t.dy[2];
 
     for (int py = minY; py <= maxY; ++py, row0 += dy0, row1 += dy1, row2 += dy2) {
         std::int64_t w0 = row0, w1 = row1, w2 = row2;
@@ -658,13 +639,9 @@ void Gs::drawTriangle(const DrawEnv& e, const Vertex& v0, const Vertex& v1, cons
 }
 
 void Gs::drawSprite(const DrawEnv& e, const Vertex& v0, const Vertex& v1) {
-    const int xa = std::min(v0.x, v1.x), xb = std::max(v0.x, v1.x);
-    const int ya = std::min(v0.y, v1.y), yb = std::max(v0.y, v1.y);
-    const int minX = std::max(e.scax0, (xa + 15) >> 4);
-    const int maxX = std::min(e.scax1, ((xb + 15) >> 4) - 1);
-    const int minY = std::max(e.scay0, (ya + 15) >> 4);
-    const int maxY = std::min(e.scay1, ((yb + 15) >> 4) - 1);
-    if (minX > maxX || minY > maxY) return;
+    const SpriteRect r = spriteRect(DrawWindow{e.scax0, e.scax1, e.scay0, e.scay1, e.scanmsk}, v0, v1);
+    if (r.empty()) return;
+    const int minX = r.minX, maxX = r.maxX, minY = r.minY, maxY = r.maxY;
     const Attr a0 = attrOf(v0), a1 = attrOf(v1);
     const double spanX = v1.x - v0.x, spanY = v1.y - v0.y;
     // S/U só dependem da coluna e T/V só da linha: calculados uma vez.

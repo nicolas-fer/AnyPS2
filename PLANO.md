@@ -743,9 +743,28 @@ Marco 7 — o vídeo de abertura (em andamento):
   atributos usados, sprite por coluna/linha, log2 do LOD só quando muda o
   filtro): ~8–10% nos menus. O microcódigo do VU1 da corrida entrou no
   projeto do GT4 com `--vu-dumps`.
-- Próximos passos: os defeitos de textura nos carros; velocidade do GS
-  (paralelizar o rasterizador ou backend por hardware); as listras nos
-  vídeos de fundo e os padrões tênues no branco. O som: ver o marco 8.
+- ✅ **GS numa thread própria** (`gs_worker.h/.cpp`, `gs_coverage.h/.cpp`):
+  o EE valida cada desenho, conta os pixels pela conta analítica (o tempo
+  do GS e o FINISH no relógio virtual não esperam o rasterizador) e
+  enfileira; um worker executa desenhos, transferências e cargas de CLUT
+  na ordem do GIF. Quem lê a VRAM pela API pública (LOCAL→HOST, display,
+  SIGNAL, FINISH no relógio real, reset) espera o worker antes.
+  `ANYPS2_GS_THREAD=0` volta ao caminho síncrono. No GT4 as capturas são
+  idênticas byte a byte com e sem o worker, e a velocidade sobe 1,2–1,5×
+  (menus 29,6 → 42,8 VBlanks/s; corrida 2,3 → 3,3). Na corrida o worker
+  fica 95–98% ocupado: o próximo passo é rasterizar em faixas da tela com
+  várias threads. O `ANYPS2_PROFILE` mostra o tempo do EE esperando o
+  worker (GSesp) e a ocupação do worker.
+- ✅ CSA também na amostragem de texturas de 8 bits (a carga da CLUT já o
+  aplicava). O GT4 não usa esse caso até a largada: não é a causa das
+  partes pretas dos carros, que parecem uma passada de reflexo da pintura.
+- Listras nos vídeos de fundo: não reproduzidas. O GT4 roda em PAL
+  entrelaçado com FFMD=1 (modo FRAME, framebuffer de meia altura) e troca o
+  DISPFB a cada campo (renderização por campo); as capturas não têm padrão
+  de linha. Na janela, a saída mostra um campo por VBlank (bob); se houver
+  tremor, a correção é combinar os dois campos (weave).
+- Próximos passos: GS em faixas (várias threads); as partes pretas dos
+  carros e os polígonos pretos no cenário da corrida. O som: ver o marco 8.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
 (efeitos; a música de fundo e o áudio dos vídeos ainda não):

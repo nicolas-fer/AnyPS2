@@ -11,6 +11,8 @@ void HostProfile::enable() {
     for (auto& n : ns_) n = 0;
     for (auto& n : mark_) n = 0;
     markVblank_ = 0;
+    workerNs_ = 0;
+    workerMark_ = 0;
 }
 
 void HostProfile::charge(Clock::time_point now) {
@@ -33,7 +35,8 @@ void HostProfile::Scope::leave() {
 std::string HostProfile::report() {
     if (!enabled_) return "";
     charge(Clock::now());
-    static const char* kNames[Count] = {"EE (código e HLE)", "GIF", "GS (desenho)", "VU0", "VU1", "IPU"};
+    static const char* kNames[Count] = {"EE (código e HLE)", "GIF", "GS (desenho no EE)", "GS (EE esperando o worker)",
+                                            "VU0", "VU1", "IPU"};
     std::int64_t total = 0;
     for (auto n : ns_) total += n;
     std::string s;
@@ -46,13 +49,17 @@ std::string HostProfile::report() {
                       static_cast<double>(ns_[i]) / 1e9, kNames[i]);
         s += line;
     }
+    std::snprintf(line, sizeof line, "[perfil] worker do GS ocupado: %.2f s (%.0f%% do tempo do host)\n",
+                  static_cast<double>(workerNs_.load()) / 1e9,
+                  total ? 100.0 * static_cast<double>(workerNs_.load()) / static_cast<double>(total) : 0.0);
+    s += line;
     return s;
 }
 
 std::string HostProfile::interval(std::uint64_t vblank) {
     if (!enabled_) return "";
     charge(Clock::now());
-    static const char* kShort[Count] = {"EE", "GIF", "GS", "VU0", "VU1", "IPU"};
+    static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU"};
     std::int64_t total = 0;
     for (unsigned i = 0; i < Count; ++i) total += ns_[i] - mark_[i];
     char line[96];
@@ -66,6 +73,11 @@ std::string HostProfile::interval(std::uint64_t vblank) {
         s += line;
         mark_[i] = ns_[i];
     }
+    const std::int64_t worker = workerNs_.load() - workerMark_;
+    workerMark_ += worker;
+    std::snprintf(line, sizeof line, "; worker GS %.0f%%",
+                  total ? 100.0 * static_cast<double>(worker) / static_cast<double>(total) : 0.0);
+    s += line;
     markVblank_ = vblank;
     return s + "\n";
 }
