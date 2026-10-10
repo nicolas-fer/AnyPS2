@@ -496,7 +496,17 @@ bool GsTrace::beginDraw(Gs& gs, std::uint32_t pc, unsigned type, const DrawWindo
     const DrawState st = capture(gs);
     if (vramLogging) vramDraw(gs, pc, st, type, w, v0, v1, v2);
     if (dumping) dumpTexture(gs, pc, st);
-    if (logging) writeLogLine(vb, gs.drawCount_, pc, type, st);
+    if (logging) {
+        // Os vértices em pixels (sem XYOFFSET) e Z: para comparar a geometria de dois
+        // registros (por exemplo, o jogo contra um GS dump do PCSX2).
+        writeLogLine(vb, gs.drawCount_, pc, type, st);
+        const Vertex vs[3] = {v0, v1, v2};
+        for (unsigned i = 0; i < vertexCount(type); ++i) {
+            log_ << (i ? " " : " v=") << "(" << static_cast<double>(vs[i].x) / 16.0 << ","
+                 << static_cast<double>(vs[i].y) / 16.0 << "," << vs[i].z << ")";
+        }
+        log_ << "\n";
+    }
     if (!probing) return false;
     if (filterFbp_ && bits(st.frame, 0, 9) != fbp_) return false;
 
@@ -576,7 +586,7 @@ void GsTrace::writeLogLine(std::uint64_t vblank, std::uint64_t draw, std::uint32
          << " ALPHA=" << bits(s.alpha, 0, 2) << "," << bits(s.alpha, 2, 2) << "," << bits(s.alpha, 4, 2) << ","
          << bits(s.alpha, 6, 2) << "," << hex(bits(s.alpha, 32, 8), 2) << " TBP0=" << hex(bits(s.tex0, 0, 14), 4)
          << " TPSM=" << psmName(static_cast<std::uint32_t>(bits(s.tex0, 20, 6))) << " TW=" << bits(s.tex0, 26, 4)
-         << " TH=" << bits(s.tex0, 30, 4) << " TFX=" << bits(s.tex0, 35, 2) << "\n";
+         << " TH=" << bits(s.tex0, 30, 4) << " TFX=" << bits(s.tex0, 35, 2);
 }
 
 void GsTrace::writeProbe() {
