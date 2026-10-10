@@ -14,6 +14,7 @@
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu_exec.h"
+#include "anyps2/runtime/vu/vu_trace.h"
 
 namespace anyps2::rt {
 
@@ -203,6 +204,7 @@ std::uint32_t Vu::vifTop(bool itop, std::uint32_t pc) {
 
 void Vu::xgkick(std::uint32_t addr, std::uint32_t pc) {
     if (!rt_) fail("XGKICK sem runtime", pc);
+    if (tracing_) trace_->kick(*this, addr, pc);  // antes do envio: se o GIF falhar, o registro fica
     rt_->gif().kick(data_, dataSize_, addr, pc);
 }
 
@@ -284,6 +286,7 @@ void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
     if (rt_ && rt_->options().traceGs) {
         std::fprintf(stderr, "[vu%u] início em 0x%04x\n", unit_, startPc_);
     }
+    if (tracing_) trace_->beginRun(*this, startPc_, eePc, rt_ ? rt_->vblanks() : 0);
     VuCursor cur;
     cur.pc = startPc_;
     std::uint64_t viaCompiled = 0, viaInterpreter = 0;
