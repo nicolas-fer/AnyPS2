@@ -21,6 +21,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/gs/gs_coverage.h"
+#include "anyps2/runtime/gs/gs_trace.h"
 #include "anyps2/runtime/host_profile.h"
 
 namespace anyps2::rt::gs {
@@ -217,6 +218,8 @@ void Gs::draw(std::uint32_t pc) {
     const std::uint64_t covered = coveredPixels(w, e.type, v0, v1, v2);
     pixels_ += covered;
     coveredTotal_ += covered;
+    // Diagnóstico (gs_trace.h): sem ANYPS2_GS_PROBE/ANYPS2_GS_DRAWLOG o rastreador é nulo.
+    const bool traced = trace_ && trace_->beginDraw(*this, pc, e.type, w, v0, v1, v2);
     switch (e.type) {
         case 0: submit([this, e, v0] { drawPoint(e, v0); }); break;
         case 1: case 2: submit([this, e, v0, v1] { drawLine(e, v0, v1); }); break;
@@ -224,6 +227,7 @@ void Gs::draw(std::uint32_t pc) {
         case 6: submit([this, e, v0, v1] { drawSprite(e, v0, v1); }); break;
         default: break;
     }
+    if (traced) trace_->endDraw(*this);
 }
 
 // ---------------------------------------------------------------------------

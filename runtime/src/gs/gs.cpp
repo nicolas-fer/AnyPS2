@@ -9,6 +9,7 @@
 
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/errors.h"
+#include "anyps2/runtime/gs/gs_trace.h"
 #include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
@@ -73,11 +74,17 @@ const char* regName(std::uint8_t reg) {
 Gs::Gs(Runtime* rt) : worker_(std::make_unique<GsWorker>(threadedFromEnv())), rt_(rt) {
     regs_[PRMODECONT] = 1;
     csr_ = 0;
+    trace_ = GsTrace::fromEnv();
 }
 
 Gs::~Gs() {
     // Antes de qualquer membro ser destruído: o worker ainda usa a VRAM e o clut_.
     worker_->stop();
+}
+
+GsTrace& Gs::trace() {
+    if (!trace_) trace_ = std::make_unique<GsTrace>();
+    return *trace_;
 }
 
 void Gs::waitIdle() {
@@ -236,6 +243,7 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
 // ---------------------------------------------------------------------------
 
 void Gs::vblankStart() {
+    ++vblanks_;
     csr_ ^= kCsrField;
     raiseEvent(kVsint);
 }

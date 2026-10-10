@@ -17,6 +17,8 @@ class Runtime;
 
 namespace anyps2::rt::gs {
 
+class GsTrace;  // gs_trace.h: diagnóstico por ANYPS2_GS_PROBE/ANYPS2_GS_DRAWLOG
+
 // Registradores gerais do GS (endereços usados no modo A+D e em REGLIST).
 enum Reg : std::uint8_t {
     PRIM = 0x00, RGBAQ = 0x01, ST = 0x02, UV = 0x03, XYZF2 = 0x04, XYZ2 = 0x05, TEX0_1 = 0x06,
@@ -122,6 +124,9 @@ public:
         return vram_;
     }
     std::uint64_t drawCount() const { return drawCount_; }
+    // Rastreador de desenhos (gs_trace.h). Criado sob demanda; sem as variáveis de
+    // ambiente ele fica inativo e o desenho não gasta nada com ele.
+    GsTrace& trace();
     // Pixels que os desenhos escreveriam pela conta analítica (produtor) e os que
     // o rasterizador de fato escreveu depois do SCISSOR e do SCANMSK (worker).
     // Têm de ser iguais: é o que o teste gs_coverage confere.
@@ -129,6 +134,8 @@ public:
     std::uint64_t pixelsShaded() const;
 
 private:
+    friend class GsTrace;
+
     struct Context {
         std::uint64_t tex0 = 0, tex1 = 0, clamp = 0, xyoffset = 0, miptbp1 = 0, miptbp2 = 0;
         std::uint64_t scissor = 0, alpha = 0, test = 0, fba = 0, frame = 0, zbuf = 0;
@@ -230,6 +237,11 @@ private:
     std::uint64_t coveredTotal_ = 0;  // pixels da conta analítica, sem reset
     std::uint64_t shaded_ = 0;        // pixels escritos pelo rasterizador (worker)
     std::set<std::string> warned_;
+
+    // Diagnóstico: VBlanks recebidos (vblankStart) e o rastreador, nulo sem as
+    // variáveis de ambiente. O produtor é o único que mexe nisto.
+    std::uint64_t vblanks_ = 0;
+    std::unique_ptr<GsTrace> trace_;
 };
 
 }  // namespace anyps2::rt::gs
