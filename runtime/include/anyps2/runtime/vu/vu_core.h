@@ -141,6 +141,42 @@ ANYPS2_VU_INLINE UpperResult computeUpperOp(const Regs& R, const vu::Upper& u, s
         r.setsFlags = fn != Max && fn != Min;
         r.readsAcc = fn == Madd || fn == Msub;
         if (k != Vec && k != Bc) r.srcB = 0;
+#if defined(ANYPS2_PS2F_SSE2)
+        if (fn != Max && fn != Min) {
+            // Os 4 componentes de uma vez. Cada componente e as flags saem
+            // bit a bit iguais às do laço escalar abaixo (ver ps2f::v4).
+            namespace v4 = ps2f::v4;
+            const auto load = [](const Reg128& v) ANYPS2_VU_LAMBDA_INLINE {
+                return v4::in(_mm_loadu_si128(static_cast<const __m128i*>(static_cast<const void*>(v.uw))));
+            };
+            const __m128 x = load(s);
+            const __m128 y = k == Vec ? load(t) : _mm_set1_ps(k == Bc ? tb : k == Qk ? q : ii);
+            __m128 res;
+            switch (fn) {
+                case Add: res = v4::add(x, y); break;
+                case Sub: res = v4::sub(x, y); break;
+                case Mul: res = v4::mul(x, y); break;
+                case Madd: res = v4::add(load(a), v4::in(v4::out(v4::mul(x, y)).bits)); break;
+                default: res = v4::sub(load(a), v4::in(v4::out(v4::mul(x, y)).bits)); break;
+            }
+            const v4::Out o = v4::out(res);
+            // Só os componentes de dest: valor e flags (x é o bit 3 de dest e o componente 0).
+            const __m128i dmask = _mm_cmpgt_epi32(
+                _mm_and_si128(_mm_set1_epi32(static_cast<int>(u.dest)), _mm_setr_epi32(8, 4, 2, 1)),
+                _mm_setzero_si128());
+            _mm_storeu_si128(static_cast<__m128i*>(static_cast<void*>(r.value.uw)), _mm_and_si128(o.bits, dmask));
+            // Máscara por componente → nibble com o componente c no bit 3 - c (a ordem do MAC).
+            const auto nibble = [&](__m128i m) ANYPS2_VU_LAMBDA_INLINE {
+                const __m128i rev = _mm_shuffle_epi32(_mm_and_si128(m, dmask), _MM_SHUFFLE(0, 1, 2, 3));
+                return static_cast<unsigned>(_mm_movemask_ps(_mm_castsi128_ps(rev)));
+            };
+            const __m128i zeroMag = _mm_cmpeq_epi32(_mm_and_si128(o.bits, _mm_set1_epi32(0x7FFFFFFF)), _mm_setzero_si128());
+            const __m128i neg = _mm_cmpgt_epi32(_mm_setzero_si128(), o.bits);
+            r.mac = static_cast<std::uint16_t>(nibble(zeroMag) | (nibble(neg) << 4) | (nibble(o.underflow) << 8) |
+                                               (nibble(o.overflow) << 12));
+            return;
+        }
+#endif
         for (unsigned c = 0; c < 4; ++c) {
             if (!hasComp(u.dest, c)) continue;
             const float x = F(s, c), y = opT(c, k);

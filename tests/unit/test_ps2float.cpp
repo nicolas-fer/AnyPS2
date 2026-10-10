@@ -5,6 +5,7 @@
 #include <string>
 
 #include "anyps2/runtime/ps2float.h"
+#include "anyps2/runtime/vu/vu_core.h"
 #include "minitest.h"
 
 namespace ps2f = anyps2::rt::ps2f;
@@ -136,6 +137,131 @@ TEST_CASE(runtime_ops, ps2float_branchless_matches_branching) {
             const ps2f::Out pm = ps2f::out(ps2f::mul(b, c));
             if (!same(ps2f::add(a, ps2f::in(pm.bits)), ref::madd(a, b, c))) report("madd", ab, bb, cb);
             if (!same(ps2f::sub(a, ps2f::in(pm.bits)), ref::msub(a, b, c))) report("msub", ab, bb, cb);
+        }
+    }
+    CHECK_EQ(bad, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// O caminho vetorial das instruções upper (vu_core.h) contra o laço escalar:
+// valor de cada componente, flags MAC e máscara dest têm de ser iguais bit a bit.
+// ---------------------------------------------------------------------------
+namespace {
+
+namespace vc = anyps2::rt::vucore;
+using anyps2::rt::Reg128;
+using anyps2::vu::U;
+
+enum class Fn { Add, Sub, Mul, Madd, Msub };
+enum class Kind { Vec, Bc, Q, I };
+struct OpDesc {
+    U op;
+    Fn fn;
+    Kind kind;
+    bool toAcc;
+};
+
+// As instruções que ganharam o caminho vetorial.
+constexpr OpDesc kOps[] = {
+    {U::ADD, Fn::Add, Kind::Vec, false},    {U::SUB, Fn::Sub, Kind::Vec, false},
+    {U::MUL, Fn::Mul, Kind::Vec, false},    {U::MADD, Fn::Madd, Kind::Vec, false},
+    {U::MSUB, Fn::Msub, Kind::Vec, false},  {U::ADDbc, Fn::Add, Kind::Bc, false},
+    {U::SUBbc, Fn::Sub, Kind::Bc, false},   {U::MULbc, Fn::Mul, Kind::Bc, false},
+    {U::MADDbc, Fn::Madd, Kind::Bc, false}, {U::MSUBbc, Fn::Msub, Kind::Bc, false},
+    {U::ADDq, Fn::Add, Kind::Q, false},     {U::SUBq, Fn::Sub, Kind::Q, false},
+    {U::MULq, Fn::Mul, Kind::Q, false},     {U::MADDq, Fn::Madd, Kind::Q, false},
+    {U::MSUBq, Fn::Msub, Kind::Q, false},   {U::ADDi, Fn::Add, Kind::I, false},
+    {U::SUBi, Fn::Sub, Kind::I, false},     {U::MULi, Fn::Mul, Kind::I, false},
+    {U::MADDi, Fn::Madd, Kind::I, false},   {U::MSUBi, Fn::Msub, Kind::I, false},
+    {U::ADDA, Fn::Add, Kind::Vec, true},    {U::SUBA, Fn::Sub, Kind::Vec, true},
+    {U::MULA, Fn::Mul, Kind::Vec, true},    {U::MADDA, Fn::Madd, Kind::Vec, true},
+    {U::MSUBA, Fn::Msub, Kind::Vec, true},  {U::ADDAbc, Fn::Add, Kind::Bc, true},
+    {U::SUBAbc, Fn::Sub, Kind::Bc, true},   {U::MULAbc, Fn::Mul, Kind::Bc, true},
+    {U::MADDAbc, Fn::Madd, Kind::Bc, true}, {U::MSUBAbc, Fn::Msub, Kind::Bc, true},
+    {U::ADDAq, Fn::Add, Kind::Q, true},     {U::SUBAq, Fn::Sub, Kind::Q, true},
+    {U::MULAq, Fn::Mul, Kind::Q, true},     {U::MADDAq, Fn::Madd, Kind::Q, true},
+    {U::MSUBAq, Fn::Msub, Kind::Q, true},   {U::ADDAi, Fn::Add, Kind::I, true},
+    {U::SUBAi, Fn::Sub, Kind::I, true},     {U::MULAi, Fn::Mul, Kind::I, true},
+    {U::MADDAi, Fn::Madd, Kind::I, true},   {U::MSUBAi, Fn::Msub, Kind::I, true},
+};
+
+// Referência: o laço escalar de antes do caminho vetorial, só com ps2f:: escalar.
+vc::UpperResult refUpper(const OpDesc& d, const vc::Regs& R, const anyps2::vu::Upper& u, std::uint32_t qBits,
+                         std::uint32_t iBits) {
+    vc::UpperResult r;
+    r.dest = u.dest;
+    r.srcA = u.fs;
+    r.srcB = u.ft;
+    r.writes = true;
+    r.toAcc = d.toAcc;
+    r.reg = static_cast<std::uint8_t>(d.toAcc ? 0 : u.fd);
+    r.setsFlags = true;
+    r.readsAcc = d.fn == Fn::Madd || d.fn == Fn::Msub;
+    if (d.kind != Kind::Vec && d.kind != Kind::Bc) r.srcB = 0;
+    const Reg128& s = R.vf[u.fs];
+    const Reg128& t = R.vf[u.ft];
+    for (unsigned c = 0; c < 4; ++c) {
+        if (!vc::hasComp(u.dest, c)) continue;
+        const float x = ps2f::in(s.uw[c]);
+        const float y = ps2f::in(d.kind == Kind::Vec ? t.uw[c]
+                                 : d.kind == Kind::Bc ? t.uw[u.bc]
+                                 : d.kind == Kind::Q  ? qBits
+                                                      : iBits);
+        const float a = ps2f::in(R.acc->uw[c]);
+        switch (d.fn) {
+            case Fn::Add: vc::setComp(r, c, ps2f::add(x, y)); break;
+            case Fn::Sub: vc::setComp(r, c, ps2f::sub(x, y)); break;
+            case Fn::Mul: vc::setComp(r, c, ps2f::mul(x, y)); break;
+            case Fn::Madd: vc::setComp(r, c, ps2f::add(a, ps2f::in(ps2f::out(ps2f::mul(x, y)).bits))); break;
+            case Fn::Msub: vc::setComp(r, c, ps2f::sub(a, ps2f::in(ps2f::out(ps2f::mul(x, y)).bits))); break;
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE(runtime_ops, ps2float_vector_upper_matches_scalar) {
+    Rng g{0xC0FFEE1234567ull};
+    Reg128 vf[32] = {};
+    Reg128 acc{};
+    std::uint32_t vi[32] = {};
+    const vc::Regs R{vf, vi, &acc};
+    constexpr unsigned kIters = 1'500'000;
+    unsigned bad = 0;
+    // Valor do PS2: sempre a palavra crua (denormais e expoente 255 incluídos; in() os trata).
+    auto word = [&]() { return (g.u32() % 11 == 0) ? kEdges[g.u32() % kNumEdges] : randomBits(g); };
+    for (unsigned i = 0; i < kIters; ++i) {
+        for (unsigned c = 0; c < 4; ++c) {
+            const std::uint32_t a = word();
+            vf[1].uw[c] = a;
+            vf[2].uw[c] = (g.u32() & 1) ? relatedBits(g, a) : word();
+            acc.uw[c] = (g.u32() & 1) ? relatedBits(g, a) : word();
+        }
+        const std::uint32_t q = word(), iw = (g.u32() & 3) == 0 ? q : word();
+        for (const OpDesc& d : kOps) {
+            anyps2::vu::Upper u;
+            u.op = d.op;
+            // Todas as 16 máscaras dest ao longo das iterações (e a cheia em metade delas).
+            u.dest = static_cast<std::uint8_t>((i & 1) ? 0xF : (g.u32() & 0xF));
+            u.fs = 1;
+            u.ft = 2;
+            u.fd = 3;
+            u.bc = static_cast<std::uint8_t>(g.u32() & 3);
+            const vc::UpperResult got = vc::computeUpper(R, u, q, iw);
+            const vc::UpperResult want = refUpper(d, R, u, q, iw);
+            const bool ok = got.writes == want.writes && got.toAcc == want.toAcc && got.reg == want.reg &&
+                            got.dest == want.dest && got.setsFlags == want.setsFlags && got.mac == want.mac &&
+                            got.srcA == want.srcA && got.srcB == want.srcB && got.readsAcc == want.readsAcc &&
+                            std::memcmp(got.value.uw, want.value.uw, 16) == 0;
+            if (!ok && bad++ < 5) {
+                ::minitest::reportFailure(
+                    __FILE__, __LINE__,
+                    "upper vetorial difere (op " + std::to_string(static_cast<int>(d.op)) + ", dest " +
+                        std::to_string(u.dest) + ", mac " + minitest::show(static_cast<unsigned>(got.mac)) + " x " +
+                        minitest::show(static_cast<unsigned>(want.mac)) + ") fs=" + minitest::show(vf[1].uw[0]) +
+                        " ft=" + minitest::show(vf[2].uw[0]));
+            }
         }
     }
     CHECK_EQ(bad, 0u);
