@@ -152,8 +152,20 @@ std::string describePacked(unsigned desc, std::uint64_t lo, std::uint64_t hi, st
             s << "PRIM=" << bits(lo, 0, 11) << " " << hx(bits(lo, 0, 11), 3);
             break;
         case 0x1:
-            s << "R=" << bits(lo, 0, 8) << " G=" << bits(lo, 32, 8) << " B=" << bits(hi, 0, 8)
-              << " A=" << bits(hi, 32, 8) << " Q=" << flt(ieeeFloat(q)) << " (do último ST)";
+        {
+            // As quatro palavras inteiras, com sinal: o GS só usa os 8 bits de baixo,
+            // e uma cor fora de 0..255 (FTOI0 de um valor negativo ou grande) é
+            // justamente o que se quer ver. O valor que o GS recebe vai entre parênteses.
+            const char* names[4] = {"R", "G", "B", "A"};
+            const std::uint32_t w[4] = {static_cast<std::uint32_t>(lo), static_cast<std::uint32_t>(lo >> 32),
+                                        static_cast<std::uint32_t>(hi), static_cast<std::uint32_t>(hi >> 32)};
+            for (unsigned c = 0; c < 4; ++c) {
+                if (c) s << " ";
+                s << names[c] << "=" << static_cast<std::int32_t>(w[c]);
+                if (w[c] > 0xFF) s << " (GS: " << (w[c] & 0xFF) << ", FORA DE 0..255)";
+            }
+            s << " Q=" << flt(ieeeFloat(q)) << " (do último ST)";
+        }
             break;
         case 0x2:
             q = static_cast<std::uint32_t>(hi);
@@ -252,10 +264,10 @@ std::unique_ptr<VuTrace> VuTrace::fromEnv() {
     if (!file || !*file) return nullptr;
     VuTraceConfig cfg;
     cfg.out = file;
-    if (const char* v = std::getenv("ANYPS2_VU_TRACE_FROM")) {
+    if (const char* v = std::getenv("ANYPS2_VU_TRACE_FROM"); v && *v) {
         if (!parseU64(v, cfg.from)) warn("ANYPS2_VU_TRACE_FROM inválido; usando 0");
     }
-    if (const char* v = std::getenv("ANYPS2_VU_TRACE_TO")) {
+    if (const char* v = std::getenv("ANYPS2_VU_TRACE_TO"); v && *v) {
         if (!parseU64(v, cfg.to)) warn("ANYPS2_VU_TRACE_TO inválido; sem limite superior");
     }
     if (const char* v = std::getenv("ANYPS2_VU_TRACE_KICK")) {
@@ -264,7 +276,7 @@ std::unique_ptr<VuTrace> VuTrace::fromEnv() {
             return nullptr;
         }
     }
-    if (const char* v = std::getenv("ANYPS2_VU_TRACE_MAX")) {
+    if (const char* v = std::getenv("ANYPS2_VU_TRACE_MAX"); v && *v) {
         std::uint64_t m = 0;
         if (parseU64(v, m) && m > 0) {
             cfg.maxPrograms = static_cast<unsigned>(std::min<std::uint64_t>(m, 1u << 20));

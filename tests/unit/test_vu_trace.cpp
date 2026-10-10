@@ -39,13 +39,13 @@ struct Rig {
     Runtime rt{info, RuntimeOptions{}};
 
     // Pacote no qword 0x10: GIFtag (NLOOP=1, EOP, PACKED, NREG=2, REGS=RGBAQ,XYZ2),
-    // RGBAQ (17, 34, 51, 68) e XYZ2 (x=400 px, y=300 px, z=0x1234, ADC=1).
+    // RGBAQ (17, 256, -1, 68) e XYZ2 (x=400 px, y=300 px, z=0x1234, ADC=1).
     // O qword 0x20 começa zerado e o microprograma grava 0x77 nele (ISW) antes do
     // XGKICK em 0x18.
     Rig() {
         std::uint8_t* d = rt.vu().data1.get();
         const std::uint64_t tag[2] = {1ull | (1ull << 15) | (2ull << 60), 0x51};
-        const std::uint64_t rgba[2] = {17ull | (34ull << 32), 51ull | (68ull << 32)};
+        const std::uint64_t rgba[2] = {17ull | (0x100ull << 32), 0xFFFFFFFFull | (68ull << 32)};
         const std::uint64_t xyz[2] = {6400ull | (4800ull << 32), 0x1234ull | (1ull << 47)};
         std::memcpy(d + 0x10 * 16, tag, 16);
         std::memcpy(d + 0x11 * 16, rgba, 16);
@@ -87,6 +87,8 @@ void setTraceEnv(const char* name, const char* value) {
 
 TEST_CASE(vu_trace, records_entry_memory_registers_and_decoded_gif_packet) {
     const char* out = "anyps2_vu_trace_test.txt";
+    std::string text;
+    {
     Rig t;
     VuTrace trace;
     VuTraceConfig cfg;
@@ -98,8 +100,9 @@ TEST_CASE(vu_trace, records_entry_memory_registers_and_decoded_gif_packet) {
     t.rt.vu1().interpret(0, 0x1234);
     t.rt.gs().processEvents(~std::uint64_t{0});
     CHECK_EQ(trace.runsRecorded(), 1u);
+    }  // fecha o arquivo
 
-    const std::string text = slurp(out);
+    text = slurp(out);
     CHECK(has(text, "início 0x0000"));
     CHECK(has(text, "XGKICK em 0x0018"));
     CHECK(has(text, "EE em 0x00001234"));
@@ -117,7 +120,7 @@ TEST_CASE(vu_trace, records_entry_memory_registers_and_decoded_gif_packet) {
     // Pacote decodificado
     CHECK(has(atKick, "NLOOP=1 EOP=1"));
     CHECK(has(atKick, "FLG=0 (PACKED) NREG=2 REGS=0x0000000000000051"));
-    CHECK(has(atKick, "RGBAQ: R=17 G=34 B=51 A=68"));
+    CHECK(has(atKick, "RGBAQ: R=17 G=256 (GS: 0, FORA DE 0..255) B=-1 (GS: 255, FORA DE 0..255) A=68"));
     CHECK(has(atKick, "XYZ2: X=6400 (400 px) Y=4800 (300 px) Z=4660 ADC=1"));
     std::remove(out);
 }
