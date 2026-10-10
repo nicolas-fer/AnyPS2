@@ -142,7 +142,7 @@ private:
     const vu::Instr& fetch(std::uint32_t pc);
     void dumpMicro();
 
-    // Parte comum de todo par, fora de linha (não depende da operação):
+    // Parte comum de todo par (não depende da operação), inline em vu_exec.h:
     // validação, flags/Q/P prontos e stalls antes; escrita do upper, flags
     // pendentes, LOI e ciclo depois.
     void pairBegin(const vu::Instr& in, std::uint32_t pc);

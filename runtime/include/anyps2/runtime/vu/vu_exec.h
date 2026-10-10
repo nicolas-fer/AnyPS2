@@ -51,7 +51,8 @@ ANYPS2_VU_INLINE void Vu::stallOn(unsigned vf) {
 
 // Início do par: só o caminho comum fica aqui (inline, com `in` constante no
 // código recompilado, o switch de stalls some). Os erros vão para
-// pairRejected, fora de linha.
+// pairRejected, fora de linha. É inline comum, não forçado: com __forceinline
+// o código gerado do microcódigo cresce e a vazão caiu (~10 para ~8 Mpares/s).
 inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
     if (in.upper.op == vu::U::INVALID || in.d || in.t) [[unlikely]] pairRejected(in, pc);
     commitReady();
@@ -76,7 +77,8 @@ inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
 }
 
 // Fim do par: escrita do upper, flags pendentes (4 ciclos depois), LOI e o
-// ciclo. Mesma sequência de antes; só saiu de vu.cpp para ser inline.
+// ciclo. A ordem é observável (o upper vence o lower no mesmo VF; as flags
+// valem 4 ciclos depois) e não pode ser trocada.
 inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
     // O upper é escrito depois do lower (se ambos escrevem o mesmo VF, vale o upper).
     if (ur.writes) {
