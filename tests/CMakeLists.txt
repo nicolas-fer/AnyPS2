@@ -5,6 +5,7 @@ add_executable(anyps2_tests
     unit/test_disasm.cpp
     unit/test_golden.cpp
     unit/test_runtime_ops.cpp
+    unit/test_ps2float.cpp
     unit/test_codegen.cpp
     unit/test_timing.cpp
     unit/test_gs.cpp

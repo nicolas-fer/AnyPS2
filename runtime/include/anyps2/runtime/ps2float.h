@@ -78,12 +78,16 @@ inline float towardZero(float r) {
 
 inline float add(float a, float b) {
     const float s = a + b;
-    if (!std::isfinite(s)) return s;
     // TwoSum (Knuth): erro exato de s = a + b arredondado.
     const float bb = s - a;
     const float err = (a - (s - bb)) + (b - bb);
-    if (err != 0.0f && ((err < 0.0f) != (s < 0.0f))) return towardZero(s);
-    return s;
+    const std::uint32_t bits = toBits(s);
+    const std::uint32_t mag = bits & 0x7FFFFFFFu;
+    // Sem desvio: o sentido do erro é imprevisível (metade das somas recua um
+    // ulp) e um desvio errado custa mais que o cálculo. Infinito, NaN e zero
+    // ficam como estão (mag - 1 < 0x7F7FFFFF só vale para finitos não nulos).
+    const bool away = (err != 0.0f) & ((err < 0.0f) != (s < 0.0f)) & (mag - 1u < 0x7F7FFFFFu);
+    return fromBits(bits - (away ? 1u : 0u));
 }
 
 inline float sub(float a, float b) {
@@ -92,10 +96,12 @@ inline float sub(float a, float b) {
 
 inline float mul(float a, float b) {
     const double exact = static_cast<double>(a) * static_cast<double>(b);
-    float r = static_cast<float>(exact);
-    if (!std::isfinite(r)) return r;
-    if (std::fabs(static_cast<double>(r)) > std::fabs(exact)) r = towardZero(r);
-    return r;
+    const float r = static_cast<float>(exact);
+    const std::uint32_t bits = toBits(r);
+    const std::uint32_t mag = bits & 0x7FFFFFFFu;
+    // Sem desvio (ver add): recua um ulp se o arredondamento passou do exato.
+    const bool away = (std::fabs(static_cast<double>(r)) > std::fabs(exact)) & (mag - 1u < 0x7F7FFFFFu);
+    return fromBits(bits - (away ? 1u : 0u));
 }
 
 inline float div(float a, float b) {
