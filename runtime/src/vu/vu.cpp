@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +85,27 @@ void Vu::setPrograms(const VuProgramEntry* programs, std::size_t count) {
     }
 }
 
+void Vu::seedPipeline(const VuPipelineSeed& seed) {
+    for (unsigned i = 1; i < 32; ++i) vfReady_[i] = cycle_ + seed.vfBusy[i];
+    accReady_ = cycle_ + seed.accBusy;
+    std::vector<VuPipelineSeed::Flags> flags = seed.flags;
+    if (flags.size() > kPending) flags.resize(kPending);
+    std::stable_sort(flags.begin(), flags.end(),
+                     [](const auto& a, const auto& b) { return a.delay < b.delay; });  // a fila é por ordem de chegada
+    pendHead_ = seed.head % kPending;
+    pendCount_ = static_cast<unsigned>(flags.size());
+    for (unsigned i = 0; i < pendCount_; ++i) {
+        const auto& f = flags[i];
+        pending_[(pendHead_ + i) % kPending] = {cycle_ + f.delay, f.hasMac, f.mac, f.hasClip, f.clip};
+    }
+    q_ = {seed.q.active, cycle_ + seed.q.delay, seed.q.value, seed.q.flags};
+    p_ = {seed.p.active, cycle_ + seed.p.delay, seed.p.value, 0};
+    nextCommit_ = kNoCommit;
+    if (pendCount_ > 0) nextCommit_ = pending_[pendHead_].ready;
+    if (q_.active) nextCommit_ = std::min(nextCommit_, q_.ready);
+    if (p_.active) nextCommit_ = std::min(nextCommit_, p_.ready);
+}
+
 std::string Vu::where(std::uint32_t pc) const {
     return "VU" + std::to_string(unit_) + " em " + anyps2::hex(pc, 4) + " (microprograma iniciado em " +
            anyps2::hex(startPc_, 4) + (rt_ ? " pelo EE em " + rt_->describe(eePc_) : std::string()) + ")";
@@ -102,7 +124,9 @@ void Vu::fail(const std::string& what, std::uint32_t pc) const {
 // ---------------------------------------------------------------------------
 
 void Vu::commitPending() {
+    ANYPS2_VU_STAT(++stats_.commitPendingCalls);
     while (pendCount_ > 0 && pending_[pendHead_].ready <= cycle_) {
+        ANYPS2_VU_STAT(++stats_.flagsCommitted);
         const PendingFlags& p = pending_[pendHead_];
         if (p.hasMac) {
             regs_.vi[reg::Mac] = p.mac;
@@ -112,8 +136,14 @@ void Vu::commitPending() {
         pendHead_ = (pendHead_ + 1) % kPending;
         --pendCount_;
     }
-    if (q_.active && q_.ready <= cycle_) commitQ();
-    if (p_.active && p_.ready <= cycle_) commitP();
+    if (q_.active && q_.ready <= cycle_) {
+        ANYPS2_VU_STAT(++stats_.qCommitted);
+        commitQ();
+    }
+    if (p_.active && p_.ready <= cycle_) {
+        ANYPS2_VU_STAT(++stats_.pCommitted);
+        commitP();
+    }
     nextCommit_ = kNoCommit;
     if (pendCount_ > 0) nextCommit_ = pending_[pendHead_].ready;
     if (q_.active) nextCommit_ = std::min(nextCommit_, q_.ready);
@@ -203,6 +233,9 @@ std::uint32_t Vu::vifTop(bool itop, std::uint32_t pc) {
 }
 
 void Vu::xgkick(std::uint32_t addr, std::uint32_t pc) {
+    ANYPS2_VU_STAT(++stats_.xgkicks);
+    if (xgkickLog_) xgkickLog_->push_back({addr, cycle_});
+    if (!rt_ && xgkickLog_) return;
     if (!rt_) fail("XGKICK sem runtime", pc);
     if (tracing_) trace_->kick(*this, addr, pc);  // antes do envio: se o GIF falhar, o registro fica
     rt_->gif().kick(data_, dataSize_, addr, pc);
@@ -243,6 +276,7 @@ const vu::Instr& Vu::fetch(std::uint32_t at) {
 // o par de pc, o que coincide com a micro memória por mais pares adiante
 // (empate: o que foi carregado no endereço conhecido pelo MPG).
 Vu::Match Vu::findBlock(std::uint32_t pc) const {
+    ANYPS2_VU_STAT(++stats_.findBlockCalls);
     std::uint32_t w[2];
     std::memcpy(w, micro_ + pc, 8);
     const auto range = index_.equal_range((std::uint64_t{w[1]} << 32) | w[0]);
@@ -294,6 +328,7 @@ void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
         if (compiled && !index_.empty()) {
             const Match m = findBlock(cur.pc);
             if (m.entry) {
+                ANYPS2_VU_STAT(++stats_.findBlockHits);
                 const std::uint64_t before = pairs_;
                 m.entry->fn(*this, m.base, cur);
                 viaCompiled += pairs_ - before;
@@ -313,6 +348,7 @@ void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
         }
     }
     finish();
+    ANYPS2_VU_STAT((++stats_.starts, stats_.pairs += pairs_, stats_.maxPairsPerStart = std::max(stats_.maxPairsPerStart, pairs_)));
     regs_.vi[reg::TPC] = cur.pc / 8;
     compiledPairs_ += viaCompiled;
     interpretedPairs_ += viaInterpreter;
