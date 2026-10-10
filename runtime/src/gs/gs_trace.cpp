@@ -471,7 +471,6 @@ void GsTrace::writeLogLine(std::uint64_t vblank, std::uint64_t draw, std::uint32
          << bits(s.alpha, 6, 2) << "," << hex(bits(s.alpha, 32, 8), 2) << " TBP0=" << hex(bits(s.tex0, 0, 14), 4)
          << " TPSM=" << psmName(static_cast<std::uint32_t>(bits(s.tex0, 20, 6))) << " TW=" << bits(s.tex0, 26, 4)
          << " TH=" << bits(s.tex0, 30, 4) << " TFX=" << bits(s.tex0, 35, 2) << "\n";
-    log_.flush();
 }
 
 void GsTrace::writeProbe() {
@@ -499,10 +498,14 @@ void GsTrace::writeProbe() {
           << "  UV: u=" << fixed(h.at.u) << " v=" << fixed(h.at.v) << "\n";
         // Texel no nível 0: STQ divide por Q; com FST=1 o UV já está em texels.
         const bool fst = bits(st.attr, 8, 1) != 0;
-        const double texU = fst ? h.at.u : h.at.s / h.at.q * static_cast<double>(1ull << tw);
-        const double texV = fst ? h.at.v : h.at.t / h.at.q * static_cast<double>(1ull << th);
-        o << "  texel no nível 0: u=" << fixed(texU) << " v=" << fixed(texV)
-          << "  (texel e CLUT amostrados: pendente, exige o amostrador do rasterizador)\n";
+        if (!fst && h.at.q == 0) {
+            o << "  texel no nível 0: indefinido (Q = 0)\n";
+        } else {
+            const double texU = fst ? h.at.u : h.at.s / h.at.q * static_cast<double>(1ull << tw);
+            const double texV = fst ? h.at.v : h.at.t / h.at.q * static_cast<double>(1ull << th);
+            o << "  texel no nível 0: u=" << fixed(texU) << " v=" << fixed(texV)
+              << "  (texel e CLUT amostrados: pendente, exige o amostrador do rasterizador)\n";
+        }
     }
     o << "\n";
     o.flush();

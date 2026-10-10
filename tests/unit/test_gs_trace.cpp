@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <initializer_list>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -204,4 +206,35 @@ TEST_CASE(gs_trace, inactive_by_default) {
     CHECK(!g.trace().active());
     sprite(g, 8, 8, 24, 24, rgbaq(200, 0, 0, 0x40), 0x100);
     CHECK_EQ(g.drawCount(), std::uint64_t{1});
+}
+
+namespace {
+
+void setTraceEnv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+}  // namespace
+
+TEST_CASE(gs_trace, from_env_parses_points_and_rejects_bad_ones) {
+    const char* out = "gs_trace_env_test.txt";
+    setTraceEnv("ANYPS2_GS_PROBE_OUT", out);
+    setTraceEnv("ANYPS2_GS_DRAWLOG", "");
+    // Dois pontos válidos: liga a sonda.
+    setTraceEnv("ANYPS2_GS_PROBE", "10,20,30,40");
+    CHECK(GsTrace::fromEnv() != nullptr);
+    // Formatos inválidos (coordenada ímpar, negativa, lixo, mais de 8 pontos): sonda
+    // desligada, e sem o log não há rastreador.
+    for (const char* bad : {"10", "10,-2", "10,2x", "1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9"}) {
+        setTraceEnv("ANYPS2_GS_PROBE", bad);
+        CHECK(GsTrace::fromEnv() == nullptr);
+    }
+    setTraceEnv("ANYPS2_GS_PROBE", "");
+    CHECK(GsTrace::fromEnv() == nullptr);
+    setTraceEnv("ANYPS2_GS_PROBE_OUT", "");
+    std::remove(out);
 }
