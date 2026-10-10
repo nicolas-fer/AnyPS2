@@ -19,9 +19,10 @@ add_executable(anyps2_tests
     unit/test_iop.cpp
     unit/test_disc.cpp
     unit/test_config.cpp
+    unit/test_gsplay.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
-target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu anyps2_disc)
+target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu anyps2_disc anyps2_gsplay_lib)
 target_compile_definitions(anyps2_tests PRIVATE
     ANYPS2_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
     ANYPS2_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
@@ -32,7 +33,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_trace ipu vu_isa vu vu_trace iop disc config)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_trace ipu vu_isa vu vu_trace iop disc config gsplay)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
