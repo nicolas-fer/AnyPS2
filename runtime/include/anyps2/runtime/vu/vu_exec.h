@@ -31,6 +31,7 @@ inline constexpr std::uint64_t fdivLatency(vu::L op) {
 // Caso comum (nada pendente ficou pronto): uma comparação. nextCommit_ é
 // sempre ≤ o primeiro evento pendente (baixá-lo é sempre seguro).
 ANYPS2_VU_INLINE void Vu::commitReady() {
+    ANYPS2_VU_STAT(++stats_.commitReadyChecks);
     if (cycle_ >= nextCommit_) commitPending();
 }
 

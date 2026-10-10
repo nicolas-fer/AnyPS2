@@ -8,6 +8,7 @@ else()
     set(_anyps2_fetch_default OFF)
 endif()
 option(ANYPS2_FETCH_SDL "Baixa e compila o SDL2 se ele não for encontrado no sistema" ${_anyps2_fetch_default})
+option(ANYPS2_VU_STATS "Contadores de diagnóstico do pipeline do VU (custam vazão; só para perfilar)" OFF)
 # Dear ImGui (menu de configuração dentro da janela): com ANYPS2_IMGUI_DIR usa
 # uma cópia local; senão baixa a versão fixada abaixo, se ANYPS2_FETCH_IMGUI.
 # Só existe com ANYPS2_WITH_SDL=ON.
@@ -73,6 +74,10 @@ add_library(anyps2::runtime ALIAS anyps2_runtime)
 target_include_directories(anyps2_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(anyps2_runtime PUBLIC anyps2::common anyps2::vu anyps2::iopfmt)
 target_compile_features(anyps2_runtime PUBLIC cxx_std_20)
+if(ANYPS2_VU_STATS)
+    # PUBLIC: o C++ recompilado do VU inclui vu_exec.h e tem de ver o mesmo layout de Vu.
+    target_compile_definitions(anyps2_runtime PUBLIC ANYPS2_VU_STATS=1)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(anyps2_runtime PUBLIC Threads::Threads)
 if(COMMAND anyps2_set_warnings)

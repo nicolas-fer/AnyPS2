@@ -43,6 +43,58 @@ struct VuProgramEntry {
 };
 inline constexpr std::uint32_t kNoLoadHint = 0xFFFFFFFFu;
 
+// Contadores de diagnóstico do pipeline do VU. Só existem com a macro
+// ANYPS2_VU_STATS (opção ANYPS2_VU_STATS do CMake, desligada por padrão): sem
+// ela cada ANYPS2_VU_STAT(...) some e o código gerado é o mesmo de antes.
+#ifdef ANYPS2_VU_STATS
+#define ANYPS2_VU_STAT(...) (__VA_ARGS__)
+struct VuStats {
+    std::uint64_t starts = 0;                 // execuções (start/interpret)
+    std::uint64_t pairs = 0;                  // pares executados
+    std::uint64_t maxPairsPerStart = 0;
+    std::uint64_t findBlockCalls = 0;         // buscas de bloco recompilado
+    std::uint64_t findBlockHits = 0;          // ...que acharam um bloco
+    std::uint64_t commitReadyChecks = 0;      // testes inline de commitReady
+    std::uint64_t commitPendingCalls = 0;     // ...que caíram em commitPending
+    std::uint64_t flagsCommitted = 0;         // entradas de flags (MAC/clip) aplicadas
+    std::uint64_t qCommitted = 0, pCommitted = 0;
+    std::uint64_t stalls = 0;                 // stalls efetivos (o ciclo avançou)
+    std::uint64_t stallCycles = 0;            // ciclos perdidos neles
+    std::uint64_t xgkicks = 0;
+};
+#else
+#define ANYPS2_VU_STAT(...) ((void)0)
+#endif
+
+// XGKICK observado por um teste (VU sem Runtime): endereço e ciclo do par.
+struct VuXgkickEvent {
+    std::uint32_t addr;
+    std::uint64_t cycle;
+};
+
+// Estado do pipeline com que um teste começa um microprograma (ver
+// Vu::seedPipeline). Os atrasos são em ciclos a partir do ciclo atual.
+struct VuPipelineSeed {
+    std::array<std::uint8_t, 32> vfBusy{};  // ciclos até cada VF ficar pronto
+    std::uint8_t accBusy = 0;
+    struct Flags {
+        std::uint8_t delay = 0;
+        bool hasMac = false;
+        std::uint16_t mac = 0;
+        bool hasClip = false;
+        std::uint32_t clip = 0;
+    };
+    std::vector<Flags> flags;               // fila de flags em voo (até 16)
+    unsigned head = 0;                      // posição da cabeça no anel
+    struct Unit {                           // Q (FDIV) ou P (EFU) em voo
+        bool active = false;
+        std::uint8_t delay = 0;
+        std::uint32_t value = 0;
+        std::uint32_t flags = 0;
+    };
+    Unit q, p;
+};
+
 // Um Vector Unit em modo micro (VU0 via VCALLMS, VU1 via MSCAL/CMSAR1).
 //
 // A execução é síncrona: o microprograma roda inteiro quando é iniciado (o
@@ -93,6 +145,15 @@ public:
     std::uint64_t compiledPairs() const { return compiledPairs_; }
     std::uint64_t interpretedPairs() const { return interpretedPairs_; }
     void reset();
+    // Só para testes: põe o pipeline num estado que o fluxo normal não gera
+    // (flags, Q e P em voo e VF ocupados na entrada do microprograma).
+    void seedPipeline(const VuPipelineSeed& seed);
+    // Só para testes: registra os XGKICK (e, sem Runtime, não falha neles).
+    void setXgkickLog(std::vector<VuXgkickEvent>* log) { xgkickLog_ = log; }
+#ifdef ANYPS2_VU_STATS
+    const VuStats& stats() const { return stats_; }
+    void resetStats() { stats_ = {}; }
+#endif
 
     // ---- Execução de um par (interpretador e código recompilado) -----------
     struct Flow {
@@ -156,7 +217,10 @@ private:
     void commitP();
     void stallOn(unsigned vf);
     void stallUntil(std::uint64_t c) {
-        if (c > cycle_) cycle_ = c;
+        if (c > cycle_) {
+            ANYPS2_VU_STAT((++stats_.stalls, stats_.stallCycles += c - cycle_));
+            cycle_ = c;
+        }
     }
     Reg128& mem(std::uint32_t qwordIndex, std::uint32_t pc);
     Reg128& memVu0Cross(std::uint32_t index, std::uint32_t pc);  // VU0 → registradores do VU1
@@ -207,6 +271,10 @@ private:
     std::unordered_multimap<std::uint64_t, BlockRef> index_;
     std::string dumpDir_;
     std::unordered_set<std::uint64_t> dumped_;
+    std::vector<VuXgkickEvent>* xgkickLog_ = nullptr;
+#ifdef ANYPS2_VU_STATS
+    mutable VuStats stats_;  // mutable: findBlock é const
+#endif
 
     // Cache de decodificação do interpretador
     struct Cached {
