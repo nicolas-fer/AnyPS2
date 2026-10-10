@@ -26,6 +26,7 @@ class Video;
 class Input;
 class Audio;
 class Vu;
+class VuTrace;
 struct VuProgramEntry;
 namespace gs {
 class Gs;
@@ -162,6 +163,8 @@ public:
     void onVblank(std::uint32_t pc);
     const RuntimeOptions& options() const { return options_; }
     const ProgramInfo& program() const { return program_; }
+    // VBlanks recebidos por onVblank (o VBlank n é o n-ésimo; 0 antes do primeiro).
+    std::uint64_t vblanks() const { return vblanks_; }
 
     // Converte endereço em "função+offset" para mensagens.
     std::string describe(std::uint32_t address) const;
@@ -196,6 +199,7 @@ private:
     };
     std::unique_ptr<Vu1Regs> vu1Regs_;
     std::unique_ptr<Vu> vu0_, vu1_;
+    std::unique_ptr<VuTrace> vuTrace_;  // ANYPS2_VU_TRACE (liga-se ao VU1)
     std::unique_ptr<Video> video_;
     std::unique_ptr<Input> input_;
     std::unique_ptr<Audio> audio_;

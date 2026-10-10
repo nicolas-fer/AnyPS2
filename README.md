@@ -211,6 +211,10 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_GS_PROBE_OUT=arquivo` | arquivo de saída da sonda (padrão: `gs_probe.txt`) |
 | `ANYPS2_GS_DRAWLOG=arquivo` | uma linha compacta por desenho do intervalo `ANYPS2_GS_DRAWLOG_FROM`..`_TO` (VBlanks), sem ler a VRAM; para ver a sequência de passadas de um quadro |
 | `ANYPS2_GS_DRAWLOG_FROM=n`, `ANYPS2_GS_DRAWLOG_TO=n` | intervalo de VBlanks do log de desenhos, inclusivo (padrão: 0 até o fim) |
+| `ANYPS2_VU_TRACE=arquivo` | rastreador de dados do VU1 (interpretado ou recompilado; custo zero desligado): para cada microprograma do intervalo guarda os registradores e a memória de dados na entrada e, se houver um XGKICK listado em `ANYPS2_VU_TRACE_KICK`, grava no arquivo a entrada, o estado e a memória de dados no XGKICK e o pacote GIF decodificado (GIFtag e cada qword por registrador) |
+| `ANYPS2_VU_TRACE_FROM=n`, `ANYPS2_VU_TRACE_TO=n` | intervalo de VBlanks do rastreador do VU1, inclusivo (o VBlank n é o n-ésimo do runtime; padrão: 0 até o fim) |
+| `ANYPS2_VU_TRACE_KICK=lista` | endereços (bytes da micro memória) dos XGKICK a registrar, separados por vírgula, por exemplo `0x2A18,0x2A10` (padrão: todos) |
+| `ANYPS2_VU_TRACE_MAX=n` | máximo de microprogramas registrados (padrão: 4) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 | `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
 | `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |

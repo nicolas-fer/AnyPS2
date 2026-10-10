@@ -12,6 +12,7 @@
 namespace anyps2::rt {
 
 class Runtime;
+class VuTrace;
 
 // Estado do laço de execução de um microprograma, compartilhado entre o
 // código recompilado e o interpretador (um pode continuar onde o outro parou,
@@ -65,6 +66,7 @@ public:
     unsigned unit() const { return unit_; }
     const vucore::Regs& regs() const { return regs_; }
     std::uint8_t* data() { return data_; }
+    std::uint32_t dataSize() const { return dataSize_; }
     std::uint8_t* micro() { return micro_; }
     std::uint32_t microSize() const { return microSize_; }
 
@@ -79,6 +81,12 @@ public:
     // ANYPS2_VU_DUMP: grava a micro memória dos programas interpretados em
     // dir/vu<unidade>_<hash>.bin (entrada para "anyps2 recomp --vu-dumps").
     void setDumpDir(std::string dir) { dumpDir_ = std::move(dir); }
+    // ANYPS2_VU_TRACE: rastreador de dados (vu_trace.h). Nulo desliga; não
+    // é dono do objeto.
+    void setTrace(VuTrace* t) {
+        trace_ = t;
+        tracing_ = t != nullptr;
+    }
     // Modo macro (só VU0): executa uma instrução COP2 vinda do EE e conclui o
     // pipeline (o EE vê o resultado, as flags e Q imediatamente).
     void macro(const vu::Instr& in, std::uint32_t eePc);
@@ -207,6 +215,8 @@ private:
     std::unordered_multimap<std::uint64_t, BlockRef> index_;
     std::string dumpDir_;
     std::unordered_set<std::uint64_t> dumped_;
+    VuTrace* trace_ = nullptr;   // rastreador (ANYPS2_VU_TRACE), não é dono
+    bool tracing_ = false;       // trace_ != nullptr: o único teste nos caminhos quentes
 
     // Cache de decodificação do interpretador
     struct Cached {

@@ -26,6 +26,7 @@
 #include "anyps2/runtime/video.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/vu/vu_trace.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -82,6 +83,8 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
         }
         v->setDumpDir(options_.vuDumpDir);
     }
+    vuTrace_ = VuTrace::fromEnv();
+    if (vuTrace_) vu1_->setTrace(vuTrace_.get());
 }
 
 Runtime::~Runtime() {
