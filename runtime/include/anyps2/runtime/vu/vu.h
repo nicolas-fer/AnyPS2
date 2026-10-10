@@ -77,7 +77,6 @@ struct VuXgkickEvent {
 // Vu::seedPipeline). Os atrasos são em ciclos a partir do ciclo atual.
 struct VuPipelineSeed {
     std::array<std::uint8_t, 32> vfBusy{};  // ciclos até cada VF ficar pronto
-    std::uint8_t accBusy = 0;
     struct Flags {
         std::uint8_t delay = 0;
         bool hasMac = false;
@@ -255,7 +254,6 @@ private:
     // Pipeline
     std::uint64_t cycle_ = 0;
     std::array<std::uint64_t, 32> vfReady_{};
-    std::uint64_t accReady_ = 0;
     static constexpr unsigned kPending = 16;
     std::array<PendingFlags, kPending> pending_{};
     unsigned pendHead_ = 0, pendCount_ = 0;

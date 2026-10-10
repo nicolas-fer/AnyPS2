@@ -372,6 +372,33 @@ TEST_CASE(vu, micro_flag_latency_and_stalls) {
     CHECK_EQ(s.r1().vi[vucore::reg::Mac], 0x0080u);  // fim: pipeline concluído (S em x)
 }
 
+TEST_CASE(vu, micro_acc_chain_does_not_stall) {
+    // MULA seguida de MADDA não espera o ACC (o hardware passa o acumulador
+    // adiante). O FMAND no mesmo par da MADDA tem de ver o MAC do ADD de 4 pares
+    // antes, e não o da MULA: é assim que o microcódigo do GT4 decide descartar
+    // triângulos; com um stall de ACC as faces da frente dos carros sumiam.
+    Rig t;
+    setVf(t.r1().vf[2], 1, 1, 1, 1);
+    setVf(t.r1().vf[3], -1, -1, -1, -1);
+    t.r1().vi[2] = 0xFFFF;
+    const std::uint32_t mula = upx(0x2A, X, 2, 2), madda = upx(0x29, X, 2, 2), madd = up(0x29, X, 2, 2, 5);
+    CHECK_EQ(anyps2::vu::upperText(anyps2::vu::decode(kLNop, mula)), std::string("mula.x accx,vf02x,vf02x"));
+    CHECK_EQ(anyps2::vu::upperText(anyps2::vu::decode(kLNop, madda)), std::string("madda.x accx,vf02x,vf02x"));
+    t.program1({
+        {kLNop, up(0x28, X, 3, 2, 1)},              // 00 add.x vf1, vf2, vf3 → 0: MAC Z(x)
+        {kLNop, kUNop},
+        {kLNop, kUNop},
+        {kLNop, mula},                              // 18 mula.x acc = 1
+        {lo(0x1A, 0, 1, 2, 0), madda},              // 20 madda.x acc += 1 | fmand vi1, vi2
+        {kLNop, madd},                              // 28 madd.x vf5 = acc + 1
+        {kLNop, kUNop | (1u << 30)},
+        {kLNop, kUNop},
+    });
+    t.rt.vu1().interpret(0, 0);
+    CHECK_EQ(t.r1().vi[1], 0x0008u);  // o MAC do ADD, não o da MULA (positivo: 0)
+    CHECK_EQ(bf(t.r1().vf[5].uw[0]), 3.0f);
+}
+
 TEST_CASE(vu, micro_q_latency_and_waitq) {
     Rig t;
     setVf(t.r1().vf[1], 6, 0, 0, 0);

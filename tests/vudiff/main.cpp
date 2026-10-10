@@ -120,7 +120,6 @@ anyps2::rt::VuPipelineSeed randomPipeline(Rng& r) {
     for (unsigned i = 1; i < 32; ++i) {
         if (r.below(4) == 0) seed.vfBusy[i] = static_cast<std::uint8_t>(1 + r.below(6));
     }
-    if (r.below(4) == 0) seed.accBusy = static_cast<std::uint8_t>(1 + r.below(6));
     const std::uint32_t n = r.below(4) == 0 ? 0 : r.below(7);
     for (std::uint32_t i = 0; i < n; ++i) {
         anyps2::rt::VuPipelineSeed::Flags f;

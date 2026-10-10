@@ -780,13 +780,27 @@ Marco 7 — o vídeo de abertura (em andamento):
 - ✅ Sonda do GS: `ANYPS2_GS_PROBE=x,y` (estado de cada desenho que toca o
   pixel, com a cor e o Z antes e depois) e `ANYPS2_GS_DRAWLOG` (uma linha
   por desenho), para diagnosticar defeitos de imagem.
-- Partes pretas dos carros (sonda no buffer 0xF0, onde a cena 3D é desenhada
+- ✅ **Partes pretas dos carros e polígonos pretos do cenário: o ACC não para o
+  pipeline do VU.** O modelo esperava 4 ciclos por MADDA/MADD/OPMSUB atrás de uma
+  MULA/OPMULA; o hardware passa o acumulador adiante sem espera. O atraso mudava
+  quais flags MAC um FMAND no mesmo par enxergava, e o microcódigo do GT4 usa esse
+  FMAND (com OPMULA/OPMSUB) para descartar triângulos: as faces da frente sumiam e
+  as de trás apareciam. Achado reproduzindo GS dumps do PCSX2 no nosso GS
+  (`anyps2_gsplay`: a imagem saía certa, então o GS estava correto) e comparando,
+  com o carro da vitrine no mesmo ângulo, a sonda de pixel dos dois lados. Teste
+  `vu.micro_acc_chain_does_not_stall`.
+- (histórico) Partes pretas dos carros (sonda no buffer 0xF0, onde a cena 3D é desenhada
   antes de ser copiada para a tela): a pintura entra escura (cor de vértice
   19,19,20 em MODULATE) e um triângulo grande com cor de vértice (0,0,0) e Z
   maior que o da carroceria (GEQUAL) cobre o pixel. As cores e o Z vêm do
   microcódigo do VU1: o próximo passo é conferir a saída do VU1 desses desenhos.
-- Próximos passos: as partes pretas dos carros (com a sonda); o VU1 da
-  corrida; o cache de texturas. O som: ver o marco 8.
+- ✅ VU: aritmética do upper sem desvio e em SSE2 (ADD/SUB/MUL/MADD/MSUB nos 4
+  componentes), bit a bit idêntica: laço longo do vu_diff de 19,4 para 60,6 Mpares/s.
+- Ferramentas de diagnóstico: `anyps2_gsplay` (reproduz GS dumps do PCSX2),
+  `ANYPS2_GS_TEXDUMP`, `ANYPS2_GS_VRAMLOG` (com o PATH de origem), vértices no
+  `ANYPS2_GS_DRAWLOG`, `ANYPS2_VU_TRACE`.
+- Próximos passos: medir a velocidade com a máquina livre; o cache de texturas.
+  O som: ver o marco 8.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
 (efeitos; a música de fundo e o áudio dos vídeos ainda não):

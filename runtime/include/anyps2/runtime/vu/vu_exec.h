@@ -61,18 +61,13 @@ inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
     // Stalls pelos operandos do upper.
     const vu::Upper& u = in.upper;
     if (u.op != vu::U::NOP) {
+        // O ACC não para o pipeline: MULA/MADDA/MADD (e OPMULA/OPMSUB) encadeados
+        // um atrás do outro passam o acumulador adiante sem espera, como no
+        // hardware. Um stall aqui atrasa o par e muda quais flags MAC um FMAND
+        // no mesmo par enxerga: o microcódigo do GT4 descarta triângulos por esse
+        // FMAND (faces da frente sumiam e as de trás apareciam nos carros).
         stallOn(u.fs);
         stallOn(u.ft);
-        switch (u.op) {
-            case vu::U::MADD: case vu::U::MSUB: case vu::U::MADDbc: case vu::U::MSUBbc: case vu::U::MADDq:
-            case vu::U::MSUBq: case vu::U::MADDi: case vu::U::MSUBi: case vu::U::MADDA: case vu::U::MSUBA:
-            case vu::U::MADDAbc: case vu::U::MSUBAbc: case vu::U::MADDAq: case vu::U::MSUBAq:
-            case vu::U::MADDAi: case vu::U::MSUBAi: case vu::U::OPMSUB:
-                stallUntil(accReady_);
-                break;
-            default:
-                break;
-        }
         commitReady();
     }
 }
@@ -84,8 +79,7 @@ inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
     // O upper é escrito depois do lower (se ambos escrevem o mesmo VF, vale o upper).
     if (ur.writes) {
         vucore::writeUpper(regs_, ur);
-        if (ur.toAcc) accReady_ = cycle_ + vuexec::kFmacLatency;
-        else if (ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
+        if (!ur.toAcc && ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
     }
     if (ur.setsFlags || ur.setsClip) {
         if (pendCount_ == kPending) [[unlikely]] {  // nunca deveria acontecer (latência fixa)
