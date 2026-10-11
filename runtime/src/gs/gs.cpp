@@ -346,7 +346,7 @@ bool Gs::noteClutBarrier(const VramAccess& src) {
         late = late || p.seq > issued;
         host = host || p.host;
     }
-    if (hostOpenValid_ && accessesOverlap(hostOpen_, src)) host = true;
+    if (hostOpenValid_ && hostQueued_ && accessesOverlap(hostOpen_, src)) host = true;  // o HOST direto não causa a barreira
     if (outstandingLostNeed_ > done) ++bandStats_.clutLost;
     if (host) ++bandStats_.clutHost;
     // Escritas conflitantes desde a última barreira (pending_): faixas e blocos.

@@ -442,7 +442,6 @@ void Gs::draw(std::uint32_t pc) {
             a.rectValid = !a.pages.full();
         }
     }
-    if (!clutReads_.empty()) noteClutWar(writes, nw);
     // Gerações de página (bumpPages): as escritas deste desenho entram na ordem do
     // programa, antes de qualquer desenho seguinte. A simulação do cache olha antes,
     // com as gerações que a textura tinha quando o desenho a fixou. Desenhos sozinhos
@@ -528,6 +527,10 @@ void Gs::draw(std::uint32_t pc) {
             if (reads[j].surface == 2) bandStats_.conflictPairs.add(e.fbp / 32, e.tbp[0]);
         }
     }
+    // Só conta como escrita depois de leitura de CLUT a que entraria no pending_ sem
+    // barreira: se este desenho já abre uma barreira por outro motivo, a escrita viria
+    // depois dela e, sem a barreira de CLUT, não criaria barreira nenhuma a mais.
+    if (!conflict && !clutReads_.empty()) noteClutWar(writes, nw);
     if (conflict) {
         clearPending();
         ++bandStats_.barrierKind[BandStats::BkConflict];
