@@ -88,8 +88,9 @@ bool accessesOverlap(const VramAccess& a, const VramAccess& b);
 //    ordem de programa, termina antes das tarefas do desenho que lê (barreira posta pelo
 //    produtor em draw), e toda escrita posterior espera esse desenho (a mesma colisão, vista
 //    do outro lado, vira barreira antes da escrita);
-//  * a leitura declarada de um desenho cubra a grade w×h inteira de cada nível (draw
-//    alarga reads[] quando o cache está ligado), pois o preenchimento é por bloco;
+//  * a leitura declarada de um desenho (reads[] de Gs::draw, por páginas) cubra toda página
+//    que tenha um texel que ele busca: o preenchimento é por bloco, e um bloco inteiro cabe
+//    numa página lógica, então preencher um bloco só lê páginas que o desenho declarou;
 //  * as escritas fora dos desenhos tenham ordem com as faixas: HOST→LOCAL espera
 //    (waitIdle em startTransfer) quando o destino tem acesso não concluído e, com a
 //    transferência aberta, a palavra seguinte espera (hostDrain_) os desenhos que a

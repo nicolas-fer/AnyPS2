@@ -128,9 +128,13 @@ ClutBuffer* mutableClut(const Gs::TexelProbe& p) {
 
 }  // namespace
 
-TEST_CASE(gs_texel, fetch_matches_frozen_copy_all_formats_sizes_and_wraps) {
+// As duas comparações com a cópia congelada rodam sem e com o cache de texels crus
+// (ANYPS2_GS_TEXCACHE): o resultado tem de ser idêntico bit a bit.
+static void checkFetchAllFormats(bool cache) {
     setEnv("ANYPS2_GS_THREAD", "0");
+    setEnv("ANYPS2_GS_TEXCACHE", cache ? "1" : "");
     Gs g(nullptr);
+    CHECK_EQ(g.texCacheEnabled(), cache);
     Lcg r{0x7E8E1ull};
     fillRandom(g, r);
     const Vram& vram = g.vram();
@@ -165,11 +169,14 @@ TEST_CASE(gs_texel, fetch_matches_frozen_copy_all_formats_sizes_and_wraps) {
     }
     CHECK(checked > 100000);
     setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_TEXCACHE", "");
 }
 
-TEST_CASE(gs_texel, fetch_matches_frozen_copy_for_every_csa_cpsm_and_clut_change) {
+static void checkFetchCsaCpsmAndClutChange(bool cache) {
     setEnv("ANYPS2_GS_THREAD", "0");
+    setEnv("ANYPS2_GS_TEXCACHE", cache ? "1" : "");
     Gs g(nullptr);
+    CHECK_EQ(g.texCacheEnabled(), cache);
     Lcg r{0xC1A7ull};
     fillRandom(g, r);
     const Vram& vram = g.vram();
@@ -206,6 +213,13 @@ TEST_CASE(gs_texel, fetch_matches_frozen_copy_for_every_csa_cpsm_and_clut_change
         }
     }
     setEnv("ANYPS2_GS_THREAD", "");
+}
+
+TEST_CASE(gs_texel, fetch_matches_frozen_copy_all_formats_sizes_and_wraps) { checkFetchAllFormats(false); }
+TEST_CASE(gs_texel, fetch_matches_frozen_copy_for_every_csa_cpsm_and_clut_change) { checkFetchCsaCpsmAndClutChange(false); }
+TEST_CASE(gs_texel, cached_fetch_matches_frozen_copy_all_formats_sizes_and_wraps) { checkFetchAllFormats(true); }
+TEST_CASE(gs_texel, cached_fetch_matches_frozen_copy_for_every_csa_cpsm_and_clut_change) {
+    checkFetchCsaCpsmAndClutChange(true);
 }
 
 namespace {

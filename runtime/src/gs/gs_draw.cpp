@@ -403,14 +403,8 @@ void Gs::draw(std::uint32_t pc) {
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            PageSet texPages = pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1);
-            // Com o cache, o desenho pode preencher qualquer bloco da grade w×h do nível
-            // (não só os que alcança): a leitura declarada cobre a grade inteira, para que
-            // nenhuma escrita pendente nem posterior toque o que o preenchimento lê.
-            if (texCache_ && (colsU < wl || rowsV < hl)) {
-                texPages.merge(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, hl - 1, 0, wl - 1));
-            }
-            reads[nr++] = access(texPages, false, 2, e.tbp[l], e.tbw[l], e.tpsm);
+            reads[nr++] = access(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
+                                 e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
 
@@ -463,7 +457,8 @@ void Gs::draw(std::uint32_t pc) {
         // aberta ainda vai escrever nela, a próxima palavra invalida a versão. O teste
         // usa o alcance de leitura do desenho (reads[]), que com REGION_CLAMP/REGION_REPEAT
         // difere da grade w×h da versão; vale porque só o que o desenho alcança pode ser
-        // preenchido por ele (fora disso a leitura vai direto para a VRAM).
+        // preenchido por ele: um bloco cabe numa página lógica, e o alcance cobre toda
+        // página que tenha um texel alcançado (fora da grade a leitura vai direto à VRAM).
         for (unsigned j = 0; j < nr; ++j) {
             if (reads[j].surface == 2 && accessesOverlap(hostOpen_, reads[j])) {
                 hostGenDirty_ = true;

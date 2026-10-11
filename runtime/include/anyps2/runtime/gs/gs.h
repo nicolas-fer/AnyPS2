@@ -494,8 +494,8 @@ private:
     // próxima palavra incrementa as páginas do destino antes de escrever (senão um
     // desenho posterior acertaria numa versão com o conteúdo parcial). A marca vale
     // pelo alcance de leitura do desenho (reads[] de draw: o que ele pode preencher),
-    // não pela grade inteira da versão; por isso o cache só pode servir coordenadas
-    // dentro de alcance ∩ grade, e o resto vai direto para readPixel.
+    // não pela grade inteira da versão. Basta: um bloco do cache cabe numa página lógica
+    // do alcance, e coordenadas fora da grade w×h vão direto para readPixel.
     bool hostGenDirty_ = false;
 
     // Geração por página, época da última escrita e quem escreveu (só o produtor).
