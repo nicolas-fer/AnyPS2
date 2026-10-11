@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -57,11 +58,44 @@ struct Frame {
 // Buffer de CLUT interno (1 KB). Cada carga de CLUT produz uma versão nova, que
 // depois de pronta não muda mais: os desenhos guardam a versão que valia quando
 // foram enfileirados, e as faixas não leem estado global.
+//
+// As versões são preguiçosas e encadeadas: a carga só registra a `base` (versão
+// anterior) e a sobreposição (as posições do buffer que ela troca). A tabela
+// completa `v` é montada por resolve(), uma vez, quando alguém precisa lê-la: base
+// resolvida, cópia dela, sobreposição aplicada. Assim uma carga não espera a versão
+// anterior ficar pronta (uma carga por barreira não puxa as seguintes para barreira).
 struct ClutBuffer {
-    std::array<std::uint16_t, 512> v{};
-    // Falso enquanto uma barreira ainda vai preencher `v` (carga que não pôde ser
-    // feita no produtor); as faixas a marcam pronta, e só então o produtor copia.
+    struct Cell {
+        std::uint16_t pos = 0;  // posição em `v` (0..511)
+        std::uint16_t val = 0;
+    };
+    // Só vale depois de resolve(). Mutável: resolve() é const para quem só lê a versão.
+    mutable std::array<std::uint16_t, 512> v{};
+    // Falso enquanto uma barreira ainda vai preencher a sobreposição (carga que não
+    // pôde ler a VRAM no produtor); as faixas a marcam pronta, e só então ela pode
+    // ser resolvida fora da ordem das faixas (pelo produtor).
     std::atomic<bool> ready{true};
+    // Versão anterior; solta (reset) quando esta é resolvida, para liberar a cadeia.
+    mutable std::shared_ptr<const ClutBuffer> base;
+    // Células carregadas por esta versão, na ordem da carga (a última vence).
+    std::vector<Cell> overlay;
+    // Verdadeiro depois de resolve() (com `v` montado e a base solta).
+    mutable std::atomic<bool> done{false};
+
+    ClutBuffer() = default;
+    ClutBuffer(const ClutBuffer&) = delete;
+    ClutBuffer& operator=(const ClutBuffer&) = delete;
+    // Solta a cadeia de versões sem recursão (uma cadeia longa não resolvida
+    // estouraria a pilha no destrutor encadeado do shared_ptr).
+    ~ClutBuffer();
+
+    void set(std::size_t pos, std::uint16_t val) {
+        overlay.push_back(Cell{static_cast<std::uint16_t>(pos), val});
+    }
+    // Monta `v`. Seguro de várias threads; exige que as sobreposições desta versão e
+    // das anteriores estejam preenchidas (ordem das barreiras, ou `ready`). Iterativo:
+    // a cadeia não resolvida pode ter centenas de versões.
+    void resolve() const;
 };
 
 // Contadores de serialização das faixas (diagnóstico do ANYPS2_PROFILE): por que o
@@ -343,6 +377,11 @@ private:
     Context ctx_[2];
     // CLUT corrente (versão mais recente; produtor).
     std::shared_ptr<ClutBuffer> clut_ = std::make_shared<ClutBuffer>();
+    // Última versão carregada por barreira (produtor) e quantas cargas há desde que a
+    // cadeia foi materializada: limitam o tamanho da cadeia de versões não resolvidas.
+    static constexpr unsigned kClutChainLimit = 64;
+    std::shared_ptr<ClutBuffer> clutBarrier_;
+    unsigned clutChain_ = 0;
     std::uint32_t cbp0_ = 0, cbp1_ = 0;
 
     // Fila de vértices

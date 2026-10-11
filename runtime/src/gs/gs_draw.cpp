@@ -213,6 +213,12 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
 }
 
 void Gs::rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2) {
+    // Uma vez por desenho (e por faixa), fora do laço de texels: a versão da CLUT é
+    // preguiçosa e as barreiras enfileiradas antes deste desenho já preencheram as
+    // sobreposições de que ela depende.
+    if (e.clut && (e.tpsm == PSMT8 || e.tpsm == PSMT4 || e.tpsm == PSMT8H || e.tpsm == PSMT4HL || e.tpsm == PSMT4HH)) {
+        e.clut->resolve();
+    }
     switch (e.type) {
         case 0: drawPoint(e, v0); break;
         case 1: case 2: drawLine(e, v0, v1); break;

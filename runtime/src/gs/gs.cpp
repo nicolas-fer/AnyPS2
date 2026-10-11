@@ -495,30 +495,78 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
     }
     if (csm2 && cpsm == PSMCT32) unsupported("CLUT CSM2 com CPSM=PSMCT32 (proibido pelo hardware)", pc);
     // TEXCLUT é lido agora, na ordem do programa. A CLUT é um buffer imutável por
-    // versão: a carga cria uma versão nova (cópia da corrente com as células
-    // trocadas) e os desenhos seguintes a levam consigo, então não há estado global
-    // para as faixas e a carga não precisa de barreira, desde que o produtor possa
-    // ler a área da CLUT na VRAM agora: nenhum acesso ainda não concluído das faixas
-    // (desenho ou LOCAL→LOCAL) a escreve. Senão a carga vira uma operação global.
+    // versão, encadeado à anterior (ver ClutBuffer): a carga cria uma versão nova só
+    // com as células trocadas e os desenhos seguintes a levam consigo, então não há
+    // estado global para as faixas. A carga não precisa de barreira nem da versão
+    // anterior pronta, desde que o produtor possa ler a área da CLUT na VRAM agora:
+    // nenhum acesso ainda não concluído das faixas (desenho ou LOCAL→LOCAL) a escreve.
+    // Senão a carga vira uma operação global, que lê as células na faixa.
     const std::uint64_t texclut = regs_[TEXCLUT];
     const VramAccess src = clutSource(tex0, texclut);
     auto next = std::make_shared<ClutBuffer>();
-    if (clut_->ready.load(std::memory_order_acquire) && !outstandingConflicts(src)) {
-        next->v = clut_->v;
+    next->base = clut_;
+    if (!outstandingConflicts(src)) {
         loadClutCells(*next, tex0, texclut);
         clut_ = std::move(next);
         ++bandStats_.clutDirect;
+        // Cadeia longa: se todas as sobreposições já estão preenchidas, o produtor
+        // materializa e solta a cadeia (senão segue; o custo é só memória).
+        if (++clutChain_ >= kClutChainLimit && (!clutBarrier_ || clutBarrier_->ready.load(std::memory_order_acquire))) {
+            clut_->resolve();
+            clutChain_ = 0;
+            clutBarrier_.reset();
+        }
         return;
     }
     noteOutstanding(src);
     next->ready.store(false, std::memory_order_relaxed);
-    submit([this, prev = clut_, next, tex0, texclut] {
-        next->v = prev->v;
+    submit([this, next, tex0, texclut] {
         loadClutCells(*next, tex0, texclut);
         next->ready.store(true, std::memory_order_release);
     }, BandStats::SubmitClut);
     noteHostHazard(&src, 1);
-    clut_ = std::move(next);
+    clut_ = next;
+    clutBarrier_ = std::move(next);
+    ++clutChain_;
+}
+
+namespace {
+
+// Resolver uma versão mexe na sua base (lê e solta), que pode ser compartilhada com
+// outra versão sendo resolvida por outra faixa; um mutex só para isso é barato,
+// porque cada versão passa por aqui uma vez (depois, o caminho rápido é o `done`).
+std::mutex& clutResolveMutex() {
+    static std::mutex m;
+    return m;
+}
+
+}  // namespace
+
+void ClutBuffer::resolve() const {
+    if (done.load(std::memory_order_acquire)) return;
+    const std::lock_guard<std::mutex> lock(clutResolveMutex());
+    // Sobe a cadeia até a primeira versão já resolvida (ou sem base) e resolve de
+    // baixo para cima.
+    std::vector<const ClutBuffer*> chain;
+    for (const ClutBuffer* c = this; c && !c->done.load(std::memory_order_relaxed); c = c->base.get()) {
+        chain.push_back(c);
+    }
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        const ClutBuffer* c = *it;
+        if (c->base) c->v = c->base->v;
+        for (const Cell& cell : c->overlay) c->v[cell.pos] = cell.val;
+        c->base.reset();
+        c->done.store(true, std::memory_order_release);
+    }
+}
+
+ClutBuffer::~ClutBuffer() {
+    std::shared_ptr<const ClutBuffer> b = std::move(base);
+    // Enquanto esta for a única dona da base, desencadeia em laço.
+    while (b && b.use_count() == 1) {
+        std::shared_ptr<const ClutBuffer> next = std::move(b->base);
+        b = std::move(next);
+    }
 }
 
 // Área da VRAM que a carga lê (leitura), a mesma de loadClutCells.
@@ -565,10 +613,10 @@ void Gs::loadClutCells(ClutBuffer& dst, std::uint64_t tex0, std::uint64_t texclu
         const std::uint32_t c = vram_.readPixel(cpsm, cbp, bw, x, y);
         const unsigned e = csa * 16 + i;
         if (cpsm == PSMCT32) {
-            dst.v[e & 255] = static_cast<std::uint16_t>(c);
-            dst.v[(e & 255) + 256] = static_cast<std::uint16_t>(c >> 16);
+            dst.set(e & 255, static_cast<std::uint16_t>(c));
+            dst.set((e & 255) + 256, static_cast<std::uint16_t>(c >> 16));
         } else {
-            dst.v[e & 511] = static_cast<std::uint16_t>(c);
+            dst.set(e & 511, static_cast<std::uint16_t>(c));
         }
     }
 }

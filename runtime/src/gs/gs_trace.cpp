@@ -684,6 +684,7 @@ void GsTrace::dumpTexture(Gs& gs, std::uint32_t pc, const DrawState& s) {
 
     // Espera os desenhos e as transferências anteriores: a VRAM e a CLUT valem para este desenho.
     gs.waitIdle();
+    gs.clut_->resolve();
 
     // Cor final de um índice da CLUT (como fetchTexel, sem filtro).
     auto clutColor = [&](unsigned idx) -> std::uint32_t {

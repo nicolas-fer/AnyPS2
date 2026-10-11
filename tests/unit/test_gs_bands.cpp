@@ -778,6 +778,77 @@ TEST_CASE(gs_bands, strips_over_the_clut_area_keep_clut_loads_without_barrier) {
     }
 }
 
+namespace {
+
+// Muitas cargas (mais que o limite da cadeia de versões) com CSA variados, CT32 e
+// CT16, intercaladas com desenhos que cruzam as faixas; a cada 17 cargas um desenho
+// escreve numa área de CLUT que a carga seguinte lê (conflito real, carga por barreira).
+ClutRender renderClutMany(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    ClutRender out;
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0xC1075};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    for (unsigned k = 0; k < 6; ++k) hostToLocal(g, (48 + k) * 32, 1, PSMCT32, 0, 0, 16, 16, words(128));
+    hostToLocal(g, 1280, 1, PSMT8, 0, 0, 64, 64, words(512));
+    hostToLocal(g, 1344, 1, PSMT4, 0, 0, 64, 64, words(256));
+    for (unsigned k = 0; k < 100; ++k) {
+        const unsigned c = k % 6;
+        const bool four = k % 3 != 0;
+        const std::uint32_t cpsm = (k % 5 == 4) ? PSMCT16 : PSMCT32;
+        const std::uint64_t t0 = four ? tex0(1344, 1, PSMT4, 6, 6, (48 + c) * 32, cpsm, 1, (k * 5) % 32)
+                                      : tex0(1280, 1, PSMT8, 6, 6, (48 + c) * 32, cpsm, 1, (k * 3) % 2 * 16);
+        g.writeRegister(TEX0_1, t0, 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        const unsigned y0 = (k * 7) % 40;
+        vertex(g, 3 + k % 20, y0, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 90 + k % 20, y0 + 60, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+        if (k % 17 == 16) {  // desenho sobre a CLUT 3: a próxima carga a lê com conflito
+            g.writeRegister(FRAME_1, frameReg(51, 1, PSMCT32), 0);
+            g.writeRegister(PRIM, prim(3, true), 0);
+            vertex(g, 0, 0, rgbaq(255, 0, 0, 0));
+            vertex(g, 63, 0, rgbaq(0, 255, 0, 0));
+            vertex(g, 0, 31, rgbaq(0, 0, 255, 0));
+            g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+            g.writeRegister(TEX0_1, tex0(1344, 1, PSMT4, 6, 6, 51 * 32, PSMCT32, 1, k % 16), 0);
+            g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+            vertex(g, 5, 5, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+            vertex(g, 100, 100, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+        }
+    }
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, clut_chain_many_loads_with_real_conflicts_match_sync) {
+    const ClutRender ref = renderClutMany(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    CHECK_EQ(ref.stats.submit[BandStats::SubmitClut], 0u);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const ClutRender got = renderClutMany(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HOST→LOCAL sem barreira: uploads entre desenhos que usam e que não usam a textura
 // ---------------------------------------------------------------------------
@@ -1163,4 +1234,35 @@ TEST_CASE(gs_bands, upload_over_pending_readers_waits_once_then_writes_direct) {
     CHECK_EQ(s.hostDirect + s.hostBarrier, 1u);
     CHECK(s.hostOrder == 0u);
     CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
+}
+
+// Uma carga que conflita de verdade vira barreira; as seguintes, sem conflito, não:
+// antes cada uma esperava a versão anterior ficar pronta e virava barreira também.
+TEST_CASE(gs_bands, clut_barrier_load_does_not_cascade_into_next_loads) {
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        StatsGs t;
+        Gs& g = *t.gs;
+        Lcg r{0xCA5CADE};
+        for (unsigned k = 0; k < 4; ++k) {
+            std::vector<std::uint64_t> w;
+            for (unsigned i = 0; i < 128; ++i) w.push_back(r.word());
+            hostToLocal(g, (48 + k) * 32, 1, PSMCT32, 0, 0, 16, 16, w);
+        }
+        std::vector<std::uint64_t> px;
+        for (unsigned i = 0; i < 256; ++i) px.push_back(r.word());
+        hostToLocal(g, 1344, 1, PSMT4, 0, 0, 64, 64, px);
+        // Desenho grande sobre a página 51 (a CLUT 3) ainda pendente.
+        g.writeRegister(FRAME_1, frameReg(51, 2, PSMCT32), 0);
+        sprite(g, 0, 0, 127, 127);
+        g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+        const std::uint64_t before = g.bandStats().submit[BandStats::SubmitClut];
+        g.writeRegister(TEX0_1, tex0(1344, 1, PSMT4, 6, 6, 51 * 32, PSMCT32, 1, 0), 0);  // conflito real
+        for (unsigned k = 0; k < 3; ++k) {
+            g.writeRegister(TEX0_1, tex0(1344, 1, PSMT4, 6, 6, (48 + k) * 32, PSMCT32, 1, k), 0);
+            sprite(g, 0, 0, 63, 63, true);
+        }
+        const BandStats& s = g.bandStats();
+        CHECK(s.submit[BandStats::SubmitClut] - before <= 1u);
+        CHECK_EQ(s.clutDirect + s.submit[BandStats::SubmitClut], 4u);
+    }
 }
