@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -55,6 +56,17 @@ struct Frame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<std::uint32_t> pixels;
+};
+
+// Registradores privilegiados que a saída de vídeo lê (PMODE, SMODE2, DISPFB1/2,
+// DISPLAY1/2, BGCOLOR), copiados num ponto do programa (o VBlank). A composição do quadro
+// é uma função só deste estado e da VRAM: o quadro pedido não muda se o programa
+// reconfigurar o vídeo logo depois.
+struct DisplayState {
+    std::uint64_t pmode = 0, smode2 = 0;
+    std::uint64_t dispfb[2] = {};
+    std::uint64_t display[2] = {};
+    std::uint64_t bgcolor = 0;
 };
 
 // Buffer de CLUT interno (1 KB). Cada carga de CLUT produz uma versão nova, que
@@ -126,6 +138,7 @@ struct BandStats {
         SubmitReset,      // reset do GS
         SubmitDraw,       // desenho sozinho
         SubmitHost,       // palavras de uma HOST→LOCAL em modo fila (hostQueued)
+        SubmitDisplay,    // composição de um quadro de vídeo (requestDisplay)
         SubmitCount
     };
     // Esperas do EE pelas faixas (waitIdle).
@@ -186,6 +199,10 @@ struct BandStats {
     std::uint64_t hostQueued = 0;         // transferências abertas em modo fila
     std::uint64_t hostQueuedSubmits = 0;  // barreiras de escrita enfileiradas por elas (parciais + final)
     std::uint64_t hostQueuedWords = 0;    // palavras de 64 bits levadas por essas barreiras
+    // Saída de vídeo assíncrona (Gs::requestDisplay): quadros compostos por tarefa
+    // ordenada na fila e vezes que o EE esperou o quadro anterior (limite de um quadro de atraso).
+    std::uint64_t displayQueued = 0;
+    std::uint64_t displayLagWaits = 0;
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -313,9 +330,24 @@ public:
     std::uint64_t nextEventTime() const;  // ciclo do EE, ~0 se nenhum
     void processEvents(std::uint64_t now);
 
-    // Compõe a imagem exibida (circuitos de leitura 1 e 2, PMODE, BGCOLOR).
+    // Compõe a imagem exibida (circuitos de leitura 1 e 2, PMODE, BGCOLOR). Síncrono:
+    // espera as faixas e lê a VRAM de agora.
     Frame display() const;
     bool displayEnabled() const;
+
+    // Saída de vídeo sem esperar as faixas (ANYPS2_GS_ASYNC_DISPLAY=0 desliga; só vale com
+    // worker em thread). requestDisplay captura os registradores de vídeo agora, submete
+    // as palavras da HOST→LOCAL em fila e enfileira uma barreira que compõe o quadro quando
+    // todas as faixas chegam nela: o quadro é idêntico ao display() deste ponto. O EE só
+    // espera se o quadro pedido antes ainda não ficou pronto (nunca mais de um quadro de
+    // atraso; conta em waits[WaitDisplay] e displayLagWaits). latestDisplay entrega o
+    // quadro pronto mais recente que ainda não foi entregue, sem esperar: troca-o com
+    // `out` (o buffer antigo de `out` volta para a caixa de correio e é reaproveitado) e
+    // devolve verdadeiro; falso se não há quadro novo. Funciona também sem thread (a
+    // barreira roda na hora), o que serve de referência nos testes.
+    bool asyncDisplay() const { return asyncDisplay_; }
+    void requestDisplay();
+    bool latestDisplay(Frame& out);
 
     // Memória local: espera o worker (quem lê ou escreve aqui vê os pixels já
     // desenhados pelo GIF até este ponto).
@@ -418,6 +450,11 @@ private:
     void startTransfer(std::uint32_t pc);
     void localToLocal(std::uint32_t pc);
     void localToHost(std::uint32_t pc);
+    DisplayState captureDisplay() const;
+    // Compõe o quadro de `st` lendo `vram` em `out` (reaproveita o buffer de `out`).
+    static void composeFrame(const Vram& vram, const DisplayState& st, Frame& out);
+    // Os retângulos de framebuffer que a composição de `st` lê (até 2); devolve quantos.
+    unsigned displayAccesses(const DisplayState& st, VramAccess (&out)[2]) const;
     [[noreturn]] void unsupported(const std::string& what, std::uint32_t pc) const;
     void warnOnce(const std::string& what);
 
@@ -495,6 +532,21 @@ private:
     // Faixas do GS. Tudo que está abaixo de "faixas" é delas: o EE só mexe nesses
     // campos depois de waitIdle() ou dentro de uma operação global (barreira).
     std::unique_ptr<GsWorker> worker_;
+    // Caixa de correio dos quadros compostos na fila (requestDisplay/latestDisplay). Vive
+    // num shared_ptr porque as barreiras a guardam; o mutex protege tudo menos `compose`,
+    // que só as barreiras de composição (serializadas pelas faixas) tocam.
+    struct DisplayBox {
+        std::mutex m;
+        std::condition_variable cv;
+        Frame ready;         // último quadro pronto (vale se readySeq != 0)
+        Frame compose;       // buffer de trabalho da barreira
+        std::uint64_t readySeq = 0;      // pedido do quadro em `ready`
+        std::uint64_t deliveredSeq = 0;  // pedido do último quadro entregue
+        std::uint64_t finished = 0;      // pedidos cuja barreira já terminou
+    };
+    std::shared_ptr<DisplayBox> displayBox_ = std::make_shared<DisplayBox>();
+    std::uint64_t displayRequested_ = 0;  // produtor
+    bool asyncDisplay_ = false;
     // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
     PendingAccess pending_;
     PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()

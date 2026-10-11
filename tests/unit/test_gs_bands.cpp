@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "anyps2/runtime/gs/gs.h"
@@ -1551,4 +1552,200 @@ TEST_CASE(gs_bands, host_queue_counts_transfers_and_submits) {
         CHECK_EQ(g.vram().read32(Vram::byteAddress32(kQT, 1, 0, 0)), static_cast<std::uint32_t>(w[0]));
     }
     CHECK(seen);
+}
+
+// ---------------------------------------------------------------------------
+// Saída de vídeo assíncrona (requestDisplay/latestDisplay): o quadro composto por uma
+// barreira na fila tem de ser idêntico ao display() síncrono do mesmo ponto do programa,
+// para qualquer número de faixas, mesmo com HOST→LOCAL em fila antes do pedido e com o
+// vídeo reconfigurado logo depois dele.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint32_t kPmode = 0x12000000u, kDispfb1 = 0x12000070u, kDisplay1 = 0x12000080u,
+                        kBgcolor = 0x120000E0u;
+
+std::uint64_t dispfbReg(std::uint64_t fbp, std::uint64_t fbw, std::uint64_t psm) {
+    return fbp | (fbw << 9) | (psm << 15);
+}
+// DISPLAY1 sem ampliação: w x h pixels.
+std::uint64_t displayReg(std::uint64_t w, std::uint64_t h) {
+    return ((w - 1) << 32) | ((h - 1) << 44);
+}
+
+void videoOn(Gs& g) {
+    g.writePrivileged(kPmode, 1, 0);
+    g.writePrivileged(kDispfb1, dispfbReg(0, 2, PSMCT32), 0);
+    g.writePrivileged(kDisplay1, displayReg(128, 128), 0);
+    g.writePrivileged(kBgcolor, 0x203040, 0);
+}
+
+// Reconfigura o vídeo de um jeito que muda o quadro (outro buffer, vídeo desligado, outro
+// tamanho e fundo): se o quadro pedido antes lesse isto, sairia diferente.
+void videoDisturb(Gs& g, unsigned k) {
+    switch (k % 3) {
+        case 0: g.writePrivileged(kDispfb1, dispfbReg(40, 1, PSMCT32), 0); break;
+        case 1: g.writePrivileged(kPmode, 0, 0); break;
+        default:
+            g.writePrivileged(kDisplay1, displayReg(64, 32), 0);
+            g.writePrivileged(kBgcolor, 0xFF00FF, 0);
+            break;
+    }
+}
+
+constexpr unsigned kDispSteps = 8;
+
+// O mesmo programa para a referência e para o teste: `checkpoint(k)` é o VBlank do passo k
+// (display() síncrono ou requestDisplay); o vídeo é reconfigurado logo depois dele e
+// restaurado no passo seguinte. Nos passos pares há uma HOST→LOCAL no framebuffer que
+// continua depois do VBlank.
+template <class F>
+void displayProgram(Gs& g, F&& checkpoint) {
+    queueSetup(g);
+    Lcg r{0xD15B1A7};
+    for (unsigned k = 0; k < kDispSteps; ++k) {
+        videoOn(g);
+        queueBusy(g, 0, 2, 100, 100, 24, k);  // escreve o framebuffer (pendente nas faixas)
+        if (k % 2 == 0) {
+            // Destino com escrita pendente: a transferência abre em fila. O VBlank cai no meio.
+            const auto w = queueWords(r, 256);
+            queueBegin(g, 0, 2, PSMCT32, 4 + k, 4, 32, 16);
+            queueSend(g, w, 0, 100);
+            checkpoint(k);
+            videoDisturb(g, k);
+            queueSend(g, w, 100, w.size());
+        } else {
+            checkpoint(k);
+            videoDisturb(g, k);
+        }
+    }
+}
+
+std::unique_ptr<Gs> makeDisplayGs(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    auto g = std::make_unique<Gs>(nullptr);
+    setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_THREADS", "");
+    return g;
+}
+
+bool sameFrame(const Frame& a, const Frame& b) {
+    return a.width == b.width && a.height == b.height && a.pixels == b.pixels;
+}
+
+std::vector<Frame> referenceFrames() {
+    auto g = makeDisplayGs(false, 1);
+    std::vector<Frame> out;
+    displayProgram(*g, [&](unsigned) { out.push_back(g->display()); });
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, async_display_frames_match_sync_display) {
+    const std::vector<Frame> ref = referenceFrames();
+    CHECK_EQ(ref.size(), std::size_t{kDispSteps});
+    // O programa muda o quadro de passo a passo (senão comparar não provaria nada).
+    for (std::size_t i = 1; i < ref.size(); ++i) CHECK(!sameFrame(ref[i], ref[i - 1]));
+    for (const unsigned lanes : {1u, 2u, 4u}) {
+        for (unsigned rep = 0; rep < 6; ++rep) {
+            auto g = makeDisplayGs(true, lanes);
+            CHECK(g->asyncDisplay());
+            std::vector<Frame> got;
+            Frame f;
+            displayProgram(*g, [&](unsigned) {
+                g->requestDisplay();
+                // Espera a entrega do quadro pedido (as escritas de vídeo do programa vêm
+                // logo depois do pedido e ainda podem correr contra a composição).
+                for (unsigned spin = 0; !g->latestDisplay(f); ++spin) {
+                    CHECK(spin < 50000000u);
+                    if (spin > 1000) std::this_thread::yield();
+                }
+                got.push_back(f);
+            });
+            CHECK_EQ(got.size(), ref.size());
+            for (std::size_t i = 0; i < got.size() && i < ref.size(); ++i) CHECK(sameFrame(got[i], ref[i]));
+            CHECK_EQ(g->bandStats().displayQueued, std::uint64_t{kDispSteps});
+            CHECK_EQ(g->bandStats().submit[BandStats::SubmitDisplay], std::uint64_t{kDispSteps});
+            // A VRAM final é a do caminho síncrono.
+            auto s = makeDisplayGs(false, 1);
+            displayProgram(*s, [&](unsigned) {});
+            CHECK(std::memcmp(g->vram().data(), s->vram().data(), Vram::kSize) == 0);
+        }
+    }
+}
+
+TEST_CASE(gs_bands, async_display_pipelined_never_more_than_one_frame_behind) {
+    const std::vector<Frame> ref = referenceFrames();
+    for (const unsigned lanes : {1u, 2u, 4u}) {
+        for (unsigned rep = 0; rep < 6; ++rep) {
+            auto g = makeDisplayGs(true, lanes);
+            Frame f;
+            unsigned last = 0;  // pedido (1-based) do último quadro entregue: nunca anda para trás
+            displayProgram(*g, [&](unsigned k) {
+                g->requestDisplay();
+                // Sem esperar: entrega o que houver. A partir do segundo pedido o anterior já
+                // ficou pronto (limite de atraso), então sempre há quadro novo: o k-1 ou o k.
+                if (g->latestDisplay(f)) {
+                    const unsigned idx = k + 1;
+                    const bool isCur = sameFrame(f, ref[k]);
+                    const bool isPrev = k > 0 && sameFrame(f, ref[k - 1]);
+                    CHECK(isCur || isPrev);
+                    const unsigned got = isCur ? idx : idx - 1;
+                    CHECK(got > last);
+                    last = got;
+                }
+                // O quadro do pedido anterior (k na contagem 1-based) já tem de ter sido entregue.
+                CHECK(last >= k);
+            });
+            g->waitIdle();
+            // Depois de tudo pronto, o mais recente é o último pedido (se ainda não entregue).
+            if (g->latestDisplay(f)) CHECK(sameFrame(f, ref[kDispSteps - 1]));
+            CHECK(!g->latestDisplay(f));
+        }
+    }
+}
+
+TEST_CASE(gs_bands, async_display_without_threads_matches_sync) {
+    const std::vector<Frame> ref = referenceFrames();
+    auto g = makeDisplayGs(false, 1);
+    CHECK(!g->asyncDisplay());  // o Runtime só usa o caminho assíncrono com worker em thread
+    std::vector<Frame> got;
+    Frame f;
+    displayProgram(*g, [&](unsigned) {
+        g->requestDisplay();
+        CHECK(g->latestDisplay(f));
+        CHECK(!g->latestDisplay(f));  // nada novo: não entrega o mesmo quadro duas vezes
+        got.push_back(f);
+    });
+    CHECK_EQ(got.size(), ref.size());
+    for (std::size_t i = 0; i < got.size() && i < ref.size(); ++i) CHECK(sameFrame(got[i], ref[i]));
+}
+
+TEST_CASE(gs_bands, async_display_env_switch_and_stats) {
+    setEnv("ANYPS2_GS_ASYNC_DISPLAY", "0");
+    auto off = makeDisplayGs(true, 2);
+    setEnv("ANYPS2_GS_ASYNC_DISPLAY", "");
+    CHECK(!off->asyncDisplay());
+    auto on = makeDisplayGs(true, 2);
+    CHECK(on->asyncDisplay());
+    // Pedidos seguidos sem entregar: cada um espera o anterior (no máximo um quadro de atraso).
+    queueSetup(*on);
+    videoOn(*on);
+    for (unsigned i = 0; i < 20; ++i) {
+        queueBusy(*on, 0, 2, 120, 120, 40, i);
+        on->requestDisplay();
+    }
+    on->waitIdle();
+    const BandStats& s = on->bandStats();
+    CHECK_EQ(s.displayQueued, 20u);
+    CHECK(s.displayLagWaits <= 19u);
+    CHECK_EQ(s.waits[BandStats::WaitDisplay], s.displayLagWaits);
+    Frame f;
+    CHECK(on->latestDisplay(f));
+    CHECK_EQ(f.width, 128u);
+    CHECK_EQ(f.height, 128u);
+    CHECK(sameFrame(f, on->display()));
 }

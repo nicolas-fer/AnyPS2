@@ -151,7 +151,17 @@ void Runtime::onVblank(std::uint32_t pc) {
         throw ProgramExit{0};
     }
     if (!video_) return;
-    if (gs_->displayEnabled()) video_->present(gs_->display());
+    if (gs_->displayEnabled()) {
+        if (gs_->asyncDisplay()) {
+            // Sem esperar as faixas: pede o quadro deste VBlank e apresenta o mais recente já
+            // pronto (um quadro atrás, no máximo). ANYPS2_GS_ASYNC_DISPLAY=0 volta ao síncrono.
+            gs_->requestDisplay();
+            if (!frame_) frame_ = std::make_unique<gs::Frame>();
+            if (gs_->latestDisplay(*frame_) && frame_->width && frame_->height) video_->present(*frame_);
+        } else {
+            video_->present(gs_->display());
+        }
+    }
     if (!video_->pollEvents()) throw ProgramExit{0};  // janela fechada
 }
 

@@ -30,6 +30,7 @@ class VuTrace;
 struct VuProgramEntry;
 namespace gs {
 class Gs;
+struct Frame;
 }
 
 using GuestFunction = void (*)(Context*);
@@ -188,6 +189,7 @@ private:
     std::unique_ptr<Kernel> kernel_;
     std::unique_ptr<VuMemory> vu_;
     std::unique_ptr<gs::Gs> gs_;
+    std::unique_ptr<gs::Frame> frame_;  // quadro entregue pela saída de vídeo assíncrona (reaproveitado)
     std::unique_ptr<Gif> gif_;
     std::unique_ptr<Vif> vif0_, vif1_;
     std::unique_ptr<Dmac> dmac_;

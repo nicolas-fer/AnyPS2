@@ -109,6 +109,11 @@ Gs::Gs(Runtime* rt)
     regs_[PRMODECONT] = 1;
     csr_ = 0;
     trace_ = GsTrace::fromEnv();
+    // ANYPS2_GS_ASYNC_DISPLAY=0 volta à saída de vídeo que espera as faixas a cada VBlank.
+    {
+        const char* v = std::getenv("ANYPS2_GS_ASYNC_DISPLAY");
+        asyncDisplay_ = worker_->threaded() && !(v && std::strcmp(v, "0") == 0);
+    }
     texVerify_ = envFlag("ANYPS2_GS_TEXCACHE_VERIFY");
     if (texVerify_ || envFlag("ANYPS2_GS_TEXCACHE")) texCache_ = std::make_unique<TexCache>(texCacheBudgetFromEnv());
 }
@@ -967,26 +972,28 @@ bool Gs::displayEnabled() const {
     return (priv_[0] & 3) != 0;
 }
 
-Frame Gs::display() const {
-    // A saída de vídeo lê a VRAM: os desenhos feitos até aqui já estão prontos.
-    syncConst(BandStats::WaitDisplay);
-    struct Circuit {
-        bool on = false;
-        std::uint32_t fbp, fbw, psm, dbx, dby;
-        std::int32_t dx, dy;
-        std::uint32_t w, h;
-    } c[2];
-    const std::uint64_t pmode = priv_[0];
-    // SMODE2 com INT e FFMD (entrelaçado, modo campo): o framebuffer tem meia
-    // altura e cada linha dele aparece nos dois campos — a saída repete a
-    // linha (o DISPLAY conta as linhas da tela inteira).
-    const std::uint32_t lineDiv = (priv_[2] & 3) == 3 ? 2 : 1;
-    std::uint32_t outW = 0, outH = 0;
-    std::int32_t minX = 1 << 30, minY = 1 << 30;
+namespace {
+
+// Um circuito de leitura (1 ou 2) decodificado do DISPFB/DISPLAY capturados.
+struct Circuit {
+    bool on = false;
+    std::uint32_t fbp = 0, fbw = 0, psm = 0, dbx = 0, dby = 0;
+    std::int32_t dx = 0, dy = 0;
+    std::uint32_t w = 0, h = 0;
+};
+
+// SMODE2 com INT e FFMD (entrelaçado, modo campo): o framebuffer tem meia
+// altura e cada linha dele aparece nos dois campos — a saída repete a
+// linha (o DISPLAY conta as linhas da tela inteira).
+std::uint32_t displayLineDiv(const DisplayState& st) {
+    return (st.smode2 & 3) == 3 ? 2 : 1;
+}
+
+void decodeCircuits(const DisplayState& st, Circuit (&c)[2]) {
     for (unsigned n = 0; n < 2; ++n) {
-        if (!(pmode & (1u << n))) continue;
-        const std::uint64_t fb = priv_[n == 0 ? 7 : 9];
-        const std::uint64_t d = priv_[n == 0 ? 8 : 10];
+        if (!(st.pmode & (std::uint64_t{1} << n))) continue;
+        const std::uint64_t fb = st.dispfb[n];
+        const std::uint64_t d = st.display[n];
         Circuit& k = c[n];
         k.on = true;
         k.fbp = static_cast<std::uint32_t>(bits(fb, 0, 9));
@@ -1000,11 +1007,124 @@ Frame Gs::display() const {
         k.h = (static_cast<std::uint32_t>(bits(d, 44, 11)) + 1) / magv;
         k.dx = static_cast<std::int32_t>(bits(d, 0, 12) / magh);
         k.dy = static_cast<std::int32_t>(bits(d, 12, 11) / magv);
+    }
+}
+
+}  // namespace
+
+DisplayState Gs::captureDisplay() const {
+    DisplayState st;
+    st.pmode = priv_[0];
+    st.smode2 = priv_[2];
+    st.dispfb[0] = priv_[7];
+    st.display[0] = priv_[8];
+    st.dispfb[1] = priv_[9];
+    st.display[1] = priv_[10];
+    st.bgcolor = priv_[14];
+    return st;
+}
+
+Frame Gs::display() const {
+    // A saída de vídeo lê a VRAM: os desenhos feitos até aqui já estão prontos.
+    syncConst(BandStats::WaitDisplay);
+    Frame f;
+    composeFrame(vram_, captureDisplay(), f);
+    return f;
+}
+
+unsigned Gs::displayAccesses(const DisplayState& st, VramAccess (&out)[2]) const {
+    Circuit c[2];
+    decodeCircuits(st, c);
+    const std::uint32_t lineDiv = displayLineDiv(st);
+    unsigned n = 0;
+    for (const Circuit& k : c) {
+        if (!k.on || k.w == 0 || k.h == 0) continue;
+        if (k.psm != PSMCT32 && k.psm != PSMCT24 && k.psm != PSMCT16 && k.psm != PSMCT16S) continue;  // a saída não lê nada
+        out[n++] = rectAccess(false, k.psm, k.fbp * 32, k.fbw, k.dbx, k.dby, k.w, (k.h - 1) / lineDiv + 1);
+    }
+    return n;
+}
+
+void Gs::requestDisplay() {
+    DisplayBox& box = *displayBox_;
+    // Limite de atraso: o quadro anterior tem de estar pronto antes de pedir outro, para o
+    // EE nunca ficar mais de um quadro à frente da composição nem acumular trabalho.
+    {
+        std::unique_lock<std::mutex> lock(box.m);
+        if (box.finished < displayRequested_) {
+            ++bandStats_.displayLagWaits;
+            ++bandStats_.waits[BandStats::WaitDisplay];
+            const HostProfile::Scope prof(HostProfile::GsWait);
+            const auto t0 = HostProfile::enabled() ? std::chrono::steady_clock::now()
+                                                   : std::chrono::steady_clock::time_point{};
+            box.cv.wait(lock, [&] { return box.finished >= displayRequested_; });
+            if (HostProfile::enabled()) {
+                bandStats_.waitNs[BandStats::WaitDisplay] +=
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0)
+                        .count();
+            }
+        }
+    }
+    const DisplayState st = captureDisplay();
+    // O quadro tem de ver tudo o que o programa enviou até aqui, inclusive as palavras de
+    // uma HOST→LOCAL em modo fila (como waitIdle faz).
+    flushHostQueue();
+    // A barreira lê o framebuffer: acessos do produtor que o escreveriam antes de ela rodar
+    // (CLUT direta, HOST→LOCAL direto) têm de ver esta leitura como não concluída.
+    VramAccess acc[2];
+    const unsigned n = displayAccesses(st, acc);
+    for (unsigned i = 0; i < n; ++i) noteOutstanding(acc[i]);
+    const std::uint64_t seq = ++displayRequested_;
+    ++bandStats_.displayQueued;
+    // Quando a barreira roda todas as faixas já chegaram nela e esperam: nenhuma escreve a
+    // VRAM enquanto o quadro é composto, e tudo o que veio antes na fila já terminou.
+    submit([this, box = displayBox_, st, seq] {
+        struct Finish {
+            DisplayBox& b;
+            ~Finish() {
+                {
+                    std::lock_guard<std::mutex> lock(b.m);
+                    ++b.finished;  // também se a composição falhar: ninguém fica esperando
+                }
+                b.cv.notify_all();
+            }
+        } finish{*box};
+        composeFrame(vram_, st, box->compose);
+        std::lock_guard<std::mutex> lock(box->m);
+        std::swap(box->ready, box->compose);
+        box->readySeq = seq;
+    }, BandStats::SubmitDisplay);
+    // Uma HOST→LOCAL direta aberta que toca o framebuffer escreveria o resto das palavras
+    // enquanto a barreira ainda pode estar na fila.
+    noteHostHazard(acc, n);
+}
+
+bool Gs::latestDisplay(Frame& out) {
+    DisplayBox& box = *displayBox_;
+    std::lock_guard<std::mutex> lock(box.m);
+    if (box.readySeq == box.deliveredSeq) return false;
+    std::swap(out, box.ready);
+    box.deliveredSeq = box.readySeq;
+    // `ready` agora guarda o buffer antigo de `out`: a próxima composição o reaproveita,
+    // e um pedido sem quadro novo não entrega o mesmo duas vezes.
+    return true;
+}
+
+void Gs::composeFrame(const Vram& vram, const DisplayState& st, Frame& f) {
+    Circuit c[2];
+    decodeCircuits(st, c);
+    const std::uint64_t pmode = st.pmode;
+    const std::uint32_t lineDiv = displayLineDiv(st);
+    std::uint32_t outW = 0, outH = 0;
+    std::int32_t minX = 1 << 30, minY = 1 << 30;
+    for (const auto& k : c) {
+        if (!k.on) continue;
         minX = std::min(minX, k.dx);
         minY = std::min(minY, k.dy);
     }
-    Frame f;
-    if (!c[0].on && !c[1].on) return f;
+    f.width = 0;
+    f.height = 0;
+    if (!c[0].on && !c[1].on) return;
     for (const auto& k : c) {
         if (!k.on) continue;
         outW = std::max(outW, static_cast<std::uint32_t>(k.dx - minX) + k.w);
@@ -1014,7 +1134,7 @@ Frame Gs::display() const {
     outH = std::min<std::uint32_t>(outH, 2048);
     f.width = outW;
     f.height = outH;
-    const std::uint64_t bg = priv_[14];
+    const std::uint64_t bg = st.bgcolor;
     const std::uint32_t bgColor = static_cast<std::uint32_t>(bg & 0xFFFFFF) | 0xFF000000u;
     f.pixels.assign(std::size_t{outW} * outH, bgColor);
 
@@ -1025,10 +1145,10 @@ Frame Gs::display() const {
         const std::uint32_t px = k.dbx + static_cast<std::uint32_t>(x),
                             py = k.dby + static_cast<std::uint32_t>(y) / lineDiv;
         switch (k.psm) {
-            case PSMCT32: return vram_.readPixel(PSMCT32, k.fbp * 32, k.fbw, px, py);
-            case PSMCT24: return vram_.readPixel(PSMCT24, k.fbp * 32, k.fbw, px, py) | 0x80000000u;
+            case PSMCT32: return vram.readPixel(PSMCT32, k.fbp * 32, k.fbw, px, py);
+            case PSMCT24: return vram.readPixel(PSMCT24, k.fbp * 32, k.fbw, px, py) | 0x80000000u;
             case PSMCT16: case PSMCT16S: {
-                const std::uint32_t v = vram_.readPixel(k.psm, k.fbp * 32, k.fbw, px, py);
+                const std::uint32_t v = vram.readPixel(k.psm, k.fbp * 32, k.fbw, px, py);
                 return ((v & 0x1F) << 3) | (((v >> 5) & 0x1F) << 11) | (((v >> 10) & 0x1F) << 19) |
                        ((v & 0x8000) ? 0x80000000u : 0);
             }
@@ -1066,7 +1186,6 @@ Frame Gs::display() const {
             f.pixels[std::size_t{y} * outW + x] = (out & 0xFFFFFF) | 0xFF000000u;
         }
     }
-    return f;
 }
 
 }  // namespace anyps2::rt::gs
