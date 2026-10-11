@@ -146,10 +146,10 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
     s += buf;
     std::snprintf(buf, sizeof buf,
                   " barreiras de submit: HOST início %.1f, HOST fim %.1f, LOCAL→LOCAL %.1f, CLUT %.1f, reset %.1f, "
-                  "desenho %.1f; lotes HOST→LOCAL %.1f; CLUT sem barreira %.1f;",
+                  "desenho %.1f; lotes HOST→LOCAL %.1f; CLUT sem barreira %.1f, HOST→LOCAL sem barreira %.1f;",
                   d(cur.submit[0], prev.submit[0]), d(cur.submit[1], prev.submit[1]), d(cur.submit[2], prev.submit[2]),
                   d(cur.submit[3], prev.submit[3]), d(cur.submit[4], prev.submit[4]), d(cur.submit[5], prev.submit[5]),
-                  d(cur.hostBatches, prev.hostBatches), d(cur.clutDirect, prev.clutDirect));
+                  d(cur.hostBatches, prev.hostBatches), d(cur.clutDirect, prev.clutDirect), d(cur.hostDirect, prev.hostDirect));
     s += buf;
     static const char* kWait[BandStats::WaitCount] = {"vídeo", "vram()", "LOCAL→HOST", "SIGNAL", "FINISH", "outros"};
     s += " esperas do EE (n, ms):";

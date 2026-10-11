@@ -336,6 +336,8 @@ void Gs::draw(std::uint32_t pc) {
         for (unsigned i = 0; i < nw; ++i) noteOutstanding(writes[i]);
         for (unsigned j = 0; j < nr; ++j) noteOutstanding(reads[j]);
         submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); }, BandStats::SubmitDraw);
+        demoteIfOverlaps(writes, nw);
+        demoteIfOverlaps(reads, nr);
         if (traced) trace_->endDraw(*this);
         return;
     }
@@ -388,6 +390,8 @@ void Gs::draw(std::uint32_t pc) {
             worker_->push(lane, task);
         }
     }
+    demoteIfOverlaps(writes, nw);
+    demoteIfOverlaps(reads, nr);
     if (traced) trace_->endDraw(*this);
 }
 

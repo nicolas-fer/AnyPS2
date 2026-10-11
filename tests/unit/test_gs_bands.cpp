@@ -630,6 +630,91 @@ TEST_CASE(gs_bands, clut_versions_are_identical_for_any_lane_count) {
 }
 
 // ---------------------------------------------------------------------------
+// HOST→LOCAL sem barreira: uploads entre desenhos que usam e que não usam a textura
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct UploadRender {
+    Render img;
+    BandStats stats;
+};
+
+// Duas texturas PSMCT32 de 64x64 (páginas 40 e 44) e uma PSMT8 de 64x64 (página 48).
+// A cada volta: desenhos que lêem A, upload em B (sem colisão), desenho com B,
+// upload em A com desenhos pendentes que a lêem (colisão: lotes por barreira),
+// e um upload partido em dois pacotes com um desenho que lê a textura no meio.
+UploadRender renderUploads(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0x0B10AD};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    auto drawFrom = [&g](std::uint64_t tbp, unsigned k) {
+        g.writeRegister(TEX0_1, tex0(tbp, 1, PSMCT32, 6, 6), 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        vertex(g, 2 + k, 5 + k, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 70 + k, 90 + k, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+    };
+    const std::uint64_t A = 40 * 32, B = 44 * 32;
+    hostToLocal(g, A, 1, PSMCT32, 0, 0, 64, 64, words(2048));
+    for (unsigned k = 0; k < 12; ++k) {
+        drawFrom(A, k);
+        hostToLocal(g, B, 1, PSMCT32, 0, 0, 64, 64, words(2048));  // B ninguém usa
+        drawFrom(B, k);
+        drawFrom(A, k + 1);
+        hostToLocal(g, A, 1, PSMCT32, 0, 0, 64, 64, words(2048));  // A tem leitores pendentes
+        drawFrom(A, k + 2);
+        // Upload partido: metade, um desenho que lê a textura, o resto.
+        g.writeRegister(BITBLTBUF, (std::uint64_t{B} << 32) | (1ull << 48) | (std::uint64_t{PSMCT32} << 56), 0);
+        g.writeRegister(TRXPOS, 0, 0);
+        g.writeRegister(TRXREG, 64 | (std::uint64_t{64} << 32), 0);
+        g.writeRegister(TRXDIR, 0, 0);
+        for (std::uint64_t d : words(1024)) g.writeRegister(HWREG, d, 0);
+        drawFrom(B, k + 3);
+        for (std::uint64_t d : words(1024)) g.writeRegister(HWREG, d, 0);
+        drawFrom(B, k + 4);
+        // PSMCT24 e PSMT8 (palavras que atravessam pixels), perto do fim da VRAM.
+        hostToLocal(g, 500 * 32, 1, PSMCT24, 3, 5, 20, 7, words(53));
+        hostToLocal(g, 508 * 32, 2, PSMT8, 0, 0, 128, 64, words(1024));
+    }
+    UploadRender out;
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, host_uploads_are_identical_for_any_lane_count) {
+    const UploadRender ref = renderUploads(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    // Sem thread tudo é direto; só o upload partido, com um desenho que lê o destino no
+    // meio, passa para lotes (uma vez por volta).
+    CHECK_EQ(ref.stats.hostDirect, 12u * 5 + 1);
+    CHECK_EQ(ref.stats.submit[BandStats::SubmitHostStart], 12u);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const UploadRender got = renderUploads(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Contadores de serialização (Gs::bandStats): cada motivo de espera, de desenho
 // solitário e de barreira cai no contador certo.
 // ---------------------------------------------------------------------------
@@ -775,7 +860,9 @@ TEST_CASE(gs_bands, stats_submits_and_host_batches) {
     // Reset do GS
     g.writePrivileged(0x12001000u, 1ull << 9, 0);
     const BandStats& s = g.bandStats();
-    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 1u);
+    // Nada pendente toca o destino: o produtor escreveu direto, sem barreira.
+    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
+    CHECK_EQ(s.hostDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitHostEnd], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitLocal], 1u);
     // A área da CLUT (página 48) não é tocada por nada pendente: carga no produtor.
@@ -783,7 +870,7 @@ TEST_CASE(gs_bands, stats_submits_and_host_batches) {
     CHECK_EQ(s.clutDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitReset], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitDraw], 0u);
-    CHECK(s.hostBatches >= 1u);
+    CHECK_EQ(s.hostBatches, 0u);
 }
 
 TEST_CASE(gs_bands, stats_waits_by_reason) {
@@ -826,4 +913,17 @@ TEST_CASE(gs_bands, clut_load_away_from_pending_pages_has_no_barrier) {
     CHECK_EQ(s.clutDirect, 2u);
     CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
     CHECK_EQ(s.conflict[BandStats::ConflictWrite], 0u);
+}
+
+TEST_CASE(gs_bands, host_upload_away_from_pending_pages_has_no_barrier) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    sprite(g, 0, 0, 100, 63);  // pendente no FRAME (páginas 0..1)
+    hostToLocal(g, 40 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
+    hostToLocal(g, 41 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.hostDirect, 2u);
+    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
+    CHECK_EQ(s.hostBatches, 0u);
+    CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
 }
