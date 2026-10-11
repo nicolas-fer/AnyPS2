@@ -145,13 +145,15 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
                   d(cur.conflict[2], prev.conflict[2]));
     s += buf;
     std::snprintf(buf, sizeof buf,
-                  " barreiras de submit: HOST início %.1f, HOST fim %.1f, LOCAL→LOCAL %.1f, CLUT %.1f, reset %.1f, "
-                  "desenho %.1f; lotes HOST→LOCAL %.1f; CLUT sem barreira %.1f, HOST→LOCAL sem barreira %.1f;",
+                  " barreiras de submit: LOCAL→LOCAL %.1f, CLUT %.1f, reset %.1f, desenho %.1f;"
+                  " CLUT sem barreira %.1f; HOST→LOCAL direto: sem espera %.1f, espera no início %.1f, "
+                  "espera de ordem %.1f;",
                   d(cur.submit[0], prev.submit[0]), d(cur.submit[1], prev.submit[1]), d(cur.submit[2], prev.submit[2]),
-                  d(cur.submit[3], prev.submit[3]), d(cur.submit[4], prev.submit[4]), d(cur.submit[5], prev.submit[5]),
-                  d(cur.hostBatches, prev.hostBatches), d(cur.clutDirect, prev.clutDirect), d(cur.hostDirect, prev.hostDirect));
+                  d(cur.submit[3], prev.submit[3]), d(cur.clutDirect, prev.clutDirect),
+                  d(cur.hostDirect, prev.hostDirect), d(cur.hostBarrier, prev.hostBarrier),
+                  d(cur.hostOrder, prev.hostOrder));
     s += buf;
-    static const char* kWait[BandStats::WaitCount] = {"vídeo", "vram()", "LOCAL→HOST", "SIGNAL", "FINISH", "outros"};
+    static const char* kWait[BandStats::WaitCount] = {"vídeo", "vram()", "LOCAL→HOST", "SIGNAL", "FINISH", "HOST→LOCAL", "outros"};
     s += " esperas do EE (n, ms):";
     for (unsigned i = 0; i < BandStats::WaitCount; ++i) {
         std::snprintf(buf, sizeof buf, " %s %.1f/%.2f%s", kWait[i], d(cur.waits[i], prev.waits[i]),
