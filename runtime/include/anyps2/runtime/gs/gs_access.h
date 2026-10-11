@@ -114,8 +114,9 @@ bool accessesOverlapBlocks(const VramAccess& w, const VramAccess& r);
 //    aberta, a palavra seguinte espera (hostDrain_) os desenhos que a tocam; com acesso não
 //    concluído a HOST→LOCAL abre em modo fila e suas palavras só chegam à VRAM por uma
 //    barreira (Gs::flushHostQueue), submetida antes de qualquer desenho, cópia ou carga de
-//    CLUT que toque o destino, e antes de qualquer waitIdle; LOCAL→LOCAL e a carga de CLUT
-//    são barreiras (submit);
+//    CLUT que toque o destino, e antes de qualquer waitIdle; LOCAL→LOCAL é barreira
+//    (submit), e a carga de CLUT é barreira ou diferida (ANYPS2_GS_CLUT_DEP) com a leitura
+//    registrada no pending_ e no outstanding_ (a CLUT não passa pelo cache de texels);
 //  * toda escrita passe por Gs::bumpPages antes do desenho seguinte (as gerações). No modo
 //    fila a escrita real acontece depois, na barreira: a geração muda no início da
 //    transferência e de novo em cada submissão se um desenho fixou, nesse meio tempo, uma

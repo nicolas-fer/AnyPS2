@@ -728,6 +728,13 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
         const std::shared_ptr<const ClutBuffer> keep = next;
         const unsigned lane = clutLazyLane_++ % worker_->lanes();
         worker_->push(lane, std::make_shared<const GsWorker::Task>([keep](unsigned, unsigned) { keep->fillLazy(); }));
+        // Só as ainda não lidas importam (para a compactação acima); no GT4 são ~1000 cargas
+        // diferidas por VBlank, então as já prontas saem para o vetor não crescer.
+        if (clutLazies_.size() >= 64) {
+            std::erase_if(clutLazies_, [](const std::shared_ptr<const ClutBuffer>& l) {
+                return l->ready.load(std::memory_order_acquire);
+            });
+        }
         clutLazies_.push_back(next);
         clut_ = std::move(next);
         ++clutChain_;
