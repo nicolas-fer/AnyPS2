@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -51,6 +52,16 @@ struct Frame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<std::uint32_t> pixels;
+};
+
+// Buffer de CLUT interno (1 KB). Cada carga de CLUT produz uma versão nova, que
+// depois de pronta não muda mais: os desenhos guardam a versão que valia quando
+// foram enfileirados, e as faixas não leem estado global.
+struct ClutBuffer {
+    std::array<std::uint16_t, 512> v{};
+    // Falso enquanto uma barreira ainda vai preencher `v` (carga que não pôde ser
+    // feita no produtor); as faixas a marcam pronta, e só então o produtor copia.
+    std::atomic<bool> ready{true};
 };
 
 // Contadores de serialização das faixas (diagnóstico do ANYPS2_PROFILE): por que o
@@ -131,6 +142,7 @@ struct BandStats {
     std::uint64_t conflict[ConflictCount] = {};
     std::uint64_t submit[SubmitCount] = {};
     std::uint64_t hostBatches = 0;  // lotes HOST→LOCAL (flushHost)
+    std::uint64_t clutDirect = 0;   // cargas de CLUT feitas no produtor, sem barreira
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -266,9 +278,25 @@ private:
     // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
     void submit(GsWorker::Op op, BandStats::SubmitKind kind);
     void flushHost();
+    // Acessos diretos do produtor à VRAM (CLUT): vê se o que as faixas ainda podem
+    // estar fazendo não toca as páginas. outstanding_ guarda os acessos de tudo o que
+    // foi enfileirado desde que as faixas foram vistas ociosas (diferente de pending_,
+    // que uma barreira esvazia, mas não termina na hora).
+    bool trackOutstanding();
+    // Registra um acesso que a próxima barreira enfileirada conclui (chamar com o
+    // lote HOST→LOCAL já descarregado e depois da barreira de conflito).
+    void noteOutstanding(VramAccess a);
+    // Há acesso não concluído que colide com `a` (ou a lista perdeu o rastro).
+    bool outstandingConflicts(const VramAccess& a);
+    // Fim da transferência HOST→LOCAL aberta: descarrega o lote e passa o destino
+    // para outstanding_, concluído pela última barreira enfileirada.
+    void closeHostTransfer();
+    VramAccess rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x0,
+                          std::uint32_t y0, std::uint32_t w, std::uint32_t h) const;
+    VramAccess clutSource(std::uint64_t tex0, std::uint64_t texclut) const;
     void hostWord(std::uint64_t data);
     void copyLocal(const LocalCopy& c);
-    void loadClutCells(std::uint64_t tex0, std::uint64_t texclut);
+    void loadClutCells(ClutBuffer& dst, std::uint64_t tex0, std::uint64_t texclut) const;
 
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
@@ -290,12 +318,20 @@ private:
     std::vector<std::uint64_t> hostBatch_;  // palavras HOST→LOCAL ainda não enfileiradas
     // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
     PendingAccess pending_;
+    PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()
+    std::uint64_t outstandingLostNeed_ = 0;  // lista cheia: sem rastro até a barreira desse número
+    // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita
+    // em andamento enquanto o produtor ainda pode enviar dados.
+    bool hostOpenValid_ = false;
+    VramAccess hostOpen_;
+    std::uint64_t hostWordsLeft_ = 0;
 
     Runtime* rt_;
     Vram vram_;  // worker
     std::array<std::uint64_t, 256> regs_{};
     Context ctx_[2];
-    std::array<std::uint16_t, 512> clut_{};  // buffer de CLUT interno (1 KB), worker
+    // CLUT corrente (versão mais recente; produtor).
+    std::shared_ptr<ClutBuffer> clut_ = std::make_shared<ClutBuffer>();
     std::uint32_t cbp0_ = 0, cbp1_ = 0;
 
     // Fila de vértices

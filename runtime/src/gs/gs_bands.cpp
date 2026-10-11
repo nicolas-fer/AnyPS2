@@ -199,6 +199,20 @@ bool PendingAccess::clashesWith(const VramAccess& a) const {
     return std::any_of(list_.begin(), list_.end(), [&a](const VramAccess& p) { return clashes(p, a); });
 }
 
+bool accessesOverlap(const VramAccess& a, const VramAccess& b) {
+    return overlap(a, b);
+}
+
+bool PendingAccess::conflictsWith(const VramAccess& a) const {
+    return std::any_of(list_.begin(), list_.end(),
+                       [&a](const VramAccess& p) { return (p.write || a.write) && overlap(p, a); });
+}
+
+void PendingAccess::dropDone(std::uint64_t done) {
+    list_.erase(std::remove_if(list_.begin(), list_.end(), [done](const VramAccess& p) { return p.seq <= done; }),
+                list_.end());
+}
+
 void PendingAccess::add(const VramAccess& a) {
     for (VramAccess& p : list_) {
         // Fundir escritas do mesmo mapeamento só vale com um intervalo cada (o casco
@@ -207,10 +221,13 @@ void PendingAccess::add(const VramAccess& a) {
         if (sameMapping(p, a) && p.wrap.empty() && a.wrap.empty()) {
             p.span.first = std::min(p.span.first, a.span.first);
             p.span.last = std::max(p.span.last, a.span.last);
+            p.seq = std::max(p.seq, a.seq);
             return;
         }
-        if (!p.write && !a.write && sameSpans(p, a)) return;
-        if (p.write && a.write && sameMapping(p, a) && sameSpans(p, a)) return;
+        if ((!p.write && !a.write && sameSpans(p, a)) || (p.write && a.write && sameMapping(p, a) && sameSpans(p, a))) {
+            p.seq = std::max(p.seq, a.seq);
+            return;
+        }
     }
     list_.push_back(a);
 }

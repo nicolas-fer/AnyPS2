@@ -35,7 +35,13 @@ struct VramAccess {
     std::uint32_t base = 0;
     std::uint32_t bw = 0;
     std::uint32_t psm = 0;
+    // Só para PendingAccess::dropDone: o acesso termina de vez quando a barreira de
+    // número `seq` (contada desde o início) conclui; 0 = já terminou.
+    std::uint64_t seq = 0;
 };
+
+// Sobreposição de páginas, sem a exceção do mesmo mapeamento de clashes().
+bool accessesOverlap(const VramAccess& a, const VramAccess& b);
 
 // Dois acessos colidem se as páginas se cruzam e pelo menos um escreve, salvo
 // quando são escritas com o mesmo mapeamento (cada pixel fica numa faixa só, e
@@ -49,13 +55,22 @@ class PendingAccess {
 public:
     static constexpr std::size_t kMax = 64;
 
+    explicit PendingAccess(std::size_t max = kMax) : max_(max) {}
+
     bool clashesWith(const VramAccess& a) const;
+    // Para quem acessa a VRAM direto do produtor (CLUT, HOST→LOCAL): sem a exceção
+    // do mesmo mapeamento, que só vale entre desenhos divididos em faixas. Conflita
+    // se há sobreposição de páginas e pelo menos um dos dois escreve.
+    bool conflictsWith(const VramAccess& a) const;
     void add(const VramAccess& a);
-    bool full() const { return list_.size() >= kMax; }
+    // Esquece os acessos que já terminaram (seq ≤ done).
+    void dropDone(std::uint64_t done);
+    bool full() const { return list_.size() >= max_; }
     void clear() { list_.clear(); }
     std::size_t size() const { return list_.size(); }
 
 private:
+    std::size_t max_;
     std::vector<VramAccess> list_;
 };
 

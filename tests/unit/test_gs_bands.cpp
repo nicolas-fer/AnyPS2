@@ -540,6 +540,96 @@ TEST_CASE(gs_bands, shaded_matches_covered_with_lanes) {
 }
 
 // ---------------------------------------------------------------------------
+// CLUT por versões: várias cargas entre desenhos de faixas diferentes
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ClutRender {
+    Render img;
+    BandStats stats;
+};
+
+// Texturas PSMT8 e PSMT4 de 64x64 com cargas de CLUT (CSM1 em CT32 e CT16, CSM2,
+// CSA, CLD 1/4) entre desenhos que cruzam as faixas; áreas de CLUT reescritas por
+// HOST→LOCAL e por desenho, para que algumas cargas conflitem com acessos
+// pendentes e outras não.
+ClutRender renderClut(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    ClutRender out;
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0xC1074};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    for (unsigned k = 0; k < 6; ++k) hostToLocal(g, (48 + k) * 32, 1, PSMCT32, 0, 0, 16, 16, words(128));
+    hostToLocal(g, 60 * 32, 4, PSMCT16, 0, 0, 256, 4, words(256));  // CLUT 16 bits para CSM2
+    hostToLocal(g, 1280, 1, PSMT8, 0, 0, 64, 64, words(512));
+    hostToLocal(g, 1344, 1, PSMT4, 0, 0, 64, 64, words(256));
+    for (unsigned k = 0; k < 18; ++k) {
+        const unsigned c = k % 6;
+        const bool four = k % 3 == 2;
+        const std::uint64_t cld = (k % 4 == 3) ? 4 : 1;
+        std::uint64_t t0 = four ? tex0(1344, 1, PSMT4, 6, 6, (48 + c) * 32, PSMCT32, cld, k % 16)
+                                : tex0(1280, 1, PSMT8, 6, 6, (48 + c) * 32, PSMCT32, cld, 0);
+        if (k % 5 == 4) {  // CLUT de 16 bits, CSM1: lê a área como PSMCT16
+            t0 = four ? tex0(1344, 1, PSMT4, 6, 6, (48 + c) * 32, PSMCT16, 1, k % 16)
+                      : tex0(1280, 1, PSMT8, 6, 6, (48 + c) * 32, PSMCT16, 1, 0);
+        }
+        if (k % 7 == 6) {  // CSM2: entradas em linha de 256 pixels de 16 bits
+            t0 = tex0(1344, 1, PSMT4, 6, 6, 60 * 32, PSMCT16, 1, k % 16) | (1ull << 55);
+            g.writeRegister(TEXCLUT, 4 | (std::uint64_t{k % 3} << 6) | (std::uint64_t{k % 4} << 12), 0);
+        }
+        g.writeRegister(TEX0_1, t0, 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        const unsigned y0 = (k * 7) % 40;
+        vertex(g, 3 + k, y0, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 100 + k, y0 + 70, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+        if (k == 5) {  // um desenho escreve numa área de CLUT: a carga seguinte conflita
+            g.writeRegister(FRAME_1, frameReg(51, 1, PSMCT32), 0);
+            g.writeRegister(PRIM, prim(3, true), 0);
+            vertex(g, 0, 0, rgbaq(255, 0, 0, 0));
+            vertex(g, 63, 0, rgbaq(0, 255, 0, 0));
+            vertex(g, 0, 31, rgbaq(0, 0, 255, 0));
+            g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+        }
+        if (k == 9) hostToLocal(g, 49 * 32, 1, PSMCT32, 0, 0, 16, 16, words(128));  // reescreve a CLUT 1
+    }
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, clut_versions_are_identical_for_any_lane_count) {
+    const ClutRender ref = renderClut(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    CHECK(ref.stats.clutDirect > 10);  // sem thread tudo é direto
+    CHECK_EQ(ref.stats.submit[BandStats::SubmitClut], 0u);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const ClutRender got = renderClut(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+            // Cada carga é direta ou uma barreira (quantas de cada, depende do tempo).
+            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Contadores de serialização (Gs::bandStats): cada motivo de espera, de desenho
 // solitário e de barreira cai no contador certo.
 // ---------------------------------------------------------------------------
@@ -688,7 +778,9 @@ TEST_CASE(gs_bands, stats_submits_and_host_batches) {
     CHECK_EQ(s.submit[BandStats::SubmitHostStart], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitHostEnd], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitLocal], 1u);
-    CHECK_EQ(s.submit[BandStats::SubmitClut], 1u);
+    // A área da CLUT (página 48) não é tocada por nada pendente: carga no produtor.
+    CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
+    CHECK_EQ(s.clutDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitReset], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitDraw], 0u);
     CHECK(s.hostBatches >= 1u);
@@ -719,4 +811,19 @@ TEST_CASE(gs_bands, stats_waits_by_reason) {
     CHECK_EQ(s.waits[BandStats::WaitDownload], 1u);
     g.waitIdle();
     CHECK_EQ(s.waits[BandStats::WaitOther], 1u);
+}
+
+TEST_CASE(gs_bands, clut_load_away_from_pending_pages_has_no_barrier) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    // Desenhos grandes pendentes nas páginas 0..: a CLUT na página 48 não é tocada.
+    sprite(g, 0, 0, 100, 63);
+    g.writeRegister(TEX0_1, tex0(1280, 2, 0x13, 6, 6, 1536, PSMCT32, 1), 0);
+    sprite(g, 0, 0, 100, 63);
+    g.writeRegister(TEX0_1, tex0(1280, 2, 0x13, 6, 6, 1568, PSMCT32, 1), 0);
+    sprite(g, 0, 0, 100, 63);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.clutDirect, 2u);
+    CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
+    CHECK_EQ(s.conflict[BandStats::ConflictWrite], 0u);
 }

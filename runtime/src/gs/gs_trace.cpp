@@ -689,9 +689,9 @@ void GsTrace::dumpTexture(Gs& gs, std::uint32_t pc, const DrawState& s) {
     auto clutColor = [&](unsigned idx) -> std::uint32_t {
         if (cpsm == PSMCT32) {
             const unsigned i = idx & 255;
-            return static_cast<std::uint32_t>(gs.clut_[i]) | (static_cast<std::uint32_t>(gs.clut_[i + 256]) << 16);
+            return static_cast<std::uint32_t>(gs.clut_->v[i]) | (static_cast<std::uint32_t>(gs.clut_->v[i + 256]) << 16);
         }
-        return expand16(gs.clut_[idx & 511], ta0, ta1, aem);
+        return expand16(gs.clut_->v[idx & 511], ta0, ta1, aem);
     };
     auto texel = [&](std::uint32_t raw) -> std::uint32_t {
         switch (psm) {
