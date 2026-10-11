@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -420,7 +421,30 @@ void Gs::draw(std::uint32_t pc) {
         }
         for (unsigned j = i + 1; j < nw; ++j) selfFrameZ = selfFrameZ || clashes(writes[i], writes[j]);
     }
-    if (selfWrap || selfTexture || selfFrameZ) {
+    // Gerações de página (bumpPages): as escritas deste desenho entram na ordem do
+    // programa, antes de qualquer desenho seguinte. A simulação do cache olha antes,
+    // com as gerações que a textura tinha quando o desenho a fixou. Desenhos sozinhos
+    // (selfX) também escrevem; só não usam cache.
+    const bool anySelf = selfWrap || selfTexture || selfFrameZ;
+    if (e.tme && (HostProfile::enabled() || texSimForced_)) {
+        simTexture(e, selfWrap      ? static_cast<int>(TexSimReport::OffWrap)
+                      : selfTexture ? static_cast<int>(TexSimReport::OffTexture)
+                      : selfFrameZ  ? static_cast<int>(TexSimReport::OffFrameZ)
+                                    : -1);
+    }
+    bumpPages(writes[0].pages, WkFrame);
+    if (nw > 1) bumpPages(writes[1].pages, WkZbuf);
+    if (e.tme && !anySelf && hostOpenValid_) {
+        // A versão da textura fica fixada por este desenho; se a transferência HOST→LOCAL
+        // aberta ainda vai escrever nela, a próxima palavra invalida a versão.
+        for (unsigned j = 0; j < nr; ++j) {
+            if (reads[j].surface == 2 && accessesOverlap(hostOpen_, reads[j])) {
+                hostGenDirty_ = true;
+                break;
+            }
+        }
+    }
+    if (anySelf) {
         // Um único motivo por desenho, na ordem de prioridade abaixo.
         if (selfWrap) {
             ++bandStats_.self[BandStats::SelfWrap];
@@ -496,6 +520,66 @@ void Gs::draw(std::uint32_t pc) {
 // ---------------------------------------------------------------------------
 // Texturas
 // ---------------------------------------------------------------------------
+
+// Simulação do cache de texturas (só produtor, só com perfil ou nos testes): a chave
+// é o formato, o tamanho e a base/largura de cada nível usado; o valor, as gerações
+// das páginas que a textura cobre na última vez. Igual = acerto. Sem texels, sem
+// atômicos: custa só o que o produtor já faz por desenho texturizado.
+void Gs::simTexture(const DrawEnv& e, int offReason) {
+    ++texSim_.texDraws;
+    if (offReason >= 0) {
+        ++texSim_.off[offReason];
+        return;
+    }
+    TexSimKey key;
+    key.v[0] = e.tpsm;
+    key.v[1] = e.tw;
+    key.v[2] = e.th;
+    key.v[3] = e.mxl;
+    PageSet pages;
+    for (unsigned l = 0; l <= e.mxl && l < 7; ++l) {
+        key.v[4 + l] = e.tbp[l];
+        key.v[11 + l] = e.tbw[l];
+        const unsigned wl = std::max(1u, (1u << e.tw) >> l), hl = std::max(1u, (1u << e.th) >> l);
+        pages.merge(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, hl - 1, 0, wl - 1));
+    }
+    std::vector<std::uint32_t>& cur = texSimScratch_;
+    cur.clear();
+    for (unsigned i = 0; i < PageSet::kWords; ++i) {
+        for (std::uint64_t m = pages.w[i]; m; m &= m - 1)
+            cur.push_back(pageState_[i * 64 + static_cast<unsigned>(std::countr_zero(m))].gen);
+    }
+    constexpr std::size_t kMaxKeys = 8192;  // simulação: limite grosseiro, recomeça se passar
+    if (texSimSeen_.size() >= kMaxKeys) texSimSeen_.clear();
+    auto [it, inserted] = texSimSeen_.try_emplace(key);
+    std::vector<std::uint32_t>& old = it->second;
+    if (inserted) {
+        ++texSim_.miss[TexSimReport::MissFirst];
+        old = cur;
+        return;
+    }
+    if (old == cur) {
+        ++texSim_.hits;
+        return;
+    }
+    // Motivo: a escrita mais recente entre as páginas cuja geração mudou.
+    std::uint64_t bestEpoch = 0;
+    std::uint32_t kind = WkFrame;
+    std::size_t n = 0;
+    for (unsigned i = 0; i < PageSet::kWords; ++i) {
+        for (std::uint64_t m = pages.w[i]; m; m &= m - 1, ++n) {
+            const PageState& s = pageState_[i * 64 + static_cast<unsigned>(std::countr_zero(m))];
+            if (n < old.size() && old[n] != s.gen && s.epoch >= bestEpoch) {
+                bestEpoch = s.epoch;
+                kind = s.kind;
+            }
+        }
+    }
+    static constexpr TexSimReport::Miss kMap[] = {TexSimReport::MissFrame, TexSimReport::MissZbuf,
+                                                  TexSimReport::MissHost, TexSimReport::MissCopy};
+    ++texSim_.miss[kMap[kind & 3]];
+    old = cur;
+}
 
 // Palavra crua do texel: o wrap (REPEAT/CLAMP/REGION_*) e a leitura da VRAM no
 // formato da textura, sem CLUT nem TEXA. Separada da expansão para que um cache de

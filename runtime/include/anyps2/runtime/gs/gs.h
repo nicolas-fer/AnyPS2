@@ -8,6 +8,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "anyps2/runtime/gs/gs_access.h"
@@ -206,6 +207,21 @@ struct TexReport {
     std::uint64_t pixHistTex[BandStats::kPixBuckets] = {};
 };
 
+// Simulação da taxa de acerto de um cache de texturas (ANYPS2_PROFILE; só o produtor
+// mexe). Não guarda texels: usa as gerações por página da VRAM (Gs::pageGen_) para
+// dizer se a textura de um desenho seria a mesma versão da última vista com a mesma
+// chave, e por que não foi. Não muda o comportamento nem a imagem.
+struct TexSimReport {
+    // Motivo do miss: a escrita mais recente numa página da textura que mudou.
+    enum Miss : unsigned { MissFirst, MissFrame, MissZbuf, MissHost, MissCopy, MissCount };
+    // Desenhos texturizados fora do cache (mesmo motivo único de BandStats::self).
+    enum Off : unsigned { OffWrap, OffTexture, OffFrameZ, OffCount };
+    std::uint64_t texDraws = 0;  // desenhos texturizados vistos
+    std::uint64_t hits = 0;
+    std::uint64_t miss[MissCount] = {};
+    std::uint64_t off[OffCount] = {};
+};
+
 // Graphics Synthesizer em software: estado completo dos registradores,
 // memória local, transferências e um rasterizador de referência que segue as
 // regras do hardware (cobertura top-left, Z de 32 bits inteiro, blending
@@ -304,6 +320,13 @@ public:
     // enquanto elas desenham) e o histograma de pixels por desenho do produtor.
     TexReport texReport() const;
 
+    // Simulação do cache de texturas (fatia 3 do plano): contadores do produtor. Só
+    // anda com o perfil ligado ou com forceTexSim(true) (testes).
+    const TexSimReport& texSim() const { return texSim_; }
+    void forceTexSim(bool on) { texSimForced_ = on; }
+    // Só para testes: geração atual de uma página da VRAM (8 KB; 0..511).
+    std::uint32_t pageGeneration(unsigned page) const { return pageState_[page].gen; }
+
     // Só para testes (gs_texel): os parâmetros de textura de um desenho, para buscar
     // um texel sem montar um desenho inteiro.
     struct TexelProbe {
@@ -390,6 +413,16 @@ private:
     static void fillEnv(DrawEnv& e, const TexelProbe& p);
     const std::uint32_t* palette(const DrawEnv& e, unsigned n) const;
     void setupEnv(DrawEnv& e, std::uint32_t pc);
+    // Gerações de página (produtor, ordem do programa). Toda escrita na VRAM que o
+    // produtor realiza ou enfileira passa por aqui, ANTES de qualquer desenho que a
+    // veja: uma versão de textura fixada por um desenho vale enquanto as gerações das
+    // suas páginas não mudam. Pontos de escrita: FRAME/ZBUF de cada desenho (draw,
+    // inclusive os que vão sozinhos), início e palavras da HOST→LOCAL (startTransfer,
+    // writeTransferData) e o destino da LOCAL→LOCAL (localToLocal). A carga de CLUT só
+    // lê a VRAM. Qualquer escrita nova na VRAM tem de chamar bumpPages.
+    enum WriteKind : std::uint8_t { WkFrame, WkZbuf, WkHost, WkCopy };
+    void bumpPages(const PageSet& pages, WriteKind kind);
+    void simTexture(const DrawEnv& e, int offReason);
     void rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2);
     void drawPoint(const DrawEnv& e, const Vertex& v);
     void drawLine(const DrawEnv& e, const Vertex& a, const Vertex& b);
@@ -415,6 +448,36 @@ private:
     bool hostDrain_ = false;  // há operação enfileirada que toca o destino aberto: esperar antes da próxima palavra
     VramAccess hostOpen_;
     std::uint64_t hostWordsLeft_ = 0;
+    // Um desenho fixou uma versão de textura cujas páginas cruzam o destino aberto: a
+    // próxima palavra incrementa as páginas do destino antes de escrever (senão um
+    // desenho posterior acertaria numa versão com o conteúdo parcial).
+    bool hostGenDirty_ = false;
+
+    // Geração por página, época da última escrita e quem escreveu (só o produtor).
+    struct PageState {
+        std::uint64_t epoch = 0;
+        std::uint32_t gen = 0;
+        std::uint32_t kind = 0;
+    };
+    std::array<PageState, PageSet::kPages> pageState_{};
+    std::uint64_t writeEpoch_ = 0;  // uma por incremento (evento de escrita)
+
+    // Simulação do cache (ver TexSimReport).
+    struct TexSimKey {
+        std::array<std::uint32_t, 4 + 14> v{};
+        bool operator==(const TexSimKey& o) const { return v == o.v; }
+    };
+    struct TexSimKeyHash {
+        std::size_t operator()(const TexSimKey& k) const {
+            std::uint64_t h = 1469598103934665603ull;
+            for (std::uint32_t x : k.v) h = (h ^ x) * 1099511628211ull;
+            return static_cast<std::size_t>(h);
+        }
+    };
+    std::unordered_map<TexSimKey, std::vector<std::uint32_t>, TexSimKeyHash> texSimSeen_;
+    std::vector<std::uint32_t> texSimScratch_;
+    TexSimReport texSim_;
+    bool texSimForced_ = false;
 
     Runtime* rt_;
     Vram vram_;  // worker

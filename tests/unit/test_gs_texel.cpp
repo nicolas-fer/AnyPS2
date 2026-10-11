@@ -301,3 +301,187 @@ TEST_CASE(gs_texel, palette_is_rebuilt_only_when_the_key_changes) {
     CHECK_EQ(g.paletteBuilds(), b1 + 1);
     setEnv("ANYPS2_GS_THREAD", "");
 }
+
+// ---- Gerações de página e simulação do cache (fatia 3) ----
+//
+// Textura CT32 64x64 em TBP 1024 (páginas 32 e 33). Cada texDraw é um sprite pequeno
+// no FRAME 0 (fbw 2) lendo essa textura; a simulação conta acertos e o motivo de cada
+// miss. As escritas intermediárias são de FRAME, de HOST→LOCAL (inteira e parcial) e
+// de LOCAL→LOCAL.
+
+namespace {
+
+constexpr std::uint32_t kTexBp = 1024;
+constexpr unsigned kTexWords = 64 * 64 / 2;  // CT32: dois pixels por palavra
+
+std::uint64_t frameRegT(std::uint64_t fbp, std::uint64_t fbw) {
+    return fbp | (fbw << 16) | (std::uint64_t{PSMCT32} << 24);
+}
+std::uint64_t xyT(std::uint64_t x, std::uint64_t y) { return (x * 16) | ((y * 16) << 16); }
+
+struct SimScene {
+    Gs g{nullptr};
+    std::vector<std::uint64_t> words;
+
+    SimScene() {
+        g.forceTexSim(true);
+        g.writeRegister(FRAME_1, frameRegT(0, 2), 0);
+        g.writeRegister(SCISSOR_1, 0ull | (127ull << 16) | (127ull << 48), 0);
+        g.writeRegister(XYOFFSET_1, 0, 0);
+        g.writeRegister(PRMODECONT, 1, 0);
+        for (unsigned i = 0; i < kTexWords; ++i) words.push_back(0x0102030405060708ull * (i + 1));
+    }
+    void hostBegin(std::uint32_t bp = kTexBp) {
+        g.writeRegister(BITBLTBUF, (std::uint64_t{bp} << 32) | (1ull << 48) | (std::uint64_t{PSMCT32} << 56), 0);
+        g.writeRegister(TRXPOS, 0, 0);
+        g.writeRegister(TRXREG, 64 | (64ull << 32), 0);
+        g.writeRegister(TRXDIR, 0, 0);
+    }
+    void hostWords(unsigned from, unsigned to) {
+        for (unsigned i = from; i < to; ++i) g.writeRegister(HWREG, words[i], 0);
+    }
+    void hostAll() {
+        hostBegin();
+        hostWords(0, kTexWords);
+    }
+    // Sprite 8x8 no FRAME corrente lendo o canto da textura.
+    void texDraw() {
+        const std::uint64_t tex0v = std::uint64_t{kTexBp} | (1ull << 14) | (std::uint64_t{PSMCT32} << 20) | (6ull << 26) |
+                                    (6ull << 30);
+        g.writeRegister(TEX0_1, tex0v, 0);
+        g.writeRegister(PRIM, 6u | 16u | 256u, 0);
+        g.writeRegister(RGBAQ, 0x80808080ull | (0x3F800000ull << 32), 0);
+        g.writeRegister(UV, 0, 0);
+        g.writeRegister(XYZ2, xyT(16, 16), 0);
+        g.writeRegister(UV, (8ull * 16) | ((8ull * 16) << 16), 0);
+        g.writeRegister(XYZ2, xyT(24, 24), 0);
+    }
+    // Sprite sem textura escrito num FRAME qualquer (por exemplo, sobre a textura).
+    void frameDraw(std::uint32_t fbp, std::uint32_t fbw) {
+        g.writeRegister(FRAME_1, frameRegT(fbp, fbw), 0);
+        g.writeRegister(PRIM, 6u, 0);
+        g.writeRegister(RGBAQ, 0x40404040ull | (0x3F800000ull << 32), 0);
+        g.writeRegister(XYZ2, xyT(0, 0), 0);
+        g.writeRegister(XYZ2, xyT(8, 8), 0);
+        g.writeRegister(FRAME_1, frameRegT(0, 2), 0);
+    }
+    void copyIntoTexture() {
+        // Origem: bloco 16x16 do FRAME 0; destino: o canto da textura (página 32).
+        g.writeRegister(BITBLTBUF,
+                        0ull | (2ull << 16) | (std::uint64_t{PSMCT32} << 24) | (std::uint64_t{kTexBp} << 32) |
+                            (1ull << 48) | (std::uint64_t{PSMCT32} << 56),
+                        0);
+        g.writeRegister(TRXPOS, 0, 0);
+        g.writeRegister(TRXREG, 16 | (16ull << 32), 0);
+        g.writeRegister(TRXDIR, 2, 0);
+    }
+};
+
+struct Snap {
+    std::uint64_t hits, miss[TexSimReport::MissCount];
+    explicit Snap(const Gs& g) {
+        const TexSimReport& r = g.texSim();
+        hits = r.hits;
+        for (unsigned i = 0; i < TexSimReport::MissCount; ++i) miss[i] = r.miss[i];
+    }
+};
+
+}  // namespace
+
+TEST_CASE(gs_texel, texcache_sim_hits_and_miss_reasons) {
+    for (const char* threaded : {"0", "1"}) {
+        setEnv("ANYPS2_GS_THREAD", threaded);
+        setEnv("ANYPS2_GS_THREADS", "2");
+        SimScene s;
+        s.hostAll();
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissFirst], 1u);
+        CHECK_EQ(s.g.texSim().hits, 0u);
+        s.texDraw();  // sem escrita no meio: acerto
+        CHECK_EQ(s.g.texSim().hits, 1u);
+
+        Snap a(s.g);
+        s.frameDraw(kTexBp / 32, 1);  // FRAME em cima da página 32 da textura
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissFrame], a.miss[TexSimReport::MissFrame] + 1);
+        CHECK_EQ(s.g.texSim().hits, a.hits);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, a.hits + 1);
+
+        // FRAME numa página que não é da textura: continua acertando.
+        s.frameDraw(0, 2);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, a.hits + 2);
+
+        Snap b(s.g);
+        s.hostAll();  // HOST→LOCAL inteira sobre a textura
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissHost], b.miss[TexSimReport::MissHost] + 1);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, b.hits + 1);
+
+        Snap c(s.g);
+        s.copyIntoTexture();  // LOCAL→LOCAL sobre a textura
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissCopy], c.miss[TexSimReport::MissCopy] + 1);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, c.hits + 1);
+
+        // Uma textura só: nunca houve outra primeira vez.
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissFirst], 1u);
+    }
+    setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_THREADS", "");
+}
+
+TEST_CASE(gs_texel, texcache_sim_partial_host_transfer_misses_after_more_words) {
+    for (const char* threaded : {"0", "1"}) {
+        setEnv("ANYPS2_GS_THREAD", threaded);
+        setEnv("ANYPS2_GS_THREADS", "2");
+        SimScene s;
+        s.hostAll();
+        s.texDraw();  // miss de primeira vez
+        s.hostBegin();
+        s.hostWords(0, 1000);  // transferência aberta: faltam 1048 palavras
+        s.texDraw();           // fixa uma versão com o conteúdo parcial (a transferência já bumpou)
+        Snap a(s.g);
+        s.texDraw();  // sem escrita no meio
+        CHECK_EQ(s.g.texSim().hits, a.hits + 1);
+        s.hostWords(1000, 1500);  // mais palavras sobre a textura fixada
+        s.texDraw();              // tem de dar miss por HOST, não acerto
+        CHECK_EQ(s.g.texSim().hits, a.hits + 1);
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissHost], a.miss[TexSimReport::MissHost] + 1);
+        s.texDraw();  // a versão nova vale até a próxima palavra
+        CHECK_EQ(s.g.texSim().hits, a.hits + 2);
+        s.hostWords(1500, kTexWords);  // fim da transferência
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissHost], a.miss[TexSimReport::MissHost] + 2);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, a.hits + 3);
+
+        // Transferência aberta em outro lugar da VRAM: as palavras não invalidam a textura.
+        s.hostBegin(4096);
+        s.hostWords(0, 100);
+        s.texDraw();
+        Snap b(s.g);
+        s.hostWords(100, 200);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, b.hits + 1);
+    }
+    setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_THREADS", "");
+}
+
+TEST_CASE(gs_texel, texcache_sim_texture_on_own_frame_is_off_cache) {
+    setEnv("ANYPS2_GS_THREAD", "0");
+    SimScene s;
+    s.hostAll();
+    s.g.writeRegister(FRAME_1, frameRegT(kTexBp / 32, 1), 0);
+    s.texDraw();  // textura sobre o próprio FRAME
+    CHECK_EQ(s.g.texSim().off[TexSimReport::OffTexture], 1u);
+    CHECK_EQ(s.g.texSim().hits, 0u);
+    CHECK_EQ(s.g.texSim().miss[TexSimReport::MissFirst], 0u);
+    // O desenho sozinho também escreveu: a geração da página mudou.
+    CHECK(s.g.pageGeneration(32) > 0u);
+    setEnv("ANYPS2_GS_THREAD", "");
+}

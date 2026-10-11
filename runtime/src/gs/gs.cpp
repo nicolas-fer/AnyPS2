@@ -1,6 +1,7 @@
 #include "anyps2/runtime/gs/gs.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -150,6 +151,21 @@ void Gs::closeHostTransfer() {
     // Tudo o que foi enviado já está na VRAM (modo direto): não há nada a concluir.
     hostOpenValid_ = false;
     hostDrain_ = false;
+    hostGenDirty_ = false;  // sem palavras novas, a versão fixada continua certa
+}
+
+void Gs::bumpPages(const PageSet& pages, WriteKind kind) {
+    ++writeEpoch_;
+    for (unsigned i = 0; i < PageSet::kWords; ++i) {
+        std::uint64_t m = pages.w[i];
+        while (m) {
+            PageState& s = pageState_[i * 64 + static_cast<unsigned>(std::countr_zero(m))];
+            ++s.gen;
+            s.epoch = writeEpoch_;
+            s.kind = kind;
+            m &= m - 1;
+        }
+    }
 }
 
 // Retângulo de pixels de uma transferência como acesso. Fora de 0..2047 o
@@ -697,6 +713,7 @@ void Gs::startTransfer(std::uint32_t pc) {
                 } else {
                     ++bandStats_.hostDirect;
                 }
+                bumpPages(dest.pages, WkHost);
                 hostOpen_ = dest;
                 hostWordsLeft_ = (std::uint64_t{t.w} * t.h * psmTransferBits(t.psm) + 63) / 64;
                 hostOpenValid_ = true;
@@ -729,6 +746,11 @@ void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
             ++bandStats_.hostOrder;
             waitIdle(BandStats::WaitHost);
         }
+    }
+    if (hostGenDirty_) {
+        // Uma versão de textura foi fixada sobre o destino com palavras ainda por vir.
+        hostGenDirty_ = false;
+        if (hostOpenValid_) bumpPages(hostOpen_.pages, WkHost);
     }
     hostWord(xferDirect_, data);  // na VRAM agora
     if (hostOpenValid_ && --hostWordsLeft_ == 0) closeHostTransfer();
@@ -792,6 +814,7 @@ void Gs::localToLocal(std::uint32_t pc) {
                                    rectAccess(true, c.dpsm, c.dbp, c.dbw, c.dx, c.dy, c.w, c.h)};
     noteOutstanding(touched[0]);
     noteOutstanding(touched[1]);
+    bumpPages(touched[1].pages, WkCopy);
     submit([this, c] { copyLocal(c); }, BandStats::SubmitLocal);
     noteHostHazard(touched, 2);
 }

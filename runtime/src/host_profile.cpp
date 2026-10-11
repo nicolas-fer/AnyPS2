@@ -228,7 +228,53 @@ gs::TexReport& texelsMark() {
 }
 std::uint64_t texelsMarkVblank = 0;
 
+std::string formatTexSim(const gs::TexSimReport& cur, const gs::TexSimReport& prev, double per, const char* unit) {
+    using gs::TexSimReport;
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    char buf[512];
+    std::uint64_t inCache = diff(cur.hits, prev.hits);
+    for (unsigned i = 0; i < TexSimReport::MissCount; ++i) inCache += diff(cur.miss[i], prev.miss[i]);
+    const double hitPct = inCache ? 100.0 * static_cast<double>(diff(cur.hits, prev.hits)) / static_cast<double>(inCache) : 0.0;
+    std::string s = "[perfil] texcache sim";
+    s += unit;
+    s += ":";
+    std::snprintf(buf, sizeof buf, " desenhos texturizados %.1f, no cache %.1f, acertos %.1f (%.1f%%);",
+                  d(cur.texDraws, prev.texDraws), static_cast<double>(inCache) / per, d(cur.hits, prev.hits), hitPct);
+    s += buf;
+    std::snprintf(buf, sizeof buf,
+                  " misses: primeira vez %.1f, FRAME %.1f, ZBUF %.1f, HOST %.1f, LOCAL→LOCAL %.1f;",
+                  d(cur.miss[0], prev.miss[0]), d(cur.miss[1], prev.miss[1]), d(cur.miss[2], prev.miss[2]),
+                  d(cur.miss[3], prev.miss[3]), d(cur.miss[4], prev.miss[4]));
+    s += buf;
+    std::snprintf(buf, sizeof buf, " fora do cache: volta %.1f, textura no FRAME/ZBUF %.1f, FRAME×ZBUF %.1f\n",
+                  d(cur.off[0], prev.off[0]), d(cur.off[1], prev.off[1]), d(cur.off[2], prev.off[2]));
+    return s + buf;
+}
+
+gs::TexSimReport& texSimMark() {
+    static gs::TexSimReport mark;
+    return mark;
+}
+std::uint64_t texSimMarkVblank = 0;
+
 }  // namespace
+
+std::string HostProfile::texSimInterval(const gs::TexSimReport& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    const std::uint64_t n = vblank > texSimMarkVblank ? vblank - texSimMarkVblank : 1;
+    gs::TexSimReport& mark = texSimMark();
+    const std::string s = formatTexSim(total, mark, static_cast<double>(n), " (por VBlank)");
+    mark = total;
+    texSimMarkVblank = vblank;
+    return s;
+}
+
+std::string HostProfile::texSimReport(const gs::TexSimReport& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    char unit[48];
+    std::snprintf(unit, sizeof unit, " (total, %llu VBlanks)", static_cast<unsigned long long>(vblank));
+    return formatTexSim(total, gs::TexSimReport{}, 1.0, unit);
+}
 
 std::string HostProfile::texelsInterval(const gs::TexReport& total, std::uint64_t vblank) {
     if (!enabled_) return "";
