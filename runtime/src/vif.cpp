@@ -198,6 +198,9 @@ void Vif::word(std::uint32_t w, std::uint32_t pc) {
             if (index_ == 4) state_ = State::Idle;
             break;
         case State::Mpg:
+            // No máximo um lote pendente por vez: os itens saem na ordem da decodificação
+            // (importa quando o executor estiver em outra thread).
+            if (!upBatch_.empty()) flush();
             if (mpgBatch_.empty()) mpgBatchAddr_ = mpgAddr_;
             mpgBatch_.push_back(w);
             mpgAddr_ += 4;
@@ -429,6 +432,7 @@ void Vif::writeUnpackedVector(const std::uint32_t (&v)[4]) {
         out.mask |= 1u << c;
     }
     if (out.mask == 0) return;
+    if (!mpgBatch_.empty()) flush();  // ordem da decodificação (ver o caso do MPG)
     upBatch_.push_back(out);
     if (upBatch_.size() >= kBatchMax) flush();
 }
