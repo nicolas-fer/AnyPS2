@@ -207,6 +207,14 @@ void Runtime::loadImage(const std::string& path) {
         off += 12;
         need(off, filesz);
         std::uint8_t* dst = mem_->hostPointer(vaddr, memsz);
+        if (!dst && memsz > 0 && mem_->isVirtualDevice(vaddr, memsz)) {
+            // Memória do VU1 (dispositivo, sem ponteiro do host): carrega pelo dispositivo.
+            mem_->copyToGuest(vaddr, data.data() + off, filesz, 0);
+            const std::vector<std::uint8_t> zeros(memsz - filesz, 0);
+            if (!zeros.empty()) mem_->copyToGuest(vaddr + filesz, zeros.data(), memsz - filesz, 0);
+            off += filesz;
+            continue;
+        }
         if (!dst) {
             throw anyps2::Error("segmento [" + anyps2::hex(vaddr) + ", +" + anyps2::hex(memsz) +
                                 ") da imagem não cabe na RAM do EE");
