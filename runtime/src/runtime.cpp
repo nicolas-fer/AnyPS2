@@ -27,6 +27,7 @@
 #include "anyps2/runtime/video.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/vu/vu_record.h"
 #include "anyps2/runtime/vu/vu_trace.h"
 #include "anyps2/runtime/vu1_mem.h"
 #include "anyps2/runtime/vu1_stream.h"
@@ -123,6 +124,8 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     vif1_->setStream(vu1Stream_.get());
     vuTrace_ = VuTrace::fromEnv();
     if (vuTrace_) vu1_->setTrace(vuTrace_.get());
+    vuRecorder_ = VuRecorder::fromEnv();
+    if (vuRecorder_) vu1_->setRecorder(vuRecorder_.get());
 }
 
 Runtime::~Runtime() {
@@ -130,6 +133,10 @@ Runtime::~Runtime() {
     // antes de eles serem destruídos), também no caminho de erro.
     if (vu1Stream_) vu1Stream_->shutdown();
     printProfile();
+#ifdef ANYPS2_VU_STATS
+    if (vu1_ && vu1_->stats().starts) std::fputs(formatVuStats(vu1_->stats(), "VU1").c_str(), stderr);
+    if (vu0_ && vu0_->stats().starts) std::fputs(formatVuStats(vu0_->stats(), "VU0").c_str(), stderr);
+#endif
     if (options_.profile) {
         std::fputs(HostProfile::report().c_str(), stderr);
         std::fputs(HostProfile::bandsReport(gs_->bandStats(), vblanks_).c_str(), stderr);

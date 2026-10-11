@@ -219,6 +219,8 @@ Variáveis de ambiente do executável gerado:
 | `ANYPS2_VU_TRACE_FROM=n`, `ANYPS2_VU_TRACE_TO=n` | intervalo de VBlanks do rastreador do VU1, inclusivo (o VBlank n é o n-ésimo do runtime; padrão: 0 até o fim) |
 | `ANYPS2_VU_TRACE_KICK=lista` | endereços (bytes da micro memória) dos XGKICK a registrar, separados por vírgula, por exemplo `0x2A18,0x2A10` (padrão: todos) |
 | `ANYPS2_VU_TRACE_MAX=n` | máximo de microprogramas registrados (padrão: 4) |
+| `ANYPS2_VU_RECORD=arquivo` | grava cada execução do VU1 (estado completo de entrada: micro memória por hash, dados, VF/VI/ACC, pipeline em voo, TOP/ITOP, VBlank; formato em `vu_record.h`) para o `vu_replay` reexecutar e medir sem rodar o jogo |
+| `ANYPS2_VU_RECORD_FRAMES=a-b` | VBlanks gravados (`a`, `a-b`, `a-` ou `-b`; padrão: todos, cerca de 16 KB por execução, então limite a 2 ou 3) |
 | `ANYPS2_EXEC_DUMP=dir` | num `ExecPS2` para código não recompilado, grava a RAM (`exec_<entrada>.ram`) para o `anyps2 ram2elf` |
 | `ANYPS2_CONFIG=arquivo.ini` | arquivo de configuração (padrão: `anyps2.ini` ao lado do executável; ver abaixo) |
 | `ANYPS2_VIDEO_SCALE=1..4` | tamanho inicial da janela: 640×480 vezes o valor (padrão: 1) |
@@ -381,6 +383,7 @@ a ponta, que recompilam e compilam 25 homebrews, alguns minutos com
 | `ipu` | registradores do IPU, FIFO de entrada e ponteiro de bits (BP/FP/IFC), FDEC atravessando quadwords, comandos esperando dados, SETIQ/SETVQ/SETTH, CTRL.RST, DMA toIPU sob demanda (normal, chain, acréscimo de tags com o canal pausado), tabelas VLC e IDCT do MPEG-2, VDEC, BDEC intra/não intra (RAW16, SCD), FIFO de saída e fromIPU, comando que recomeça quando os dados chegam, CSC (RGB32, limiares do SETTH), IDEC (fatia intra, predição do DC entre macroblocos, MBAI) |
 | `vu_isa` | decodificador/disassembler do microcódigo contra 12 mil pares do `dvp-objdump` |
 | `vu` | 12 casos do núcleo do VU com valores calculados à mão (truncamento, flags, latências, stalls, Q/P, upper/lower em paralelo, bit E, desvios, EFU, XGKICK, MSCAL com double buffering) |
+| `vu_record` | gravador/replay do VU1: um VU sintético sem Runtime é gravado (`ANYPS2_VU_RECORD`), relido e reexecutado pelo compilado e pelo interpretador; o hash do estado final (dados, VF/ACC, VI/flags/Q/P/TPC, pipeline, XGKICK com ciclo, pares, ciclos) tem de ser igual ao da execução direta; intervalo de VBlanks e arquivo inválido |
 | `vu_diff` | **diferencial** interpretador × microcódigo recompilado: 16 microprogramas aleatórios × 48 estados; também realocado para outra base e com um par alterado na micro memória |
 | `e2e_vu0math`, `e2e_vu1draw`, `e2e_vu1draw_interp`, `e2e_sdk_cube`, `e2e_sdk_teapot`, `e2e_sdk_texture`, `e2e_sdk_vu1` | VU0 (libmath3d, macro e micro), VU1 com XGKICK (recompilado e interpretado, mesma imagem) e quatro samples do ps2sdk sem modificação |
 | `iop` | IRX (nome no `.iopmod`/`ModuleInfo`), roteiro do pad, ISO 9660, decodificação ADPCM, vozes do SPU2 (fim, loop, release), leitor de vídeos do MPG1 (Program Stream, repetição e fatias para o EE), bloco de registradores do driver de som da Polyphony (PDISPU2: key-on/off, volumes, estado ENDX/ENVX) |
@@ -396,6 +399,14 @@ O `cputest` usa como oráculo o mesmo `main.c` compilado para o host
 `setjmp/longjmp`, qsort, libc, ponto flutuante) e traz uma parte em assembly
 do R5900 que se auto-verifica (delay slots, likely, `bal`, LWL/LWR/LDL/SDL,
 38 operações MMI, FPU do PS2: divisão por zero → ±Fmax, saturação etc.).
+
+Replay do VU1 de um jogo (`tools/vu_replay`, opcional): grave as execuções com
+`ANYPS2_VU_RECORD=arq.avur ANYPS2_VU_RECORD_FRAMES=4750-4752` rodando o jogo,
+configure o repositório com `-DANYPS2_VU_REPLAY_PROGRAMS=<pasta com os vu_*.cpp gerados do jogo>` e compile o
+alvo `vu_replay`. `vu_replay arq.avur --golden g.txt` mede ns/par e grava um hash por execução;
+depois de mudar o runtime ou o gerador, `vu_replay arq.avur --check g.txt` tem de dar OK
+(`--interp` roda o interpretador para a comparação cruzada). Com `-DANYPS2_VU_STATS=ON` também
+imprime os contadores por par (commitPending, flags, stalls, findBlock...).
 
 Os ELFs dos homebrews são versionados; para regerá-los é preciso o toolchain
 do ps2dev (Docker): `tests/homebrew/build.sh`.

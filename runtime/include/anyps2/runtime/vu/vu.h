@@ -13,6 +13,7 @@ namespace anyps2::rt {
 
 class Runtime;
 class VuTrace;
+class VuRecorder;
 
 // Estado do laço de execução de um microprograma, compartilhado entre o
 // código recompilado e o interpretador (um pode continuar onde o outro parou,
@@ -55,6 +56,7 @@ struct VuStats {
     std::uint64_t maxPairsPerStart = 0;
     std::uint64_t findBlockCalls = 0;         // buscas de bloco recompilado
     std::uint64_t findBlockHits = 0;          // ...que acharam um bloco
+    std::uint64_t findBlockCandidates = 0;    // pares do índice comparados nas buscas (candidatos)
     std::uint64_t commitReadyChecks = 0;      // testes inline de commitReady
     std::uint64_t commitPendingCalls = 0;     // ...que caíram em commitPending
     std::uint64_t flagsCommitted = 0;         // entradas de flags (MAC/clip) aplicadas
@@ -63,6 +65,8 @@ struct VuStats {
     std::uint64_t stallCycles = 0;            // ciclos perdidos neles
     std::uint64_t xgkicks = 0;
 };
+// Tabela de contadores, em texto, com a razão por par (ver vu.cpp).
+std::string formatVuStats(const VuStats& s, const char* title);
 #else
 #define ANYPS2_VU_STAT(...) ((void)0)
 #endif
@@ -155,6 +159,8 @@ public:
         trace_ = t;
         tracing_ = t != nullptr;
     }
+    // ANYPS2_VU_RECORD: gravador de entradas para o replay (vu_record.h). Nulo desliga; não é dono.
+    void setRecorder(VuRecorder* r) { rec_ = r; }
     // Modo macro (só VU0): executa uma instrução COP2 vinda do EE e conclui o
     // pipeline (o EE vê o resultado, as flags e Q imediatamente).
     void macro(const vu::Instr& in, std::uint32_t eePc);
@@ -172,6 +178,14 @@ public:
     // Só para testes: põe o pipeline num estado que o fluxo normal não gera
     // (flags, Q e P em voo e VF ocupados na entrada do microprograma).
     void seedPipeline(const VuPipelineSeed& seed);
+    // O pipeline como o seedPipeline o recebe, relativo ao ciclo atual (para gravar a entrada de
+    // uma execução e reproduzi-la depois). Atrasos acima de 255 ciclos saturam.
+    VuPipelineSeed capturePipeline() const;
+    // TOP/ITOP do VIF1 que o próximo XTOP/XITOP lê (ver setVifTop).
+    std::uint32_t vifTopValue() const { return vifTop_; }
+    std::uint32_t vifItopValue() const { return vifItop_; }
+    // Pares executados na última execução (start/interpret).
+    std::uint64_t pairs() const { return pairs_; }
     // Só para testes: registra os XGKICK (e, sem Runtime, não falha neles).
     void setXgkickLog(std::vector<VuXgkickEvent>* log) { xgkickLog_ = log; }
 #ifdef ANYPS2_VU_STATS
@@ -297,6 +311,7 @@ private:
     std::unordered_set<std::uint64_t> dumped_;
     VuTrace* trace_ = nullptr;   // rastreador (ANYPS2_VU_TRACE), não é dono
     bool tracing_ = false;       // trace_ != nullptr: o único teste nos caminhos quentes
+    VuRecorder* rec_ = nullptr;  // gravador (ANYPS2_VU_RECORD), só consultado no início de cada execução
     std::vector<VuXgkickEvent>* xgkickLog_ = nullptr;
 #ifdef ANYPS2_VU_STATS
     mutable VuStats stats_;  // mutable: findBlock é const

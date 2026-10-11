@@ -15,6 +15,7 @@
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu_exec.h"
+#include "anyps2/runtime/vu/vu_record.h"
 #include "anyps2/runtime/vu/vu_trace.h"
 #include "anyps2/runtime/vu1_stream.h"
 
@@ -104,6 +105,22 @@ void Vu::seedPipeline(const VuPipelineSeed& seed) {
     if (pendCount_ > 0) nextCommit_ = pending_[pendHead_].ready;
     if (q_.active) nextCommit_ = std::min(nextCommit_, q_.ready);
     if (p_.active) nextCommit_ = std::min(nextCommit_, p_.ready);
+}
+
+VuPipelineSeed Vu::capturePipeline() const {
+    const auto delay = [this](std::uint64_t ready) {
+        return static_cast<std::uint8_t>(ready > cycle_ ? std::min<std::uint64_t>(ready - cycle_, 255) : 0);
+    };
+    VuPipelineSeed seed;
+    for (unsigned i = 1; i < 32; ++i) seed.vfBusy[i] = delay(vfReady_[i]);
+    seed.head = pendHead_;
+    for (unsigned i = 0; i < pendCount_; ++i) {
+        const PendingFlags& f = pending_[(pendHead_ + i) % kPending];
+        seed.flags.push_back({delay(f.ready), f.hasMac, f.mac, f.hasClip, f.clip});
+    }
+    seed.q = {q_.active, delay(q_.ready), q_.value, q_.flags};
+    seed.p = {p_.active, delay(p_.ready), p_.value, 0};
+    return seed;
 }
 
 std::string Vu::where(std::uint32_t pc) const {
@@ -230,7 +247,8 @@ void Vu::execEfu(const vu::Lower& l, std::uint32_t pc) {
 }
 
 std::uint32_t Vu::vifTop(bool itop, std::uint32_t pc) {
-    if (unit_ != 1 || !rt_) fail(std::string(itop ? "XITOP" : "XTOP") + " só existe no VU1", pc);
+    // Sem Runtime só vale no replay/testes (VU com registro de XGKICK), que fornecem o TOP/ITOP.
+    if (unit_ != 1 || (!rt_ && !xgkickLog_)) fail(std::string(itop ? "XITOP" : "XTOP") + " só existe no VU1", pc);
     return itop ? vifItop_ : vifTop_;
 }
 
@@ -287,6 +305,7 @@ Vu::Match Vu::findBlock(std::uint32_t pc) const {
     bool bestHint = false;
     constexpr unsigned kWindow = 32;
     for (auto it = range.first; it != range.second; ++it) {
+        ANYPS2_VU_STAT(++stats_.findBlockCandidates);
         const VuProgramEntry& p = *it->second.entry;
         const std::uint32_t off = it->second.offset;
         if (off > pc) continue;
@@ -323,6 +342,7 @@ void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled, std::uint64_t 
         std::fprintf(stderr, "[vu%u] início em 0x%04x\n", unit_, startPc_);
     }
     if (tracing_) trace_->beginRun(*this, startPc_, eePc, vblanks);
+    if (rec_) rec_->record(*this, startPc_, eePc, vblanks);
     VuCursor cur;
     cur.pc = startPc_;
     std::uint64_t viaCompiled = 0, viaInterpreter = 0;
@@ -375,5 +395,32 @@ void Vu::dumpMicro() {
     if (!f) throw anyps2::Error("ANYPS2_VU_DUMP: não foi possível criar " + path.string());
     f.write(reinterpret_cast<const char*>(micro_), static_cast<std::streamsize>(microSize_));
 }
+
+#ifdef ANYPS2_VU_STATS
+std::string formatVuStats(const VuStats& s, const char* title) {
+    const double pairs = s.pairs ? static_cast<double>(s.pairs) : 1.0;
+    char buf[160];
+    std::string o = std::string("ANYPS2_VU_STATS ") + title + ": " + std::to_string(s.starts) + " execuções, " +
+                    std::to_string(s.pairs) + " pares (máx. " + std::to_string(s.maxPairsPerStart) +
+                    " por execução)\n";
+    const auto row = [&](const char* name, std::uint64_t v) {
+        std::snprintf(buf, sizeof buf, "  %-26s %14llu  %9.4f por par\n", name, static_cast<unsigned long long>(v),
+                      static_cast<double>(v) / pairs);
+        o += buf;
+    };
+    row("commitReady (testes)", s.commitReadyChecks);
+    row("commitPending (chamadas)", s.commitPendingCalls);
+    row("flags commitadas", s.flagsCommitted);
+    row("Q commitado", s.qCommitted);
+    row("P commitado", s.pCommitted);
+    row("stalls", s.stalls);
+    row("ciclos de stall", s.stallCycles);
+    row("findBlock (chamadas)", s.findBlockCalls);
+    row("findBlock (acertos)", s.findBlockHits);
+    row("findBlock (candidatos)", s.findBlockCandidates);
+    row("XGKICK", s.xgkicks);
+    return o;
+}
+#endif
 
 }  // namespace anyps2::rt

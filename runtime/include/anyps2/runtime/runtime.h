@@ -29,6 +29,7 @@ class Input;
 class Audio;
 class Vu;
 class VuTrace;
+class VuRecorder;
 struct VuProgramEntry;
 namespace gs {
 class Gs;
@@ -208,6 +209,7 @@ private:
     std::unique_ptr<Vu> vu0_, vu1_;
     std::unique_ptr<Vu1Stream> vu1Stream_;  // declarado depois do Gs, do GIF e dos VUs: destruído antes deles
     std::unique_ptr<VuTrace> vuTrace_;  // ANYPS2_VU_TRACE (liga-se ao VU1)
+    std::unique_ptr<VuRecorder> vuRecorder_;  // ANYPS2_VU_RECORD (liga-se ao VU1)
     std::unique_ptr<Video> video_;
     std::unique_ptr<Input> input_;
     std::unique_ptr<Audio> audio_;

@@ -74,6 +74,7 @@ add_library(anyps2_runtime STATIC
     src/video.cpp
     src/vu/vu.cpp
     src/vu/vu_trace.cpp
+    src/vu/vu_record.cpp
 )
 add_library(anyps2::runtime ALIAS anyps2_runtime)
 target_include_directories(anyps2_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
