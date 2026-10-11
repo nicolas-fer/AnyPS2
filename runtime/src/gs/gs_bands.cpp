@@ -195,6 +195,8 @@ PageSet pageSet(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned 
     return s;
 }
 
+// O cache de texels crus depende de uma leitura nunca escapar daqui contra uma escrita
+// (ver o comentário em gs_access.h): só escritas do mesmo mapeamento são dispensadas.
 bool clashes(const VramAccess& a, const VramAccess& b) {
     if (!a.write && !b.write) return false;
     if (sameMapping(a, b)) return false;

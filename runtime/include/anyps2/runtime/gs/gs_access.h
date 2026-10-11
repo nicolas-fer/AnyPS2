@@ -77,6 +77,27 @@ bool accessesOverlap(const VramAccess& a, const VramAccess& b);
 // Dois acessos colidem se as páginas se cruzam e pelo menos um escreve, salvo
 // quando são escritas com o mesmo mapeamento (cada pixel fica numa faixa só, e
 // as linhas de uma faixa são executadas na ordem do produtor).
+//
+// O CACHE DE TEXELS (gs_texcache.h) DEPENDE DESTA REGRA. Uma versão de textura é fixada
+// por todos os desenhos enfileirados enquanto as gerações das páginas dela não mudam, e
+// qualquer faixa de qualquer um desses desenhos pode preencher qualquer bloco, lendo a
+// VRAM no meio da execução. Para o conteúdo ser o mesmo em qualquer momento, é preciso
+// que:
+//  * leitura de textura SEMPRE colida com escrita nas mesmas páginas (só duas escritas
+//    com o mesmo mapeamento escapam daqui; uma leitura nunca): toda escrita anterior, em
+//    ordem de programa, termina antes das tarefas do desenho que lê (barreira posta pelo
+//    produtor em draw), e toda escrita posterior espera esse desenho (a mesma colisão, vista
+//    do outro lado, vira barreira antes da escrita);
+//  * a leitura declarada de um desenho cubra a grade w×h inteira de cada nível (draw
+//    alarga reads[] quando o cache está ligado), pois o preenchimento é por bloco;
+//  * as escritas fora dos desenhos tenham ordem com as faixas: HOST→LOCAL espera
+//    (waitIdle em startTransfer) quando o destino tem acesso não concluído e, com a
+//    transferência aberta, a palavra seguinte espera (hostDrain_) os desenhos que a
+//    tocam; LOCAL→LOCAL e a carga de CLUT são barreiras (submit);
+//  * toda escrita passe por Gs::bumpPages antes do desenho seguinte (as gerações).
+// Mudar qualquer uma destas regras (por exemplo, deixar uma leitura correr junto com uma
+// escrita do mesmo mapeamento) quebra o cache. O modo ANYPS2_GS_TEXCACHE_VERIFY=1 e os
+// testes de invalidação de test_gs_texel.cpp existem para pegar isso.
 bool clashes(const VramAccess& a, const VramAccess& b);
 
 // Acessos desde a última barreira. Escritas com o mesmo mapeamento se fundem

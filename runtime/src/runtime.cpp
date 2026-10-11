@@ -114,6 +114,7 @@ Runtime::~Runtime() {
         std::fputs(HostProfile::bandsReport(gs_->bandStats(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texelsReport(gs_->texReport(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texSimReport(gs_->texSim(), vblanks_).c_str(), stderr);
+        std::fputs(HostProfile::texCacheReport(gs_->texCacheReport(), vblanks_).c_str(), stderr);
     }
 }
 
@@ -133,6 +134,7 @@ void Runtime::onVblank(std::uint32_t pc) {
         std::fputs(HostProfile::bandsInterval(gs_->bandStats(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texelsInterval(gs_->texReport(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texSimInterval(gs_->texSim(), vblanks_).c_str(), stderr);
+        std::fputs(HostProfile::texCacheInterval(gs_->texCacheReport(), vblanks_).c_str(), stderr);
         // Pares de VU desde o começo: compilados × interpretados (microcódigo
         // que só existe em tempo de execução cai no interpretador).
         std::fprintf(stderr, "[perfil] pares de VU: VU0 %llu compilados / %llu interpretados; VU1 %llu / %llu\n",

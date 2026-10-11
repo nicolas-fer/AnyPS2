@@ -45,6 +45,23 @@ unsigned lanesFromEnv() {
     return static_cast<unsigned>(std::max(2, std::min(4, cores - 2)));
 }
 
+// ANYPS2_GS_TEXCACHE=1 liga o cache de texels crus (gs_texcache.h); sem a variável, ou com
+// 0, o caminho é o de sempre. ANYPS2_GS_TEXCACHE_VERIFY=1 também o liga e confere cada
+// leitura. ANYPS2_GS_TEXCACHE_MB é o orçamento do índice em MB (padrão 256).
+bool envFlag(const char* name) {
+    const char* v = std::getenv(name);
+    return v && *v && std::strcmp(v, "0") != 0;
+}
+
+std::size_t texCacheBudgetFromEnv() {
+    const char* v = std::getenv("ANYPS2_GS_TEXCACHE_MB");
+    if (v && *v) {
+        const long n = std::strtol(v, nullptr, 10);
+        if (n >= 1) return static_cast<std::size_t>(n) << 20;
+    }
+    return std::size_t{256} << 20;
+}
+
 float asFloat(std::uint32_t u) {
     float f;
     std::memcpy(&f, &u, 4);
@@ -92,6 +109,8 @@ Gs::Gs(Runtime* rt)
     regs_[PRMODECONT] = 1;
     csr_ = 0;
     trace_ = GsTrace::fromEnv();
+    texVerify_ = envFlag("ANYPS2_GS_TEXCACHE_VERIFY");
+    if (texVerify_ || envFlag("ANYPS2_GS_TEXCACHE")) texCache_ = std::make_unique<TexCache>(texCacheBudgetFromEnv());
 }
 
 Gs::~Gs() {
@@ -166,6 +185,12 @@ void Gs::bumpPages(const PageSet& pages, WriteKind kind) {
             m &= m - 1;
         }
     }
+}
+
+void Gs::bumpAllPages() {
+    PageSet all;
+    all.setAll();
+    bumpPages(all, WkHost);
 }
 
 // Retângulo de pixels de uma transferência como acesso. Fora de 0..2047 o

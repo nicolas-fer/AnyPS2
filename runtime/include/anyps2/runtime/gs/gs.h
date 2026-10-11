@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "anyps2/runtime/gs/gs_access.h"
+#include "anyps2/runtime/gs/gs_texcache.h"
 #include "anyps2/runtime/gs/gs_worker.h"
 #include "anyps2/runtime/gs/vram.h"
 
@@ -222,6 +223,28 @@ struct TexSimReport {
     std::uint64_t off[OffCount] = {};
 };
 
+// Cache de texels crus (ANYPS2_GS_TEXCACHE=1): contadores das faixas (somas, lidas de
+// relance) e do produtor. Não mudam o comportamento nem a imagem.
+struct TexCacheReport {
+    bool enabled = false;
+    // Faixas (só contam com o perfil ligado).
+    std::uint64_t blockHits = 0;    // texels servidos por bloco já pronto
+    std::uint64_t blockFills = 0;   // blocos preenchidos (por leitura da VRAM)
+    std::uint64_t fallbacks = 0;    // texels fora da grade do nível, lidos direto da VRAM
+    // Produtor.
+    std::uint64_t texDraws = 0;     // desenhos texturizados que receberam versões
+    std::uint64_t offDraws = 0;     // desenhos texturizados sem cache (selfWrap/selfTexture/selfFrameZ)
+    std::uint64_t versions = 0;     // versões criadas
+    std::uint64_t reused = 0;       // níveis atendidos pela versão corrente
+    std::uint64_t evictions = 0;    // versões despejadas do índice
+    std::uint64_t bytes = 0;        // bytes no índice agora
+    std::uint64_t peakBytes = 0;    // pico do índice
+    std::uint64_t liveBytes = 0;    // bytes vivos (índice + versões em voo)
+    std::uint64_t peakLiveBytes = 0;
+    std::uint64_t entries = 0;
+    std::uint64_t budget = 0;
+};
+
 // Graphics Synthesizer em software: estado completo dos registradores,
 // memória local, transferências e um rasterizador de referência que segue as
 // regras do hardware (cobertura top-left, Z de 32 bits inteiro, blending
@@ -290,8 +313,12 @@ public:
 
     // Memória local: espera o worker (quem lê ou escreve aqui vê os pixels já
     // desenhados pelo GIF até este ponto).
+    // A versão não const entrega a VRAM para escrita fora dos pontos que bumpPages
+    // audita (testes e ferramentas): conta como escrita em tudo, para o cache de
+    // texturas nunca servir texels velhos.
     Vram& vram() {
         waitIdle(BandStats::WaitVram);
+        bumpAllPages();
         return vram_;
     }
     const Vram& vram() const {
@@ -324,6 +351,16 @@ public:
     // anda com o perfil ligado ou com forceTexSim(true) (testes).
     const TexSimReport& texSim() const { return texSim_; }
     void forceTexSim(bool on) { texSimForced_ = on; }
+    // Cache de texels crus (gs_texcache.h). Desligado por padrão: ANYPS2_GS_TEXCACHE=1 liga;
+    // ANYPS2_GS_TEXCACHE_MB limita o índice (padrão 256); ANYPS2_GS_TEXCACHE_VERIFY=1
+    // liga o cache (se ainda não estiver) e confere cada leitura do cache com a VRAM.
+    bool texCacheEnabled() const { return texCache_ != nullptr; }
+    TexCacheReport texCacheReport() const;
+    // Leituras do cache que diferiram da VRAM (VERIFY). Com abort ligado (padrão) a
+    // primeira diferença imprime o desenho, o nível, (x, y) e os valores e aborta;
+    // os testes desligam o abort para contar.
+    std::uint64_t texVerifyMismatches() const { return verifyMismatches_.load(std::memory_order_relaxed); }
+    void setTexVerifyAbort(bool abortOnMismatch) { verifyAbort_ = abortOnMismatch; }
     // Só para testes: geração atual de uma página da VRAM (8 KB; 0..511).
     std::uint32_t pageGeneration(unsigned page) const { return pageState_[page].gen; }
 
@@ -337,7 +374,7 @@ public:
         std::uint32_t ta0 = 0, ta1 = 0;
         bool aem = false;
     };
-    std::uint32_t probeTexel(const TexelProbe& p, unsigned level, int u, int v) const;
+    std::uint32_t probeTexel(const TexelProbe& p, unsigned level, int u, int v);
     // Copia a paleta memorizada (n entradas, 16 ou 256) que a faixa 0 usaria.
     void probePalette(const TexelProbe& p, unsigned n, std::uint32_t* out) const;
     // Quantas vezes a paleta da faixa 0 foi reconstruída (para conferir a chave).
@@ -422,6 +459,11 @@ private:
     // lê a VRAM. Qualquer escrita nova na VRAM tem de chamar bumpPages.
     enum WriteKind : std::uint8_t { WkFrame, WkZbuf, WkHost, WkCopy };
     void bumpPages(const PageSet& pages, WriteKind kind);
+    void bumpAllPages();
+    // Níveis do cache de texturas que o desenho fixa (nulo: sem cache). Produtor.
+    std::shared_ptr<TexLevel> texLevelFor(const DrawEnv& e, unsigned level);
+    void texVerifyFail(const DrawEnv& e, unsigned level, unsigned x, unsigned y, std::uint32_t cached,
+                       std::uint32_t direct) const;
     void simTexture(const DrawEnv& e, int offReason);
     void rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2);
     void drawPoint(const DrawEnv& e, const Vertex& v);
@@ -481,6 +523,15 @@ private:
     std::vector<std::uint32_t> texSimScratch_;
     TexSimReport texSim_;
     bool texSimForced_ = false;
+
+    // Cache de texels crus (nulo = desligado). O índice é do produtor; as versões
+    // (TexLevel) são lidas e preenchidas pelas faixas.
+    std::unique_ptr<TexCache> texCache_;
+    bool texVerify_ = false;
+    bool verifyAbort_ = true;
+    mutable std::atomic<std::uint64_t> verifyMismatches_{0};
+    std::vector<std::uint32_t> texGenScratch_;
+    std::uint64_t texCacheDraws_ = 0, texCacheOff_ = 0;  // produtor
 
     Runtime* rt_;
     Vram vram_;  // worker
@@ -548,6 +599,7 @@ private:
         std::atomic<std::uint64_t> samples{0}, linear{0}, trilinear{0};
         std::atomic<std::uint64_t> sampleTimed{0}, sampleNs{0};
         std::atomic<std::uint64_t> shadeCalls{0}, shadeTimed{0}, shadeNs{0};
+        std::atomic<std::uint64_t> cacheHit{0}, cacheFill{0}, cacheFallback{0};
     };
     mutable std::array<LaneTex, kMaxLanes> laneTex_{};
     // Paleta já expandida (CLUT + TEXA) da última versão de CLUT vista por cada faixa:

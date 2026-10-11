@@ -257,7 +257,57 @@ gs::TexSimReport& texSimMark() {
 }
 std::uint64_t texSimMarkVblank = 0;
 
+std::string formatTexCache(const gs::TexCacheReport& cur, const gs::TexCacheReport& prev, double per, const char* unit) {
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    auto mb = [](std::uint64_t b) { return static_cast<double>(b) / (1024.0 * 1024.0); };
+    char buf[640];
+    std::string s = "[perfil] texcache";
+    s += unit;
+    s += ":";
+    const double hits = d(cur.blockHits, prev.blockHits), fills = d(cur.blockFills, prev.blockFills),
+                 falls = d(cur.fallbacks, prev.fallbacks);
+    const double texels = hits + fills + falls;
+    std::snprintf(buf, sizeof buf,
+                  " texels: acertos de bloco %.0f (%.1f%%), blocos preenchidos %.1f, fallbacks fora da grade %.0f;",
+                  hits + fills, texels > 0 ? 100.0 * (hits + fills) / texels : 0.0, fills, falls);
+    s += buf;
+    std::snprintf(buf, sizeof buf,
+                  " desenhos: com cache %.1f, sem cache %.1f; níveis: versões criadas %.1f, reaproveitados %.1f;"
+                  " despejos %.1f;",
+                  d(cur.texDraws, prev.texDraws), d(cur.offDraws, prev.offDraws), d(cur.versions, prev.versions),
+                  d(cur.reused, prev.reused), d(cur.evictions, prev.evictions));
+    s += buf;
+    std::snprintf(buf, sizeof buf,
+                  " índice %.1f MB (pico %.1f, orçamento %.0f), %llu entradas; vivos %.1f MB (pico %.1f)\n",
+                  mb(cur.bytes), mb(cur.peakBytes), mb(cur.budget), static_cast<unsigned long long>(cur.entries),
+                  mb(cur.liveBytes), mb(cur.peakLiveBytes));
+    return s + buf;
+}
+
+gs::TexCacheReport& texCacheMark() {
+    static gs::TexCacheReport mark;
+    return mark;
+}
+std::uint64_t texCacheMarkVblank = 0;
+
 }  // namespace
+
+std::string HostProfile::texCacheInterval(const gs::TexCacheReport& total, std::uint64_t vblank) {
+    if (!enabled_ || !total.enabled) return "";
+    const std::uint64_t n = vblank > texCacheMarkVblank ? vblank - texCacheMarkVblank : 1;
+    gs::TexCacheReport& mark = texCacheMark();
+    const std::string s = formatTexCache(total, mark, static_cast<double>(n), " (por VBlank)");
+    mark = total;
+    texCacheMarkVblank = vblank;
+    return s;
+}
+
+std::string HostProfile::texCacheReport(const gs::TexCacheReport& total, std::uint64_t vblank) {
+    if (!enabled_ || !total.enabled) return "";
+    char unit[48];
+    std::snprintf(unit, sizeof unit, " (total, %llu VBlanks)", static_cast<unsigned long long>(vblank));
+    return formatTexCache(total, gs::TexCacheReport{}, 1.0, unit);
+}
 
 std::string HostProfile::texSimInterval(const gs::TexSimReport& total, std::uint64_t vblank) {
     if (!enabled_) return "";

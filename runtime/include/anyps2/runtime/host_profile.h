@@ -11,6 +11,7 @@ namespace gs {
 struct BandStats;
 struct TexReport;
 struct TexSimReport;
+struct TexCacheReport;
 }
 
 // Tempo do host por parte do runtime (ANYPS2_PROFILE=1): diz onde o PC
@@ -46,6 +47,10 @@ public:
     // do trecho (por VBlank) e o total.
     static std::string texSimInterval(const gs::TexSimReport& total, std::uint64_t vblank);
     static std::string texSimReport(const gs::TexSimReport& total, std::uint64_t vblank);
+    // Cache de texels crus (Gs::texCacheReport(), ANYPS2_GS_TEXCACHE=1): a linha
+    // "[perfil] texcache: ..." do trecho (por VBlank) e o total. Vazio com o cache desligado.
+    static std::string texCacheInterval(const gs::TexCacheReport& total, std::uint64_t vblank);
+    static std::string texCacheReport(const gs::TexCacheReport& total, std::uint64_t vblank);
     // Tempo gasto pelo worker do GS (chamado da thread dele).
     static void addWorker(std::int64_t ns) { workerNs_.fetch_add(ns, std::memory_order_relaxed); }
     // Faixas do GS (threads) que somam em addWorker: o relatório divide a soma

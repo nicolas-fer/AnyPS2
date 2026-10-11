@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -177,6 +178,12 @@ struct Gs::DrawEnv {
     // Paleta expandida da faixa (Gs::palette), posta por rasterize depois do resolve da
     // CLUT; nula fora dos indexados. O desenho em si é const, daí o mutable.
     mutable const std::uint32_t* pal = nullptr;
+    // Versões do cache de texels crus (gs_texcache.h), uma por nível, fixadas por este
+    // desenho: o despejo do índice nunca libera o que está em voo. Nulo = sem cache (cache
+    // desligado, ou desenho sozinho com selfTexture/selfFrameZ/selfWrap), e a leitura vai
+    // direto à VRAM.
+    std::shared_ptr<TexLevel> tex[7];
+    std::uint64_t drawId = 0;  // número do desenho (mensagem do VERIFY)
 };
 
 struct Gs::Fragment {
@@ -396,8 +403,14 @@ void Gs::draw(std::uint32_t pc) {
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            reads[nr++] = access(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
-                                 e.tbp[l], e.tbw[l], e.tpsm);
+            PageSet texPages = pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1);
+            // Com o cache, o desenho pode preencher qualquer bloco da grade w×h do nível
+            // (não só os que alcança): a leitura declarada cobre a grade inteira, para que
+            // nenhuma escrita pendente nem posterior toque o que o preenchimento lê.
+            if (texCache_ && (colsU < wl || rowsV < hl)) {
+                texPages.merge(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, hl - 1, 0, wl - 1));
+            }
+            reads[nr++] = access(texPages, false, 2, e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
 
@@ -431,6 +444,17 @@ void Gs::draw(std::uint32_t pc) {
                       : selfTexture ? static_cast<int>(TexSimReport::OffTexture)
                       : selfFrameZ  ? static_cast<int>(TexSimReport::OffFrameZ)
                                     : -1);
+    }
+    if (texCache_ && e.tme) {
+        // Antes das escritas deste desenho: a versão de cada nível é a que valia quando
+        // ele foi enfileirado. Desenhos sozinhos ficam sem cache (nível nulo).
+        e.drawId = drawCount_;
+        if (anySelf) {
+            ++texCacheOff_;
+        } else {
+            ++texCacheDraws_;
+            for (unsigned l = 0; l <= e.mxl; ++l) e.tex[l] = texLevelFor(e, l);
+        }
     }
     bumpPages(writes[0].pages, WkFrame);
     if (nw > 1) bumpPages(writes[1].pages, WkZbuf);
@@ -601,7 +625,91 @@ std::uint32_t Gs::texelRaw(const DrawEnv& e, unsigned level, int u, int v) const
     u = wrap(u, w, e.wms, e.minu, e.maxu, level);
     v = wrap(v, h, e.wmt, e.minv, e.maxv, level);
     const auto x = static_cast<std::uint32_t>(u) & 2047, y = static_cast<std::uint32_t>(v) & 2047;
+    if (const TexLevel* t = e.tex[level].get()) {
+        std::uint32_t raw = 0;
+        const TexLevel::Got got = t->get(vram_, x, y, raw);
+        if (HostProfile::enabled()) {
+            LaneTex& lt = laneTex_[e.lane];
+            bump(got == TexLevel::Got::Hit ? lt.cacheHit : got == TexLevel::Got::Filled ? lt.cacheFill : lt.cacheFallback);
+        }
+        if (got != TexLevel::Got::Outside) {
+            if (texVerify_) {
+                const std::uint32_t direct = vram_.readPixel(e.tpsm, e.tbp[level], e.tbw[level], x, y);
+                if (direct != raw) texVerifyFail(e, level, x, y, raw, direct);
+            }
+            return raw;
+        }
+    }
     return vram_.readPixel(e.tpsm, e.tbp[level], e.tbw[level], x, y);
+}
+
+// VERIFY: o cache devolveu um valor diferente da VRAM. Imprime o desenho, o nível e
+// o texel e, salvo nos testes (setTexVerifyAbort(false)), aborta na primeira diferença.
+void Gs::texVerifyFail(const DrawEnv& e, unsigned level, unsigned x, unsigned y, std::uint32_t cached,
+                       std::uint32_t direct) const {
+    verifyMismatches_.fetch_add(1, std::memory_order_relaxed);
+    if (!verifyAbort_) return;
+    std::fprintf(stderr,
+                 "[texcache VERIFY] diferença no desenho %llu, nível %u, texel (%u, %u): cache 0x%08X, VRAM 0x%08X "
+                 "(PSM 0x%02X, TBP %u, TBW %u, %ux%u)\n",
+                 static_cast<unsigned long long>(e.drawId), level, x, y, cached, direct, e.tpsm, e.tbp[level],
+                 e.tbw[level], std::max(1u, (1u << e.tw) >> level), std::max(1u, (1u << e.th) >> level));
+    std::fflush(stderr);
+    std::abort();
+}
+
+// Versão do nível no cache para este desenho (produtor). A versão corrente vale se
+// nenhuma escrita ocorreu desde que as gerações das suas páginas foram conferidas
+// (writeEpoch_ igual) ou se as gerações continuam iguais; senão nasce uma versão nova.
+std::shared_ptr<TexLevel> Gs::texLevelFor(const DrawEnv& e, unsigned level) {
+    const unsigned wl = std::max(1u, (1u << e.tw) >> level), hl = std::max(1u, (1u << e.th) >> level);
+    const TexKey key{e.tpsm, e.tbp[level], e.tbw[level], wl, hl};
+    TexCache::Entry* en = texCache_->find(key);
+    if (en && en->validEpoch == writeEpoch_) {
+        texCache_->noteReuse();
+        return en->level;
+    }
+    PageSet fresh;
+    if (!en) fresh = pageSet(e.tpsm, e.tbp[level], e.tbw[level], 0, hl - 1, 0, wl - 1);
+    const PageSet& pages = en ? en->pages : fresh;
+    std::vector<std::uint32_t>& cur = texGenScratch_;
+    cur.clear();
+    for (unsigned i = 0; i < PageSet::kWords; ++i) {
+        for (std::uint64_t m = pages.w[i]; m; m &= m - 1) {
+            cur.push_back(pageState_[i * 64 + static_cast<unsigned>(std::countr_zero(m))].gen);
+        }
+    }
+    if (en && en->gens == cur) {
+        en->validEpoch = writeEpoch_;
+        texCache_->noteReuse();
+        return en->level;
+    }
+    const PageSet keep = pages;  // `pages` pode apontar para a entrada que create substitui
+    return texCache_->create(key, keep, cur, writeEpoch_).level;
+}
+
+TexCacheReport Gs::texCacheReport() const {
+    TexCacheReport r;
+    if (!texCache_) return r;
+    r.enabled = true;
+    for (const LaneTex& l : laneTex_) {
+        r.blockHits += l.cacheHit.load(std::memory_order_relaxed);
+        r.blockFills += l.cacheFill.load(std::memory_order_relaxed);
+        r.fallbacks += l.cacheFallback.load(std::memory_order_relaxed);
+    }
+    const TexCache::Stats& st = texCache_->stats();
+    r.texDraws = texCacheDraws_;
+    r.offDraws = texCacheOff_;
+    r.versions = st.versions;
+    r.reused = st.reused;
+    r.evictions = st.evictions;
+    r.bytes = st.bytes;
+    r.peakBytes = st.peakBytes;
+    r.entries = st.entries;
+    r.liveBytes = texCache_->liveBytes();
+    r.peakLiveBytes = texCache_->peakLiveBytes();
+    r.budget = texCache_->budget();
+    return r;
 }
 
 // Palavra crua -> cor RGBA de 32 bits: TEXA nos formatos sem alfa de 8 bits, CLUT
@@ -680,10 +788,11 @@ void Gs::fillEnv(DrawEnv& e, const TexelProbe& p) {
 }
 
 // Só para testes (gs_texel): monta um DrawEnv só com os campos da textura.
-std::uint32_t Gs::probeTexel(const TexelProbe& p, unsigned level, int u, int v) const {
+std::uint32_t Gs::probeTexel(const TexelProbe& p, unsigned level, int u, int v) {
     DrawEnv e;
     fillEnv(e, p);
     if (e.clut && isIndexed(e.tpsm)) e.pal = palette(e, isT4(e.tpsm) ? 16u : 256u);
+    if (texCache_) e.tex[level] = texLevelFor(e, level);
     return fetchTexel(e, level, u, v);
 }
 
