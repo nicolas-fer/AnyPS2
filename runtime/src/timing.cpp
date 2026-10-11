@@ -155,10 +155,12 @@ void Timing::writeTimer(unsigned n, unsigned reg, std::uint32_t value) {
 
 std::uint64_t Timing::readGsCsr() {
     process(0);
+    rt_.gs().setItemClock(now());
     return rt_.gs().csr();
 }
 
 void Timing::writeGsCsr(std::uint64_t value) {
+    rt_.gs().setItemClock(now());
     rt_.gs().writePrivileged(0x12001000u, value, 0);
 }
 
@@ -200,6 +202,7 @@ void Timing::process(std::uint32_t pc) {
         if (nextVblankStart_ <= nextVblankEnd_) {
             ++vblanks_;
             rt_.gs().vblankStart();
+            rt_.gs().setItemClock(t);
             if (vsyncFlag_) {
                 Memory& m = rt_.memory();
                 m.write<std::uint32_t>(vsyncFlag_, 1, 0);

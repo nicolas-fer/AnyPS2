@@ -406,9 +406,8 @@ void Gs::warnOnce(const std::string& what) {
 // Registradores privilegiados
 // ---------------------------------------------------------------------------
 
-void Gs::setHsyncSource(std::uint64_t (*now)(void*), void* ctx, std::uint64_t cyclesPerLine) {
-    hsyncNow_ = now;
-    hsyncCtx_ = ctx;
+void Gs::setHsyncSource(std::uint64_t cyclesPerLine) {
+    hasClock_ = true;
     cyclesPerLine_ = cyclesPerLine;
 }
 
@@ -458,8 +457,8 @@ void Gs::processEvents(std::uint64_t now) {
 }
 
 std::uint64_t Gs::csr() {
-    if (hsyncNow_ && cyclesPerLine_ && !(csr_ & (1ull << kHsint))) {
-        const std::uint64_t t = hsyncNow_(hsyncCtx_);
+    if (hasClock_ && cyclesPerLine_ && !(csr_ & (1ull << kHsint))) {
+        const std::uint64_t t = itemClock_;
         if (t / cyclesPerLine_ > hsyncClearedAt_ / cyclesPerLine_) csr_ |= 1ull << kHsint;
     }
     return csr_ | kCsrConst;
@@ -524,7 +523,7 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 return;
             }
             // SIGNAL/FINISH/HSINT/VSINT/EDWINT: escrever 1 limpa.
-            if (value & (1ull << kHsint) && hsyncNow_) hsyncClearedAt_ = hsyncNow_(hsyncCtx_);
+            if (value & (1ull << kHsint) && hasClock_) hsyncClearedAt_ = itemClock_;
             csr_ &= ~(value & 0x1F);
             return;
         case 0x1010: setImr(value); return;
@@ -554,7 +553,7 @@ void Gs::vblankEnd() {}
 void Gs::addWork(std::uint64_t cycles) {
     // O GS começa um lote de trabalho quando os dados chegam: o FINISH
     // depende do trabalho desde então, não de tudo o que veio antes.
-    if (work_ == 0 && pixels_ == 0 && hsyncNow_) workStart_ = hsyncNow_(hsyncCtx_);
+    if (work_ == 0 && pixels_ == 0 && hasClock_) workStart_ = itemClock_;
     work_ += cycles;
 }
 
@@ -642,11 +641,11 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             // de fato, então quem o recebe já pode ler a memória. Com o relógio
             // virtual o tempo vem da conta analítica e o worker segue sem espera.
             if (realTime_) waitIdle(BandStats::WaitFinish);
-            if (!hsyncNow_) {
+            if (!hasClock_) {
                 raiseEvent(kFinish);
                 return;
             }
-            const std::uint64_t now = hsyncNow_(hsyncCtx_);
+            const std::uint64_t now = itemClock_;
             const std::uint64_t start = std::max(busyUntil_, workStart_);
             busyUntil_ = std::max(start + work_ + pixels_ / kPixelsPerCycle, now + kCyclesPerRegister);
             work_ = 0;

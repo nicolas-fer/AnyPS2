@@ -101,6 +101,7 @@ std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t 
     }
     if (reg >= 0x12000000u) {
         if (reg == 0x12001000u) rt_.timing().process(pc);  // VSINT/FIELD em dia
+        rt_.gs().setItemClock(rt_.timing().now());
         return rt_.gs().readPrivileged(reg, pc);
     }
     if (Dmac::handles(reg)) return rt_.dmac().read(reg, pc);
@@ -141,6 +142,7 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         return;
     }
     if (reg >= 0x12000000u) {
+        rt_.gs().setItemClock(rt_.timing().now());
         rt_.gs().writePrivileged(reg, value, pc);
         return;
     }

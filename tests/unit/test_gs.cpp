@@ -930,8 +930,10 @@ TEST_CASE(gs, finish_latency) {
     CHECK_EQ(rt.timing().readGsCsr() & 2, 2ull);
     CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
     // Trabalho antigo (o GS já terminou) não atrasa um FINISH muito depois.
+    rt.gs().setItemClock(rt.timing().now());
     for (int i = 0; i < 1000; ++i) rt.gs().writeRegister(PRIM, 6, 0);
     rt.timing().consume(1000000);
+    rt.gs().setItemClock(rt.timing().now());  // o GS não lê o relógio: quem entrega carimba
     rt.gs().writeRegister(FINISH, 0, 0);
     CHECK(rt.gs().nextEventTime() - rt.timing().now() <= 4);
     rt.timing().consume(4);
@@ -946,6 +948,62 @@ TEST_CASE(gs, finish_latency) {
     // GS isolado (sem relógio): imediato, ver gs.signal_finish_and_csr.
 }
 
+// Carimbo do item (Gs::setItemClock): o GS não lê o relógio do EE. O mesmo programa
+// entregue pelo GIF (que carimba com o now() da entrega) e entregue direto ao Gs com o
+// carimbo explícito dá o mesmo CSR, os mesmos eventos e os mesmos tempos; e o relógio do
+// EE andando depois do carimbo não muda nada do que o GS calcula.
+TEST_CASE(gs, item_clock_replaces_the_ee_clock) {
+    const ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = true;
+
+    // A: pelo GIF (PATH3 via DMA), que carimba sozinho.
+    Runtime a(info, o);
+    a.timing().consume(12345);
+    {
+        Memory& m = a.memory();
+        Packet p;
+        p.tag(3, true, 0, 1, 0xE);
+        p.ad(PRIM, 6);
+        p.ad(XYZ2, 0);
+        p.ad(FINISH, 0);
+        m.copyToGuest(0x00200000, p.q.data(), static_cast<std::uint32_t>(p.q.size() * 8), 0);
+        m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);
+        m.write<std::uint32_t>(0x1000A020, 4, 0);
+        m.write<std::uint32_t>(0x1000A000, 0x101, 0);
+    }
+    // B: direto no Gs, com o carimbo do mesmo instante.
+    Runtime b(info, o);
+    b.timing().consume(12345);
+    b.gs().setItemClock(b.timing().now());
+    b.gs().writeRegister(PRIM, 6, 0);
+    b.gs().writeRegister(XYZ2, 0, 0);
+    b.gs().writeRegister(FINISH, 0, 0);
+    CHECK(a.gs().nextEventTime() != ~std::uint64_t{0});
+    CHECK_EQ(a.gs().nextEventTime(), b.gs().nextEventTime());
+
+    // O relógio do EE anda; o carimbo de B continua o do item: um segundo FINISH
+    // entregue com o carimbo antigo é calculado a partir dele (não do now()).
+    const std::uint64_t due1 = b.gs().nextEventTime();
+    b.timing().consume(1000000);
+    b.gs().writeRegister(FINISH, 0, 0);  // sem novo carimbo
+    b.gs().processEvents(~std::uint64_t{0});
+    CHECK_EQ(b.gs().csr() & 2, 2ull);
+    // busyUntil_ do segundo = max(busyUntil_ do primeiro, workStart_ antigo)... + 2: perto
+    // do primeiro, muito antes do now() atual.
+    CHECK(due1 < b.timing().now());
+
+    // CSR: HSINT é calculado pelo carimbo. Limpa em t0; uma linha depois (carimbo novo) liga.
+    Runtime c(info, o);
+    c.gs().setItemClock(1000);
+    c.gs().writePrivileged(0x12001000, 1ull << 2, 0);  // limpa HSINT em t = 1000
+    c.timing().consume(10 * static_cast<std::int64_t>(Timing::kCyclesPerLine));  // não conta
+    c.gs().setItemClock(1000 + Timing::kCyclesPerLine / 2);
+    CHECK_EQ(c.gs().csr() & 4, 0ull);
+    c.gs().setItemClock(1000 + 2 * Timing::kCyclesPerLine);
+    CHECK_EQ(c.gs().csr() & 4, 4ull);
+}
+
 // Relógio real: o GS em software leva tempo de verdade, e dois FINISH que no
 // hardware chegariam separados podem vencer juntos. Eles saem um por vez — o
 // segundo só depois que o programa limpar o primeiro (o sample draw/teapot do
@@ -955,6 +1013,7 @@ TEST_CASE(gs, finish_real_clock_one_at_a_time) {
     RuntimeOptions o;
     o.virtualClock = false;
     Runtime rt(info, o);
+    rt.gs().setItemClock(rt.timing().now());
     rt.gs().writeRegister(FINISH, 0, 0);
     rt.gs().writeRegister(FINISH, 0, 0);
     const std::uint64_t later = rt.timing().now() + 1000000000ull;

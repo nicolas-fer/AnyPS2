@@ -375,8 +375,17 @@ public:
     // ---- Eventos de vídeo ----------------------------------------------------
     void vblankStart();
     void vblankEnd();
-    // Linha HSYNC (o HSINT é calculado sob demanda a partir do relógio).
-    void setHsyncSource(std::uint64_t (*now)(void*), void* ctx, std::uint64_t cyclesPerLine);
+    // Linha HSYNC (o HSINT é calculado sob demanda a partir do carimbo do item).
+    // Chamar liga o modelo de tempo; sem isto (testes do GS isolado) não há relógio.
+    void setHsyncSource(std::uint64_t cyclesPerLine);
+    // Carimbo de tempo (ciclos do EE) do item que está sendo entregue ao GS. O GS
+    // não lê o relógio do EE: addWork, FINISH e o HSINT do CSR usam este valor,
+    // definido por quem entrega os dados (GIF nos três caminhos e acessos
+    // privilegiados) imediatamente antes da entrega. Hoje a entrega é síncrona e o
+    // carimbo é o now() do EE no momento; com o GS consumindo de uma fila o carimbo
+    // viaja no item e o resultado não depende de quando o consumidor roda.
+    void setItemClock(std::uint64_t stamp) { itemClock_ = stamp; }
+    std::uint64_t itemClock() const { return itemClock_; }
     // Relógio real: o GS em software gasta tempo de verdade desenhando, e
     // FINISH separados no hardware podem vencer juntos; com isto eles são
     // entregues um por vez (o próximo depois que o programa limpar o bit).
@@ -735,8 +744,8 @@ private:
     std::uint64_t csr_ = 0;
     std::uint64_t imr_ = 0x7F00;
     std::uint64_t siglblid_ = 0;
-    std::uint64_t (*hsyncNow_)(void*) = nullptr;
-    void* hsyncCtx_ = nullptr;
+    bool hasClock_ = false;         // setHsyncSource chamado: há modelo de tempo
+    std::uint64_t itemClock_ = 0;   // carimbo do item atual (setItemClock)
     std::uint64_t cyclesPerLine_ = 0;
     std::uint64_t hsyncClearedAt_ = 0;
 
