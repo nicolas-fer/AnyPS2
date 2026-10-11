@@ -509,6 +509,36 @@ TEST_CASE(gs_bands, clashes_respects_wrapped_pages_and_near_end_textures) {
     CHECK(!p.clashesWith(mid));
 }
 
+TEST_CASE(gs_bands, page_seq_tracker_is_exact_and_never_loses_track) {
+    // Muito mais acessos que a lista outstanding_ comporta: cada página guarda só a
+    // barreira que conclui o último acesso, então nada se perde e nada sobra.
+    PageSeqTracker t;
+    for (std::uint32_t i = 0; i < 1000; ++i) {
+        VramAccess r{};
+        r.pages = pagesRange(i % 400, i % 400);
+        t.add(r, i + 1);  // leitura da página i % 400, concluída pela barreira i + 1
+    }
+    VramAccess w{};
+    w.write = true;
+    w.pages = pagesRange(450, 460);
+    CHECK(!t.conflicts(w, 0));  // páginas nunca acessadas
+    VramAccess rd{};
+    rd.pages = pagesRange(0, 399);
+    CHECK(!t.conflicts(rd, 0));  // leitura contra leituras não conflita
+    w.pages = pagesRange(10, 10);
+    CHECK(t.conflicts(w, 800));   // último acesso à página 10: barreira 811
+    CHECK(!t.conflicts(w, 811));  // já concluída
+    VramAccess wr{};
+    wr.write = true;
+    wr.pages = pagesRange(500, 501);
+    t.add(wr, 2000);
+    rd.pages = pagesRange(501, 501);
+    CHECK(t.conflicts(rd, 1999));
+    CHECK(!t.conflicts(rd, 2000));
+    t.clear();
+    CHECK(!t.conflicts(rd, 0));
+}
+
 TEST_CASE(gs_bands, narrow_strip_does_not_clash_with_a_clut_in_another_column) {
     // O render-to-texture coluna por coluna do GT4: faixa de 32x256 na coluna 0 e
     // uma CLUT 16x16 (CT32) na página 5 da mesma faixa de linhas de páginas.

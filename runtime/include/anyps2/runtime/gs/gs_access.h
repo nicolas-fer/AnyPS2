@@ -4,6 +4,7 @@
 // usa estes tipos). Fica separado de gs_bands.h porque o próprio Gs (gs.h) guarda
 // os acessos pendentes e não pode depender de Vertex antes de ele ser definido.
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -81,6 +82,49 @@ struct VramAccess {
     std::uint16_t rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
     bool rectValid = false;
     bool host = false;
+};
+
+// Acessos ainda não concluídos pelas faixas, por página: o número da barreira que
+// conclui a última escrita e a última leitura de cada página. Não tem capacidade a
+// estourar (uma lista de acessos enche quando as faixas ficam centenas de barreiras
+// atrás do produtor, e aí perde o rastro e tudo vira conflito: no GT4 isso fazia toda
+// HOST→LOCAL ir para a fila). Custo: proporcional às páginas do acesso.
+class PageSeqTracker {
+public:
+    // Registra o acesso, concluído quando a barreira de número `seq` terminar.
+    void add(const VramAccess& a, std::uint64_t seq) {
+        std::uint64_t* last = a.write ? write_ : read_;
+        forEach(a.pages, [last, seq](std::uint32_t p) {
+            if (last[p] < seq) last[p] = seq;
+        });
+        dirty_ = true;
+    }
+    // Conflita se alguma página do acesso tem escrita não concluída ou, se o acesso
+    // escreve, leitura não concluída (`done` = barreiras já concluídas).
+    bool conflicts(const VramAccess& a, std::uint64_t done) const {
+        if (!dirty_) return false;
+        bool hit = false;
+        forEach(a.pages, [&](std::uint32_t p) { hit = hit || write_[p] > done || (a.write && read_[p] > done); });
+        return hit;
+    }
+    void clear() {
+        if (!dirty_) return;
+        for (std::uint32_t p = 0; p < PageSet::kPages; ++p) write_[p] = read_[p] = 0;
+        dirty_ = false;
+    }
+
+private:
+    template <typename Fn>
+    static void forEach(const PageSet& s, Fn&& fn) {
+        for (unsigned i = 0; i < PageSet::kWords; ++i) {
+            for (std::uint64_t m = s.w[i]; m != 0; m &= m - 1) {
+                fn(static_cast<std::uint32_t>(i * 64 + static_cast<unsigned>(std::countr_zero(m))));
+            }
+        }
+    }
+    std::uint64_t write_[PageSet::kPages] = {};
+    std::uint64_t read_[PageSet::kPages] = {};
+    bool dirty_ = false;
 };
 
 // Sobreposição de páginas, sem a exceção do mesmo mapeamento de clashes().

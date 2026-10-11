@@ -633,6 +633,7 @@ private:
     std::vector<ClutRead> clutReads_;
     bool forceClutMeasure_ = false;
     PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()
+    PageSeqTracker outstandingPages_;  // produtor; o que decide (a lista acima fica para o perfil)
     std::uint64_t outstandingLostNeed_ = 0;  // lista cheia: sem rastro até a barreira desse número
     // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita
     // em andamento enquanto o produtor ainda pode enviar dados.

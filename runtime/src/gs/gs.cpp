@@ -136,6 +136,7 @@ GsTrace& Gs::trace() {
 bool Gs::trackOutstanding() {
     if (worker_->idle()) {
         outstanding_.clear();
+        outstandingPages_.clear();
         outstandingLostNeed_ = 0;
         return true;
     }
@@ -146,6 +147,7 @@ bool Gs::trackOutstanding() {
 
 void Gs::noteOutstanding(VramAccess a) {
     a.seq = worker_->barriersIssued() + 1;
+    outstandingPages_.add(a, a.seq);
     if (outstanding_.full()) {
         outstandingLostNeed_ = std::max(outstandingLostNeed_, a.seq);
         return;
@@ -154,10 +156,12 @@ void Gs::noteOutstanding(VramAccess a) {
 }
 
 bool Gs::outstandingConflicts(const VramAccess& a) {
-    if (!trackOutstanding()) return true;
+    trackOutstanding();
     // A transferência aberta é escrita pelo próprio produtor, na ordem do programa,
-    // então não colide com o que ele mesmo faz: só o que está nas faixas conta.
-    return outstanding_.conflictsWith(a);
+    // então não colide com o que ele mesmo faz: só o que está nas faixas conta. Decide
+    // pelo rastreador por página (exato, sem capacidade); a lista outstanding_, que pode
+    // perder o rastro, só alimenta os contadores do perfil.
+    return outstandingPages_.conflicts(a, worker_->barriersDone());
 }
 
 void Gs::noteHostHazard(const VramAccess* acc, unsigned n) {
