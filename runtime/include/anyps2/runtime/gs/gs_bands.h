@@ -40,10 +40,10 @@ RowRange drawCols(const DrawWindow& w, unsigned type, const Vertex& v0, const Ve
 // página do pixel (x, y) é bp/32 + (y/altura)·largura + x/largura, com páginas de
 // 64x32 (32 bits), 64x64 (16 bits), 128x64 (PSMT8) e 128x128 (PSMT4), e a largura
 // do buffer em páginas é bw (bw/2 nos formatos de 8 e 4 bits, como em vram.cpp).
-// O intervalo vai da primeira à última página do retângulo (pode conter páginas
-// entre as linhas que o retângulo não toca, mas nunca falta uma tocada); se passa
-// do fim da VRAM, vira dois intervalos; se cobre 512 páginas ou mais, a VRAM toda.
-PageSpans pageSpan(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
-                   unsigned colLo, unsigned colHi);
+// O conjunto é exato por linha de páginas: uma faixa vertical estreita não inclui
+// as páginas das outras colunas. Passar do fim da VRAM dá a volta; cobrir 512
+// páginas ou mais liga todas.
+PageSet pageSet(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
+                unsigned colLo, unsigned colHi);
 
 }  // namespace anyps2::rt::gs

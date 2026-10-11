@@ -163,12 +163,10 @@ VramAccess Gs::rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::
     a.bw = bw;
     a.psm = psm;
     if (w == 0 || h == 0 || x0 + w > 2048 || y0 + h > 2048) {
-        a.span = VramSpan{0, Vram::kSize / 8192 - 1};
+        a.pages.setAll();
         return a;
     }
-    const PageSpans p = pageSpan(psm, bp, bw, y0, y0 + h - 1, x0, x0 + w - 1);
-    a.span = p.span;
-    a.wrap = p.wrap;
+    a.pages = pageSet(psm, bp, bw, y0, y0 + h - 1, x0, x0 + w - 1);
     return a;
 }
 
