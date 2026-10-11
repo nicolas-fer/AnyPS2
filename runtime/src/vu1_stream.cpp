@@ -60,7 +60,10 @@ Vu1Stream::Vu1Stream(Runtime& rt, VuMemory& vu, Gif& gif, gs::Gs& gs)
     forceFence_ = envFlag("ANYPS2_VU1_FENCE_ALL");
     // Horizonte W (ciclos do EE): só vale no relógio virtual (no real não há horizonte).
     virtual_ = rt.options().virtualClock;
-    horizon_ = defaultHorizon();
+    // Sem a thread o horizonte não traz ganho e só atrasaria os eventos do GS: o padrão é 0
+    // (comportamento de sempre); com a thread, 1/4 de quadro. ANYPS2_VU1_HORIZON escolhe
+    // explicitamente (e então THREAD=0 e 1 com o mesmo W dão o mesmo resultado).
+    horizon_ = requestedThread_ ? defaultHorizon() : 0;
     if (const char* v = std::getenv("ANYPS2_VU1_HORIZON"); v && *v) {
         horizon_ = static_cast<std::uint64_t>(std::strtoull(v, nullptr, 0));
     }
