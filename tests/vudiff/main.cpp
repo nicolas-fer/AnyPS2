@@ -179,6 +179,8 @@ void foldState(const Machine& m) {
 
 bool same(const Machine& a, const Machine& b, const std::string& what) {
     foldState(a);
+    // VUDIFF_DIGESTS=1: o resumo acumulado depois de cada comparação (diff entre duas versões acha a execução que mudou).
+    if (std::getenv("VUDIFF_DIGESTS")) std::printf("%s: %016llx\n", what.c_str(), static_cast<unsigned long long>(digest));
     std::string diff;
     for (unsigned i = 0; i < 32 && diff.empty(); ++i) {
         if (std::memcmp(&a.vf[i], &b.vf[i], 16) != 0) diff = "vf" + std::to_string(i);

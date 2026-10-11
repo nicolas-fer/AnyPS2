@@ -582,6 +582,23 @@ TEST_CASE(vu, lazy_flags_readers_at_ready_boundary) {
     }
 }
 
+TEST_CASE(vu, lazy_flags_integer_ops_on_vi17_see_flags_in_time) {
+    // Os campos de registrador têm 5 bits e não são mascarados: um IADD com vi17 (MAC) como origem lê o
+    // MAC direto, e tem de enxergar o mesmo que o FMAND (valor novo só a partir do ciclo 4).
+    for (unsigned k : {3u, 4u}) {
+        Rig t;
+        flagRegs(t);
+        std::vector<Pair> p{{kLNop, addx(1, 2, 3)}};
+        for (unsigned i = 1; i < k; ++i) p.push_back(kNopPair);
+        p.push_back({losp(0x30, 0, 17, 5), kUNop});  // iadd vi5, vi17, vi0
+        p.push_back(kEndPair);
+        p.push_back(kNopPair);
+        t.program1(p);
+        t.rt.vu1().interpret(0, 0);
+        CHECK_EQ(t.r1().vi[5], k == 4 ? 0x0008u : 0x0100u);
+    }
+}
+
 TEST_CASE(vu, lazy_flags_fmand_after_fmac_with_div_stall_between) {
     // O segundo DIV espera o primeiro (Q ocupado) e leva o ciclo a 8: os dois add.x (prontos em 4 e 6)
     // passam a valer juntos, em ordem, e o Q (com D) e as flags do MAC coexistem no status.

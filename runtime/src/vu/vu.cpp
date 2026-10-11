@@ -101,13 +101,13 @@ void Vu::seedPipeline(const VuPipelineSeed& seed) {
     }
     q_ = {seed.q.active, cycle_ + seed.q.delay, seed.q.value, seed.q.flags};
     p_ = {seed.p.active, cycle_ + seed.p.delay, seed.p.value, 0};
-    nextCommit_ = kNoCommit;
-    if (pendCount_ > 0) nextCommit_ = pending_[pendHead_].ready;
-    if (q_.active) nextCommit_ = std::min(nextCommit_, q_.ready);
+    nextCommit_ = kNoCommit;  // as flags em voo ficam fora: são aplicadas sob demanda (syncFlags)
+    if (q_.active) nextCommit_ = q_.ready;
     if (p_.active) nextCommit_ = std::min(nextCommit_, p_.ready);
 }
 
 VuPipelineSeed Vu::capturePipeline() const {
+    syncFlags();  // o que já está pronto vale agora; só o que ainda está em voo vai para o seed
     const auto delay = [this](std::uint64_t ready) {
         return static_cast<std::uint8_t>(ready > cycle_ ? std::min<std::uint64_t>(ready - cycle_, 255) : 0);
     };
@@ -140,8 +140,8 @@ void Vu::fail(const std::string& what, std::uint32_t pc) const {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-void Vu::commitPending() {
-    ANYPS2_VU_STAT(++stats_.commitPendingCalls);
+// Flags de MAC/clip: aplica, em ordem de chegada, as entradas em voo que já estão prontas.
+void Vu::syncFlagsSlow() const {
     while (pendCount_ > 0 && pending_[pendHead_].ready <= cycle_) {
         ANYPS2_VU_STAT(++stats_.flagsCommitted);
         const PendingFlags& p = pending_[pendHead_];
@@ -153,6 +153,11 @@ void Vu::commitPending() {
         pendHead_ = (pendHead_ + 1) % kPending;
         --pendCount_;
     }
+}
+
+// Só Q e P (as flags saíram daqui: ver syncFlags).
+void Vu::commitPending() {
+    ANYPS2_VU_STAT(++stats_.commitPendingCalls);
     if (q_.active && q_.ready <= cycle_) {
         ANYPS2_VU_STAT(++stats_.qCommitted);
         commitQ();
@@ -162,8 +167,7 @@ void Vu::commitPending() {
         commitP();
     }
     nextCommit_ = kNoCommit;
-    if (pendCount_ > 0) nextCommit_ = pending_[pendHead_].ready;
-    if (q_.active) nextCommit_ = std::min(nextCommit_, q_.ready);
+    if (q_.active) nextCommit_ = q_.ready;
     if (p_.active) nextCommit_ = std::min(nextCommit_, p_.ready);
 }
 
@@ -182,6 +186,7 @@ void Vu::finish() {
     while (pendCount_ > 0) {
         stallUntil(pending_[pendHead_].ready);
         commitReady();
+        syncFlags();
     }
     if (q_.active) commitQ();
     if (p_.active) commitP();

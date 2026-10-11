@@ -24,18 +24,43 @@ inline constexpr std::uint64_t kFmacLatency = 4;
 inline constexpr std::uint64_t fdivLatency(vu::L op) {
     return op == vu::L::RSQRT ? 13 : 7;
 }
+
+// Quais campos do lower (1 = fs, 2 = ft, 4 = fd) indexam vi[] nesta operação. Os campos têm 5 bits e o
+// runtime não os mascara: um programa que use vi16–18 (status, MAC, clip) como operando inteiro lê e
+// escreve as flags direto, então esses pares também precisam das flags em dia (ver syncIfCtlOperand).
+inline constexpr unsigned intFields(vu::L op) {
+    switch (op) {
+        case vu::L::LQ: case vu::L::LQI: case vu::L::LQD: case vu::L::MFIR: case vu::L::JR: case vu::L::XGKICK:
+        case vu::L::IBLTZ: case vu::L::IBGTZ: case vu::L::IBLEZ: case vu::L::IBGEZ:
+            return 1;
+        case vu::L::SQ: case vu::L::SQI: case vu::L::SQD: case vu::L::MTIR: case vu::L::BAL: case vu::L::FSAND:
+        case vu::L::FSOR: case vu::L::FSEQ: case vu::L::FCGET: case vu::L::XTOP: case vu::L::XITOP:
+            return 2;
+        case vu::L::ILW: case vu::L::ILWR: case vu::L::ISW: case vu::L::ISWR: case vu::L::IADDIU:
+        case vu::L::ISUBIU: case vu::L::IADDI: case vu::L::FMAND: case vu::L::FMOR: case vu::L::FMEQ:
+        case vu::L::JALR: case vu::L::IBEQ: case vu::L::IBNE:
+            return 3;
+        case vu::L::IADD: case vu::L::ISUB: case vu::L::IAND: case vu::L::IOR:
+            return 7;
+        default:
+            return 0;
+    }
+}
+inline constexpr bool isFlagReg(unsigned r) { return r - 16u < 3u; }  // vi16–18
 }  // namespace vuexec
 
 // ---- Pipeline ---------------------------------------------------------------
 
 // Caso comum (nada pendente ficou pronto): uma comparação. nextCommit_ é
-// sempre ≤ o primeiro evento pendente (baixá-lo é sempre seguro).
+// sempre ≤ o primeiro evento pendente de Q ou P (baixá-lo é sempre seguro). As flags de MAC/clip não
+// passam por aqui: ficam na fila até alguém as ler (syncFlags).
 ANYPS2_VU_INLINE void Vu::commitReady() {
     ANYPS2_VU_STAT(++stats_.commitReadyChecks);
     if (cycle_ >= nextCommit_) commitPending();
 }
 
 ANYPS2_VU_INLINE void Vu::commitQ() {
+    syncFlags();  // statusFromMac e statusWithDiv mexem em bits disjuntos (comutam); a ordem original custa pouco
     regs_.vi[vucore::reg::Q] = q_.value;
     regs_.vi[vucore::reg::Status] = vucore::statusWithDiv(regs_.vi[vucore::reg::Status], q_.flags);
     q_.active = false;
@@ -82,14 +107,25 @@ inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
         if (!ur.toAcc && ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
     }
     if (ur.setsFlags || ur.setsClip) {
-        if (pendCount_ == kPending) [[unlikely]] {  // nunca deveria acontecer (latência fixa)
-            stallUntil(pending_[pendHead_].ready);
-            commitReady();
+        // Flags preguiçosas: só empilha {ready = ciclo + 4}; a fila é aplicada quando alguém a lê
+        // (syncFlags), sem nextCommit_ nem commitPending por par.
+        if (pendCount_ == kPending) [[unlikely]] {
+            // Fila cheia de entradas que ninguém leu. Aplicar (em ordem) as que já estão prontas é o
+            // que o commitReady fazia a cada par: o clip é um registrador de deslocamento, então não
+            // há "dobrar" por OR, cada entrada é empurrada na sua vez; o status é statusFromMac em
+            // sequência (I/D/IS/DS preservados, Z/S/U/O da última, sticky acumulados). Como
+            // uma entrada nova tem ready = ciclo + 4 e o ciclo avança ≥ 1 por par, no máximo 4 ficam
+            // não prontas: só uma fila semeada (seedPipeline) pode continuar cheia, e então o stall é o de antes.
+            syncFlags();
+            if (pendCount_ == kPending) [[unlikely]] {
+                stallUntil(pending_[pendHead_].ready);
+                commitReady();
+                syncFlags();
+            }
         }
-        PendingFlags& p = pending_[(pendHead_ + pendCount_) % kPending];
-        p = {cycle_ + vuexec::kFmacLatency, ur.setsFlags, ur.mac, ur.setsClip, ur.clip};
+        pending_[(pendHead_ + pendCount_) % kPending] = {cycle_ + vuexec::kFmacLatency, ur.setsFlags, ur.mac,
+                                                         ur.setsClip, ur.clip};
         ++pendCount_;
-        nextCommit_ = std::min(nextCommit_, p.ready);
     }
     if (in.i) regs_.vi[vucore::reg::I] = in.lowerWord;  // LOI
     ++cycle_;
@@ -154,6 +190,16 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
         flow.target = target & (microSize_ - 1);
     };
     [[maybe_unused]] auto rel = [&] { return vu::branchTarget(in, pc); };
+
+    // vi16–18 como operando inteiro comum (fora dos ramos de flag abaixo): flags em dia antes de usar.
+    // Com a instrução constante (código recompilado) a condição some na compilação.
+    if constexpr (vuexec::intFields(Op) != 0) {
+        constexpr unsigned m = vuexec::intFields(Op);
+        if (((m & 1) && vuexec::isFlagReg(l.fs)) || ((m & 2) && vuexec::isFlagReg(l.ft)) ||
+            ((m & 4) && vuexec::isFlagReg(l.fd))) {
+            syncFlags();
+        }
+    }
 
     if constexpr (Op == vu::L::NOP || Op == vu::L::WAITQ || Op == vu::L::WAITP || Op == vu::L::LOI) {
         if (l.op == vu::L::WAITQ && q_.active) {
@@ -267,29 +313,43 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
         writeVf(l.ft, v, l.dest);
     }
     // ---- Flags ---------------------------------------------------------------
+    // Todo ramo de flag aplica antes as entradas em voo que já estão prontas (syncFlags): é o único
+    // ponto em que o programa observa (ou sobrescreve, FSSET/FCSET) status, MAC e clip.
     else if constexpr (Op == vu::L::FSAND) {
+        syncFlags();
         setVi(l.ft, vi[vucore::reg::Status] & static_cast<std::uint32_t>(l.imm));
     } else if constexpr (Op == vu::L::FSOR) {
+        syncFlags();
         setVi(l.ft, (vi[vucore::reg::Status] & 0xFFF) | static_cast<std::uint32_t>(l.imm));
     } else if constexpr (Op == vu::L::FSEQ) {
+        syncFlags();
         setVi(l.ft, (vi[vucore::reg::Status] & 0xFFF) == static_cast<std::uint32_t>(l.imm) ? 1 : 0);
     } else if constexpr (Op == vu::L::FSSET) {
+        syncFlags();
         vi[vucore::reg::Status] = (vi[vucore::reg::Status] & 0x3Fu) | (static_cast<std::uint32_t>(l.imm) & 0xFC0u);
     } else if constexpr (Op == vu::L::FMAND) {
+        syncFlags();
         setVi(l.ft, vi[vucore::reg::Mac] & vi[l.fs]);
     } else if constexpr (Op == vu::L::FMOR) {
+        syncFlags();
         setVi(l.ft, vi[vucore::reg::Mac] | vi[l.fs]);
     } else if constexpr (Op == vu::L::FMEQ) {
+        syncFlags();
         setVi(l.ft, (vi[vucore::reg::Mac] & 0xFFFF) == (vi[l.fs] & 0xFFFF) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCAND) {
+        syncFlags();
         setVi(1, (vi[vucore::reg::Clip] & static_cast<std::uint32_t>(l.imm)) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCOR) {
+        syncFlags();
         setVi(1, ((vi[vucore::reg::Clip] | static_cast<std::uint32_t>(l.imm)) & 0xFFFFFFu) == 0xFFFFFFu ? 1 : 0);
     } else if constexpr (Op == vu::L::FCEQ) {
+        syncFlags();
         setVi(1, (vi[vucore::reg::Clip] & 0xFFFFFFu) == static_cast<std::uint32_t>(l.imm) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCSET) {
+        syncFlags();
         vi[vucore::reg::Clip] = static_cast<std::uint32_t>(l.imm) & 0xFFFFFFu;
     } else if constexpr (Op == vu::L::FCGET) {
+        syncFlags();
         setVi(l.ft, vi[vucore::reg::Clip] & 0xFFF);
     }
     // ---- Desvios ---------------------------------------------------------------

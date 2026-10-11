@@ -119,7 +119,13 @@ public:
        std::uint8_t* micro, std::uint32_t microSize);
 
     unsigned unit() const { return unit_; }
-    const vucore::Regs& regs() const { return regs_; }
+    // Quem lê vi[16..18] (status, MAC, clip) por aqui vê as flags já aplicadas: as entradas de flags em
+    // voo só são aplicadas a pedido (ver syncFlags), e este é o ponto de passagem dos acessos externos
+    // (rastreador, gravador, replay, testes, VIF).
+    const vucore::Regs& regs() const {
+        syncFlags();
+        return regs_;
+    }
     std::uint8_t* data() { return data_; }
     std::uint32_t dataSize() const { return dataSize_; }
     std::uint8_t* micro() { return micro_; }
@@ -249,7 +255,16 @@ private:
     void pairRejected(const vu::Instr& in, std::uint32_t pc) const;  // caminho de erro, fora de linha
 
     void commitReady();
-    void commitPending();
+    void commitPending();  // só Q e P: as flags de MAC/clip são aplicadas sob demanda (syncFlags)
+    // Aplica, em ordem de chegada, as entradas de flags em voo que já ficaram prontas (ready <= cycle_).
+    // O pairEnd só as empilha; elas só precisam estar aplicadas quando alguém as lê: os ramos de flag do
+    // execLowerOp (FS*/FM*/FC*), finish(), commitQ (a ordem com o status do FDIV não importa, mas
+    // manter é barato), a fila cheia e os acessos externos a vi16–18 (regs(), capturePipeline).
+    // Inline no caso comum de fila vazia; o laço fica fora de linha.
+    ANYPS2_VU_INLINE void syncFlags() const {
+        if (pendCount_ != 0) syncFlagsSlow();
+    }
+    void syncFlagsSlow() const;
     static constexpr std::uint64_t kNoCommit = ~std::uint64_t{0};
     void commitQ();
     void commitP();
@@ -287,10 +302,12 @@ private:
     std::uint64_t cycle_ = 0;
     std::array<std::uint64_t, 32> vfReady_{};
     static constexpr unsigned kPending = 16;
-    std::array<PendingFlags, kPending> pending_{};
-    unsigned pendHead_ = 0, pendCount_ = 0;
+    // Fila de flags em voo (MAC/clip): mutable porque aplicá-las (syncFlags) é só trazer o estado
+    // observável em dia, e regs()/capturePipeline() são const.
+    mutable std::array<PendingFlags, kPending> pending_{};
+    mutable unsigned pendHead_ = 0, pendCount_ = 0;
     PendingUnit q_, p_;
-    std::uint64_t nextCommit_ = kNoCommit;  // ≤ primeiro evento pendente
+    std::uint64_t nextCommit_ = kNoCommit;  // ≤ primeiro evento pendente de Q ou P (as flags não entram)
 
     // Execução
     std::uint32_t startPc_ = 0;
