@@ -14,6 +14,14 @@ namespace anyps2::rt::gs {
 struct VramSpan {
     std::uint32_t first = 0;
     std::uint32_t last = 0;
+    bool empty() const { return first > last; }
+};
+
+// Páginas de um acesso: um intervalo, ou dois quando o acesso passa do fim da VRAM
+// e dá a volta ([a..511] e [0..b]); `wrap` é vazio no caso comum.
+struct PageSpans {
+    VramSpan span;
+    VramSpan wrap{1, 0};
 };
 
 // Acesso à VRAM de um desenho. surface: 0 = FRAME, 1 = ZBUF, 2 = textura.
@@ -21,6 +29,7 @@ struct VramSpan {
 // desenhos com o mesmo mapeamento escrevem cada pixel na mesma faixa.
 struct VramAccess {
     VramSpan span;
+    VramSpan wrap{1, 0};  // segundo intervalo (a volta da VRAM); vazio se não houver
     bool write = false;
     unsigned surface = 0;
     std::uint32_t base = 0;

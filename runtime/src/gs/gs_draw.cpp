@@ -253,19 +253,31 @@ void Gs::draw(std::uint32_t pc) {
     const RowRange colRange = drawCols(w, e.type, v0, v1, v2);
     if (colRange.empty()) return;
     const auto rowLo = static_cast<unsigned>(rows.lo), rowHi = static_cast<unsigned>(rows.hi);
-    const auto cols = static_cast<unsigned>(colRange.hi) + 1;
+    const auto colLo = static_cast<unsigned>(std::max(colRange.lo, 0)), colHi = static_cast<unsigned>(colRange.hi);
+    const unsigned cols = colHi + 1;
+    // O mapeamento (base em páginas, largura, formato) identifica as escritas que
+    // caem na mesma faixa; o intervalo de páginas é exato (pageSpan).
+    auto access = [](const PageSpans& p, bool write, unsigned surface, std::uint32_t bp, std::uint32_t bw,
+                     std::uint32_t psm) {
+        VramAccess a;
+        a.span = p.span;
+        a.wrap = p.wrap;
+        a.write = write;
+        a.surface = surface;
+        a.base = bp / 32;
+        a.bw = bw;
+        a.psm = psm;
+        return a;
+    };
     VramAccess writes[2];
     unsigned nw = 0;
     VramAccess reads[8];
     unsigned nr = 0;
-    writes[nw++] = VramAccess{pageSpan(e.fpsm, e.fbp / 32, e.fbw, rowLo, rowHi, cols), true, 0, e.fbp / 32,
-                              e.fbw, e.fpsm};
+    writes[nw++] = access(pageSpan(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0, e.fbp, e.fbw, e.fpsm);
     if (e.zte && !e.zmsk) {
-        writes[nw++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), true, 1, e.zbp / 32,
-                                  e.fbw, e.zpsm};
+        writes[nw++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 1, e.zbp, e.fbw, e.zpsm);
     } else if (e.zte && e.ztst >= 2) {
-        reads[nr++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), false, 1, e.zbp / 32,
-                                 e.fbw, e.zpsm};
+        reads[nr++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 1, e.zbp, e.fbw, e.zpsm);
     }
     if (e.tme) {
         for (unsigned l = 0; l <= e.mxl; ++l) {
@@ -279,8 +291,8 @@ void Gs::draw(std::uint32_t pc) {
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            reads[nr++] = VramAccess{pageSpan(e.tpsm, e.tbp[l] / 32, e.tbw[l], 0, rowsV - 1, colsU), false, 2,
-                                     e.tbp[l] / 32, e.tbw[l], e.tpsm};
+            reads[nr++] = access(pageSpan(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
+                                 e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
 
@@ -295,7 +307,7 @@ void Gs::draw(std::uint32_t pc) {
     constexpr std::uint32_t kPages = Vram::kSize / 8192;
     bool selfWrap = e.fbw == 0 || cols > e.fbw * 64;
     for (unsigned i = 0; i < nw; ++i) {
-        selfWrap = selfWrap || (writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
+        selfWrap = selfWrap || (writes[i].wrap.empty() && writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
     }
     bool selfTexture = false, selfFrameZ = false;
     for (unsigned i = 0; i < nw; ++i) {
