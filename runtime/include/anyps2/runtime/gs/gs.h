@@ -435,7 +435,8 @@ private:
     // que uma barreira esvazia, mas não termina na hora).
     bool trackOutstanding();
     // Registra um acesso que a próxima barreira enfileirada conclui (chamar depois
-    // da barreira de conflito; HOST→LOCAL não entra: o produtor o escreve direto).
+    // da barreira de conflito). HOST→LOCAL direto não entra (o produtor o escreve na
+    // hora); em modo fila, entra a cada submissão, com o número da própria barreira.
     void noteOutstanding(VramAccess a);
     // Há acesso não concluído que colide com `a` (ou a lista perdeu o rastro).
     bool outstandingConflicts(const VramAccess& a);
