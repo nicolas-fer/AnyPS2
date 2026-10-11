@@ -61,8 +61,10 @@ add_library(anyps2_runtime STATIC
     src/gif.cpp
     src/vif.cpp
     src/vif_exec.cpp
+    src/vu1_stream.cpp
     src/gs/vram.cpp
     src/gs/gs.cpp
+    src/gs/gs_events.cpp
     src/gs/gs_draw.cpp
     src/gs/gs_worker.cpp
     src/gs/gs_coverage.cpp

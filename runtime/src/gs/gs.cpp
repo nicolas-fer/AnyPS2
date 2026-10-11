@@ -68,12 +68,9 @@ float asFloat(std::uint32_t u) {
     return f;
 }
 
-// Bits de evento do CSR
-constexpr unsigned kSignal = 0, kFinish = 1, kHsint = 2, kVsint = 3;
-constexpr std::uint64_t kCsrField = 1ull << 13;
-constexpr std::uint64_t kCsrReset = 1ull << 9;
-// ID 0x55, revisão 0x1B, FIFO vazio (bits 14–15 = 01).
-constexpr std::uint64_t kCsrConst = 0x551B0000ull | (1ull << 14);
+// Bits de evento do CSR (gs_events.h)
+constexpr unsigned kSignal = kCsrSignalBit;
+constexpr std::uint64_t kCsrReset = kCsrResetMask;
 
 struct RegNameEntry {
     std::uint8_t reg;
@@ -107,7 +104,9 @@ const char* regName(std::uint8_t reg) {
 Gs::Gs(Runtime* rt)
     : worker_(std::make_unique<GsWorker>(threadedFromEnv(), lanesFromEnv())), rt_(rt) {
     regs_[PRMODECONT] = 1;
-    csr_ = 0;
+    if (rt_) {
+        ee_.setIrq([](void* ctx) { static_cast<Runtime*>(ctx)->kernel().raiseIntc(0); }, rt_);  // INTC_GS
+    }
     trace_ = GsTrace::fromEnv();
     // ANYPS2_GS_ASYNC_DISPLAY=0 volta à saída de vídeo que espera as faixas a cada VBlank.
     {
@@ -408,20 +407,24 @@ void Gs::warnOnce(const std::string& what) {
 
 void Gs::setHsyncSource(std::uint64_t cyclesPerLine) {
     hasClock_ = true;
-    cyclesPerLine_ = cyclesPerLine;
+    ee_.setHsyncSource(cyclesPerLine);
+}
+
+void Gs::emit(GsEvent e) {
+    if (e.kind != GsEvent::Kind::FinishDue) e.due = itemClock_;
+    if (sink_) {
+        sink_->publish(e);
+    } else {
+        e.seq = evSeq_++;
+        ee_.apply(e);
+    }
 }
 
 void Gs::raiseEvent(unsigned bit) {
-    const std::uint64_t mask = 1ull << bit;
-    if (csr_ & mask) {
-        HostProfile::gsRaise(bit, SyncStats::OutAlreadySet);
-        return;
-    }
-    csr_ |= mask;
-    // IMR: bits 8–12 mascaram SIGNAL, FINISH, HSINT, VSINT, EDWINT.
-    const bool interrupt = !(imr_ & (1ull << (bit + 8)));
-    HostProfile::gsRaise(bit, interrupt ? SyncStats::OutInterrupt : SyncStats::OutCsrOnly);
-    if (interrupt && rt_) rt_->kernel().raiseIntc(0);  // INTC_GS
+    GsEvent e;
+    e.kind = GsEvent::Kind::Raise;
+    e.bit = bit;
+    emit(e);
 }
 
 // Custo (ciclos do EE, 294 MHz) usado para atrasar o FINISH: o GIF entrega
@@ -430,42 +433,13 @@ void Gs::raiseEvent(unsigned bit) {
 // que padrões como "envia DMA → limpa VSINT/FINISH → espera FINISH" funcionem.
 constexpr std::uint64_t kCyclesPerRegister = 2;
 constexpr std::uint64_t kPixelsPerCycle = 4;
-constexpr std::uint64_t kNoEvent = ~std::uint64_t{0};
-
-std::uint64_t Gs::nextEventTime() const {
-    return finishDue_.empty() ? kNoEvent : finishDue_.front();
-}
-
-void Gs::processEvents(std::uint64_t now) {
-    std::size_t n = 0;
-    while (n < finishDue_.size() && finishDue_[n] <= now) ++n;
-    if (n == 0) return;
-    if (realTime_) {
-        // Relógio real: o GS em software leva tempo de verdade, e dois FINISH
-        // separados no hardware podem vencer juntos aqui — uma única limpeza
-        // do CSR apagaria os dois e quem espera o segundo esperaria para
-        // sempre. No relógio real o FINISH espera o worker, então o desenho já
-        // terminou e um FINISH adiantado não faz mal: entrega um por vez, o
-        // próximo depois que o programa limpar o anterior.
-        if (csr_ & (1ull << kFinish)) return;
-        finishDue_.erase(finishDue_.begin());
-        raiseEvent(kFinish);
-        return;
-    }
-    finishDue_.erase(finishDue_.begin(), finishDue_.begin() + static_cast<std::ptrdiff_t>(n));
-    raiseEvent(kFinish);
-}
 
 std::uint64_t Gs::csr() {
-    if (hasClock_ && cyclesPerLine_ && !(csr_ & (1ull << kHsint))) {
-        const std::uint64_t t = itemClock_;
-        if (t / cyclesPerLine_ > hsyncClearedAt_ / cyclesPerLine_) csr_ |= 1ull << kHsint;
-    }
-    return csr_ | kCsrConst;
+    return ee_.csr(itemClock_);
 }
 
 void Gs::setImr(std::uint64_t v) {
-    imr_ = v & 0x7F00;
+    ee_.setImr(v);
 }
 
 void Gs::setCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field) {
@@ -486,13 +460,13 @@ std::uint64_t Gs::readPrivileged(std::uint32_t addr, std::uint32_t pc) {
             return csr();
         case 0x1010:
             HostProfile::count(&SyncStats::gsOtherPrivReads);
-            return imr_;
+            return ee_.imr();
         case 0x1040:  // BUSDIR
             HostProfile::count(&SyncStats::gsOtherPrivReads);
             return 0;
         case 0x1080:
             HostProfile::count(&SyncStats::gsSiglblidReads);
-            return siglblid_;
+            return ee_.siglblid();
         default: break;
     }
     throw Unimplemented("leitura de registrador privilegiado do GS inexistente " + anyps2::hex(addr), pc);
@@ -516,19 +490,21 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 submit([] {}, BandStats::SubmitReset);
                 waitIdle();
                 queued_ = 0;
-                csr_ &= kCsrField;
-                finishDue_.clear();
                 work_ = 0;
                 pixels_ = 0;
+                // O EE zera os bits de evento e os FINISH pendentes ao receber o evento.
+                GsEvent e;
+                e.kind = GsEvent::Kind::Reset;
+                emit(e);
                 return;
             }
-            // SIGNAL/FINISH/HSINT/VSINT/EDWINT: escrever 1 limpa.
-            if (value & (1ull << kHsint) && hasClock_) hsyncClearedAt_ = itemClock_;
-            csr_ &= ~(value & 0x1F);
+            // SIGNAL/FINISH/HSINT/VSINT/EDWINT: escrever 1 limpa. É estado do EE: no runtime
+            // o Vu1Stream o faz direto no espelho; aqui vale para o GS isolado.
+            ee_.writeCsr(value, itemClock_);
             return;
         case 0x1010: setImr(value); return;
         case 0x1040: busdir_ = value & 1; return;  // BUSDIR
-        case 0x1080: siglblid_ = value; return;
+        case 0x1080: ee_.setSigLblId(value); return;
         default: break;
     }
     throw Unimplemented("escrita em registrador privilegiado do GS inexistente " + anyps2::hex(addr), pc);
@@ -540,8 +516,9 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
 
 void Gs::vblankStart() {
     ++vblanks_;
-    csr_ ^= kCsrField;
-    raiseEvent(kVsint);
+    GsEvent e;
+    e.kind = GsEvent::Kind::Vblank;
+    emit(e);
 }
 
 void Gs::vblankEnd() {}
@@ -628,7 +605,11 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             return;
         case SIGNAL: {
             const std::uint64_t mask = v >> 32;
-            siglblid_ = (siglblid_ & ~mask) | (v & mask & 0xFFFFFFFFull);
+            GsEvent id;
+            id.kind = GsEvent::Kind::SigLblId;
+            id.mask = mask;
+            id.value = v & mask & 0xFFFFFFFFull;
+            emit(id);
             HostProfile::gsEvent(SyncStats::EvSignal, source_);
             // O sinal vale depois de todos os desenhos anteriores.
             waitIdle(BandStats::WaitSignal);
@@ -642,7 +623,7 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             // virtual o tempo vem da conta analítica e o worker segue sem espera.
             if (realTime_) waitIdle(BandStats::WaitFinish);
             if (!hasClock_) {
-                raiseEvent(kFinish);
+                raiseEvent(kCsrFinishBit);
                 return;
             }
             const std::uint64_t now = itemClock_;
@@ -650,13 +631,20 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             busyUntil_ = std::max(start + work_ + pixels_ / kPixelsPerCycle, now + kCyclesPerRegister);
             work_ = 0;
             pixels_ = 0;
-            finishDue_.push_back(busyUntil_);
+            GsEvent fin;
+            fin.kind = GsEvent::Kind::FinishDue;
+            fin.due = busyUntil_;
+            emit(fin);
             return;
         }
         case LABEL: {
             HostProfile::gsEvent(SyncStats::EvLabel, source_);
             const std::uint64_t mask = (v >> 32) << 32;
-            siglblid_ = (siglblid_ & ~mask) | ((v << 32) & mask);
+            GsEvent id;
+            id.kind = GsEvent::Kind::SigLblId;
+            id.mask = mask;
+            id.value = (v << 32) & mask;
+            emit(id);
             return;
         }
         default:

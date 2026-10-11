@@ -13,6 +13,7 @@
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/ops.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "kernel_internal.h"
 
 namespace anyps2::rt {
@@ -347,12 +348,12 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
             const std::uint32_t init = arg(c, 0);
             if (init & 0x01) rt_.dmac().reset();
             if (init & 0x04) rt_.vif1().reset();
-            if (init & 0x08) rt_.gif().reset();
+            if (init & 0x08) rt_.vu1Stream().pushGifReset();
             if (init & 0x20) rt_.vif0().reset();
             if (init & 0x40) rt_.ipu().reset();
             return 0;
         }
-        case 0x02: rt_.gs().setCrt(arg(c, 0), arg(c, 1), arg(c, 2)); return 0;
+        case 0x02: rt_.vu1Stream().setCrt(arg(c, 0), arg(c, 1), arg(c, 2)); return 0;
         case 0x04: throw ProgramExit{sarg(0)};  // Exit
         case 0x3C: return ret32(setupThread(c, pc));
         case 0x3D: {  // SetupHeap(start, size)
@@ -407,8 +408,8 @@ std::optional<std::uint64_t> Kernel::dispatch(Context* c, std::int32_t number, s
         }
 
         // ---- GS ----------------------------------------------------------
-        case 0x70: case -0x70: return rt_.gs().imr();                      // GsGetIMR
-        case 0x71: case -0x71: rt_.gs().setImr(c->r[4].ud[0]); return 0;  // GsPutIMR
+        case 0x70: case -0x70: return rt_.vu1Stream().imr();                    // GsGetIMR
+        case 0x71: case -0x71: rt_.vu1Stream().setImr(c->r[4].ud[0]); return 0;  // GsPutIMR
 
         // ---- Threads ----------------------------------------------------------
         case 0x20: return ret32(createThread(arg(c, 0), pc));  // CreateThread

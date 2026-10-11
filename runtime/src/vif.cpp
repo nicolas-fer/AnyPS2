@@ -13,6 +13,7 @@
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/vu1_stream.h"
 
 namespace anyps2::rt {
 
@@ -69,9 +70,17 @@ Vif::Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif)
       exec_(rt, unit, vu, gif),
       dataQwords_((unit == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size) / 16) {}
 
+void Vif::deliver(const VifItem& item) {
+    if (stream_) {
+        stream_->pushVif(item);
+    } else {
+        exec_.apply(item);
+    }
+}
+
 void Vif::emit(const VifItem& item) {
     flush();
-    exec_.apply(item);
+    deliver(item);
 }
 
 void Vif::flush() {
@@ -79,7 +88,7 @@ void Vif::flush() {
         VifItem it{VifItem::Kind::Unpack};
         it.writes = upBatch_.data();
         it.count = upBatch_.size();
-        exec_.apply(it);
+        deliver(it);
         upBatch_.clear();
     }
     if (!mpgBatch_.empty()) {
@@ -87,7 +96,7 @@ void Vif::flush() {
         it.words = mpgBatch_.data();
         it.count = mpgBatch_.size();
         it.addr = mpgBatchAddr_;
-        exec_.apply(it);
+        deliver(it);
         mpgBatch_.clear();
     }
 }

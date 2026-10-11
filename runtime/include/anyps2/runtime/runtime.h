@@ -20,6 +20,7 @@ class Timing;
 class Dmac;
 class Gif;
 class Vif;
+class Vu1Stream;
 class Ipu;
 struct VuMemory;
 class Vu1Memory;
@@ -150,6 +151,8 @@ public:
     Timing& timing() { return *timing_; }
     gs::Gs& gs() { return *gs_; }
     Gif& gif() { return *gif_; }
+    // Fila ordenada do EE para o VU1, o GIF e o GS (vu1_stream.h).
+    Vu1Stream& vu1Stream() { return *vu1Stream_; }
     Vif& vif0() { return *vif0_; }
     Vif& vif1() { return *vif1_; }
     Dmac& dmac() { return *dmac_; }
@@ -203,6 +206,7 @@ private:
     };
     std::unique_ptr<Vu1Regs> vu1Regs_;
     std::unique_ptr<Vu> vu0_, vu1_;
+    std::unique_ptr<Vu1Stream> vu1Stream_;  // declarado depois do Gs, do GIF e dos VUs: destruído antes deles
     std::unique_ptr<VuTrace> vuTrace_;  // ANYPS2_VU_TRACE (liga-se ao VU1)
     std::unique_ptr<Video> video_;
     std::unique_ptr<Input> input_;

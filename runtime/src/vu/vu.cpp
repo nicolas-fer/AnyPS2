@@ -16,6 +16,7 @@
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu_exec.h"
 #include "anyps2/runtime/vu/vu_trace.h"
+#include "anyps2/runtime/vu1_stream.h"
 
 namespace anyps2::rt {
 
@@ -183,6 +184,7 @@ void Vu::tooManyPairs(std::uint32_t pc) const {
 Reg128& Vu::memVu0Cross(std::uint32_t index, std::uint32_t pc) {
     if (!rt_) fail("acesso aos registradores do VU1 pelo VU0 sem runtime", pc);
     HostProfile::count(&SyncStats::vu0Cross);
+    rt_->vu1Stream().fence();  // o VU1 é do consumidor: o VU0 só o lê depois que ele alcança o EE
     const vucore::Regs& r1 = rt_->vu1().regs();
     const std::uint32_t n = index & 0x3F;
     if (n < 32) return r1.vf[n];

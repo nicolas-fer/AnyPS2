@@ -10,6 +10,7 @@
 #include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/vu/vu.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu1_stream.h"
 
 namespace anyps2::rt::ops {
 
@@ -103,13 +104,13 @@ void ctc2(Context* c, unsigned id, u32 value, u32 pc) {
             if (value & 0x002) c->rt->vu0().reset();
             if (value & 0x200) {
                 HostProfile::count(&SyncStats::ctc2Fbrst);
-                c->rt->vu1().reset();
+                c->rt->vu1Stream().pushVu1Reset();
             }
             return;
         case CMSAR1:  // escrever CMSAR1 inicia o microprograma do VU1
             HostProfile::count(&SyncStats::ctc2Cmsar1);
             c->vi[CMSAR1] = value & 0xFFFF;
-            c->rt->vu1().start((value & 0xFFFF) * 8, pc);
+            c->rt->vu1Stream().pushVu1Start((value & 0xFFFF) * 8, pc);
             return;
         default:
             c->vi[id] = value;
@@ -126,6 +127,7 @@ u32 cfc2(Context* c, unsigned id) {
             return 0;
         case VPUSTAT:  // VUs nunca ocupados
             HostProfile::count(&SyncStats::cfc2Vpustat);
+            c->rt->vu1Stream().fence();  // VPU_STAT: o estado do VU1 é do consumidor
             return 0;
         case CMSAR1:
             HostProfile::count(&SyncStats::cfc2Cmsar1);

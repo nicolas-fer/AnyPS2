@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "anyps2/runtime/gs/gs_access.h"
+#include "anyps2/runtime/gs/gs_events.h"
 #include "anyps2/runtime/gs/gs_texcache.h"
 #include "anyps2/runtime/gs/gs_worker.h"
 #include "anyps2/runtime/gs/vram.h"
@@ -354,9 +355,16 @@ public:
     // ---- Registradores privilegiados (0x1200_0000) --------------------------
     std::uint64_t readPrivileged(std::uint32_t addr, std::uint32_t pc);
     void writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t pc);
+    // CSR/IMR/SIGLBLID são do espelho do EE (GsEeState); estes métodos servem ao GS isolado
+    // (testes) e leem/escrevem nele, com o carimbo do item como relógio. No runtime o EE usa
+    // eeState() direto, pelo Vu1Stream.
     std::uint64_t csr();
-    std::uint64_t imr() const { return imr_; }
+    std::uint64_t imr() const { return ee_.imr(); }
     void setImr(std::uint64_t v);
+    GsEeState& eeState() { return ee_; }
+    // Para onde vão os eventos que o GS gera (SIGNAL, FINISH, LABEL, VSINT, reset). Nulo (padrão)
+    // = aplicados na hora no espelho próprio; com um destino (Vu1Stream) o GS só os publica.
+    void setEventSink(GsEventSink* sink) { sink_ = sink; }
     void setCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field);
 
     // ---- Registradores gerais (via GIF) ----------------------------------------
@@ -389,13 +397,16 @@ public:
     // Relógio real: o GS em software gasta tempo de verdade desenhando, e
     // FINISH separados no hardware podem vencer juntos; com isto eles são
     // entregues um por vez (o próximo depois que o programa limpar o bit).
-    void setRealTimeClock(bool realTime) { realTime_ = realTime; }
+    void setRealTimeClock(bool realTime) {
+        realTime_ = realTime;
+        ee_.setRealTimeClock(realTime);
+    }
     // Eventos de desenho atrasados (FINISH): o GS processa os dados na hora,
     // mas o evento só aparece depois do tempo estimado de trabalho do GS
     // (transferência pelo GIF + preenchimento de pixels). Sem relógio
     // (testes do GS isolado) o evento é imediato.
-    std::uint64_t nextEventTime() const;  // ciclo do EE, ~0 se nenhum
-    void processEvents(std::uint64_t now);
+    std::uint64_t nextEventTime() const { return ee_.nextEventTime(); }  // ciclo do EE, ~0 se nenhum
+    void processEvents(std::uint64_t now) { ee_.processEvents(now); }
 
     // Compõe a imagem exibida (circuitos de leitura 1 e 2, PMODE, BGCOLOR). Síncrono:
     // espera as faixas e lê a VRAM de agora.
@@ -514,6 +525,8 @@ private:
         std::uint32_t sbp, sbw, spsm, dbp, dbw, dpsm, sx, sy, dx, dy, w, h;
     };
 
+    // Entrega um evento ao EE: publica no destino ou, sem ele, aplica no espelho próprio.
+    void emit(GsEvent e);
     void raiseEvent(unsigned bit);
     void addWork(std::uint64_t cycles);
     void vertexKick(bool draw, std::uint32_t pc);
@@ -741,13 +754,11 @@ private:
 
     // Registradores privilegiados
     std::array<std::uint64_t, 16> priv_{};  // 0x1200_0000 + i*0x10 (PMODE..BGCOLOR)
-    std::uint64_t csr_ = 0;
-    std::uint64_t imr_ = 0x7F00;
-    std::uint64_t siglblid_ = 0;
+    GsEeState ee_;                  // espelho do EE: CSR, IMR, SIGLBLID, FINISH pendentes
+    GsEventSink* sink_ = nullptr;
+    std::uint64_t evSeq_ = 0;       // numeração dos eventos aplicados no espelho próprio
     bool hasClock_ = false;         // setHsyncSource chamado: há modelo de tempo
     std::uint64_t itemClock_ = 0;   // carimbo do item atual (setItemClock)
-    std::uint64_t cyclesPerLine_ = 0;
-    std::uint64_t hsyncClearedAt_ = 0;
 
     // Modelo de tempo do GS (em ciclos do EE), tudo no produtor
     std::uint64_t work_ = 0;        // trabalho acumulado desde o último evento
@@ -755,7 +766,6 @@ private:
     std::uint64_t busyUntil_ = 0;   // fim do trabalho já agendado
     bool realTime_ = false;
     std::uint64_t workStart_ = 0;   // chegada do primeiro dado do lote atual
-    std::vector<std::uint64_t> finishDue_;  // FINISH pendentes (ordem crescente)
 
     std::uint64_t drawCount_ = 0;
     BandStats bandStats_;  // produtor

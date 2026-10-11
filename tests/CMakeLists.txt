@@ -25,6 +25,7 @@ add_executable(anyps2_tests
     unit/test_vu1_mem.cpp
     unit/test_vu1_sync.cpp
     unit/test_vif_split.cpp
+    unit/test_vu1_stream.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
 target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu anyps2_disc anyps2_gsplay_lib)
@@ -38,7 +39,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_texel gs_texcache gs_trace ipu vu_isa vu vu_trace iop disc config gsplay vu1_sync)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_texel gs_texcache gs_trace ipu vu_isa vu vu_trace iop disc config gsplay vu1_sync vu1_stream)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 

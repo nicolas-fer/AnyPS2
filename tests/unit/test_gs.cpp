@@ -12,6 +12,7 @@
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/vif.h"
 #include "minitest.h"
@@ -935,6 +936,7 @@ TEST_CASE(gs, finish_latency) {
     rt.timing().consume(1000000);
     rt.gs().setItemClock(rt.timing().now());  // o GS não lê o relógio: quem entrega carimba
     rt.gs().writeRegister(FINISH, 0, 0);
+    rt.vu1Stream().fence();  // chamada direta ao Gs, sem o stream: o EE aplica a resposta no fence
     CHECK(rt.gs().nextEventTime() - rt.timing().now() <= 4);
     rt.timing().consume(4);
     CHECK_EQ(rt.timing().readGsCsr() & 2, 2ull);
@@ -944,6 +946,7 @@ TEST_CASE(gs, finish_latency) {
     m.write<std::uint32_t>(0x1000A010, 0x00200000, 0);
     m.write<std::uint32_t>(0x1000A000, 0x101, 0);
     rt.gs().writePrivileged(0x12001000, 0x200, 0);  // RESET
+    rt.vu1Stream().fence();
     CHECK_EQ(rt.gs().nextEventTime(), ~std::uint64_t{0});
     // GS isolado (sem relógio): imediato, ver gs.signal_finish_and_csr.
 }
@@ -979,6 +982,7 @@ TEST_CASE(gs, item_clock_replaces_the_ee_clock) {
     b.gs().writeRegister(PRIM, 6, 0);
     b.gs().writeRegister(XYZ2, 0, 0);
     b.gs().writeRegister(FINISH, 0, 0);
+    b.vu1Stream().fence();  // chamada direta ao Gs, sem o stream: o EE aplica a resposta no fence
     CHECK(a.gs().nextEventTime() != ~std::uint64_t{0});
     CHECK_EQ(a.gs().nextEventTime(), b.gs().nextEventTime());
 
@@ -987,6 +991,7 @@ TEST_CASE(gs, item_clock_replaces_the_ee_clock) {
     const std::uint64_t due1 = b.gs().nextEventTime();
     b.timing().consume(1000000);
     b.gs().writeRegister(FINISH, 0, 0);  // sem novo carimbo
+    b.vu1Stream().fence();
     b.gs().processEvents(~std::uint64_t{0});
     CHECK_EQ(b.gs().csr() & 2, 2ull);
     // busyUntil_ do segundo = max(busyUntil_ do primeiro, workStart_ antigo)... + 2: perto
@@ -1016,6 +1021,7 @@ TEST_CASE(gs, finish_real_clock_one_at_a_time) {
     rt.gs().setItemClock(rt.timing().now());
     rt.gs().writeRegister(FINISH, 0, 0);
     rt.gs().writeRegister(FINISH, 0, 0);
+    rt.vu1Stream().fence();  // chamada direta ao Gs, sem o stream: o EE aplica as respostas no fence
     const std::uint64_t later = rt.timing().now() + 1000000000ull;
     rt.gs().processEvents(later);
     CHECK_EQ(rt.gs().csr() & 2, 2ull);

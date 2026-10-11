@@ -14,6 +14,7 @@
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu1_stream.h"
 
 namespace anyps2::rt {
 
@@ -101,12 +102,11 @@ std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t 
     }
     if (reg >= 0x12000000u) {
         if (reg == 0x12001000u) rt_.timing().process(pc);  // VSINT/FIELD em dia
-        rt_.gs().setItemClock(rt_.timing().now());
-        return rt_.gs().readPrivileged(reg, pc);
+        return rt_.vu1Stream().readGsPrivileged(reg, pc);
     }
     if (Dmac::handles(reg)) return rt_.dmac().read(reg, pc);
     if (reg >= 0x10002000u && reg < 0x10003000u) return rt_.ipu().readRegister(reg, pc);
-    if (reg >= 0x10003000u && reg < 0x10003800u) return rt_.gif().readRegister(reg, pc);
+    if (reg >= 0x10003000u && reg < 0x10003800u) return rt_.vu1Stream().readGif(reg, pc);
     if (reg >= 0x10003800u && reg < 0x10003C00u) return rt_.vif0().readRegister(reg, pc);
     if (reg >= 0x10003C00u && reg < 0x10004000u) return rt_.vif1().readRegister(reg, pc);
     if (reg >= 0x10004000u && reg < 0x10008000u) {
@@ -142,8 +142,7 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         return;
     }
     if (reg >= 0x12000000u) {
-        rt_.gs().setItemClock(rt_.timing().now());
-        rt_.gs().writePrivileged(reg, value, pc);
+        rt_.vu1Stream().writeGsPrivileged(reg, value, pc);
         return;
     }
     if (Dmac::handles(reg)) {
@@ -155,7 +154,7 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         return;
     }
     if (reg >= 0x10003000u && reg < 0x10003800u) {
-        rt_.gif().writeRegister(reg, static_cast<std::uint32_t>(value), pc);
+        rt_.vu1Stream().pushGifWrite(reg, static_cast<std::uint32_t>(value), pc);
         return;
     }
     if (reg >= 0x10003800u && reg < 0x10004000u) {
@@ -195,6 +194,7 @@ void Hardware::read(std::uint32_t addr, void* out, unsigned size, std::uint32_t 
         return;
     }
     if (size == 16 && (addr & ~0xFFFu) == 0x10005000u) {  // VIF1_FIFO: download do GS
+        rt_.vu1Stream().fence();  // BUSDIR e os dados do download são do consumidor
         if (!rt_.gs().busDirToHost()) {
             throw GuestError("leitura do VIF1_FIFO com BUSDIR = 0 (o GS não está mandando dados)", pc);
         }
@@ -225,7 +225,7 @@ void Hardware::write(std::uint32_t addr, const void* in, unsigned size, std::uin
             case 0x10005000: rt_.vif1().fifoWrite(data, 16, pc); return;
             case 0x10006000:
                 HostProfile::count(&SyncStats::gifFifoWrites);
-                rt_.gif().transfer(3, data, 1, pc);
+                rt_.vu1Stream().pushPath3(data, 1, pc);
                 return;
             default:
                 if ((addr & ~0xFu) == 0x10007010u) {  // IPU_in_FIFO

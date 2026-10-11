@@ -29,6 +29,7 @@
 #include "anyps2/runtime/vu/vu.h"
 #include "anyps2/runtime/vu/vu_trace.h"
 #include "anyps2/runtime/vu1_mem.h"
+#include "anyps2/runtime/vu1_stream.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -111,6 +112,9 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
         }
         v->setDumpDir(options_.vuDumpDir);
     }
+    vu1Stream_ = std::make_unique<Vu1Stream>(*this, *vu_, *gif_, *gs_);
+    gs_->setEventSink(vu1Stream_.get());
+    vif1_->setStream(vu1Stream_.get());
     vuTrace_ = VuTrace::fromEnv();
     if (vuTrace_) vu1_->setTrace(vuTrace_.get());
 }
@@ -129,6 +133,7 @@ Runtime::~Runtime() {
 
 void Runtime::onVblank(std::uint32_t pc) {
     ++vblanks_;
+    vu1Stream_->fence();  // a apresentação lê o estado do GS (registradores de vídeo e VRAM)
     iop_->vblank(pc);
     if (options_.screenshotEvery && !options_.screenshot.empty() && vblanks_ % options_.screenshotEvery == 0 &&
         gs_->displayEnabled()) {

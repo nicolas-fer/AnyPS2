@@ -11,6 +11,7 @@
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/vif.h"
 
@@ -217,10 +218,10 @@ std::uint32_t Dmac::sendToDevice(unsigned ch, std::uint32_t addr, std::uint32_t 
             return static_cast<std::uint32_t>(bytes / 16);
         }
         case kGif:
-            if (rt_.gif().path3Masked()) {
+            if (rt_.vu1Stream().path3Masked()) {
                 throw Unimplemented("DMA do GIF com PATH3 mascarado pelo VIF1 (MSKPATH3) — espera não emulada", pc);
             }
-            rt_.gif().transfer(3, src, qwc, pc);
+            rt_.vu1Stream().pushPath3(src, qwc, pc);
             return qwc;
         case kToIpu:
             return rt_.ipu().dmaWrite(src, qwc);
@@ -280,6 +281,7 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
             if (!(c.chcr & kChcrDir)) {
                 // VIF1 → memória: os dados de uma transferência LOCAL→HOST do GS.
                 if (mod != 0) throw Unimplemented("DMA VIF1→memória em modo chain/interleave", pc);
+                rt_.vu1Stream().fence();  // BUSDIR e os dados do download são do consumidor
                 if (!rt_.gs().busDirToHost()) {
                     throw GuestError("DMA VIF1→memória com BUSDIR = 0 (o GS não está mandando dados)", pc);
                 }

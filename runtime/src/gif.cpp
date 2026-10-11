@@ -9,7 +9,6 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gs/gs.h"
 #include "anyps2/runtime/runtime.h"
-#include "anyps2/runtime/timing.h"
 
 namespace anyps2::rt {
 
@@ -89,8 +88,8 @@ void Gif::writeReglist(unsigned desc, std::uint64_t data, std::uint32_t pc) {
 void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, std::uint32_t pc) {
     const HostProfile::Scope prof(HostProfile::Gif);
     Path& p = paths_[path - 1];
-    // Carimbo do item: o GS mede o tempo pelo relógio do EE no instante da entrega.
-    if (rt_) gs_.setItemClock(rt_->timing().now());
+    // O carimbo do item já foi posto no Gs por quem entrega (o consumidor do Vu1Stream, antes de
+    // aplicar o item): o GIF não lê o relógio do EE.
     gs_.setSource(path);  // só para o diagnóstico do GS (origem das escritas na VRAM)
     for (std::size_t i = 0; i < qwords; ++i) {
         std::uint64_t lo, hi;

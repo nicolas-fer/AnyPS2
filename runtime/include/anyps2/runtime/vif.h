@@ -11,6 +11,7 @@ namespace anyps2::rt {
 
 class Runtime;
 class Gif;
+class Vu1Stream;
 
 // Memórias dos VUs, visíveis no espaço do EE:
 //   0x1100_0000  micro VU0 (4 KB)    0x1100_4000  dados VU0 (4 KB)
@@ -45,6 +46,11 @@ struct VuMemory {
 class Vif {
 public:
     Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif);
+
+    // Com um stream, os itens vão para a fila ordenada do VU1 (vu1_stream.h) em vez de ao
+    // executor próprio: é como o VIF1 funciona no runtime. Sem ele (o VIF0, que fica no EE, e os
+    // testes) o executor próprio os aplica na hora.
+    void setStream(Vu1Stream* stream) { stream_ = stream; }
 
     // Processa dados (múltiplo de 4 bytes) vindos do DMA. Retorna quantos
     // bytes foram aceitos: tudo, ou — se o VIF parou — até o fim do quadword
@@ -81,6 +87,8 @@ private:
     Runtime* rt_;
     unsigned unit_;
     VifExec exec_;
+    Vu1Stream* stream_ = nullptr;
+    void deliver(const VifItem& item);
     std::uint32_t dataQwords_;  // quadwords da memória de dados da unidade
 
     State state_ = State::Idle;

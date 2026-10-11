@@ -123,6 +123,11 @@ public:
 
     // Inicia o microprograma em pc (bytes) e executa até o bit E.
     void start(std::uint32_t pc, std::uint32_t eePc);
+    // Igual a start, com o VBlank do rastreador dado (vem no item da fila do VU1: o consumidor
+    // não consulta o Runtime do EE).
+    void startAt(std::uint32_t pc, std::uint32_t eePc, std::uint64_t vblanks) {
+        run(pc, eePc, mode_ != Mode::Interpret, vblanks);
+    }
     // XTOP/XITOP do VU1 leem o TOP/ITOP do VIF1 que o executor do VIF copia para cá (no MSCAL, do
     // item; no reset do VIF1, zero): o VU não consulta o VIF1 durante a execução.
     void setVifTop(std::uint32_t top, std::uint32_t itop) {
