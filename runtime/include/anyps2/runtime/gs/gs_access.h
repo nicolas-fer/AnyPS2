@@ -69,10 +69,28 @@ struct VramAccess {
     // Só para PendingAccess::dropDone: o acesso termina de vez quando a barreira de
     // número `seq` (contada desde o início) conclui; 0 = já terminou.
     std::uint64_t seq = 0;
+    // Só diagnóstico (contadores de CLUT do perfil; nada aqui decide ordem nem resultado):
+    //  * laneMask: faixas que escrevem (bit k = faixa k); todas as faixas para tudo o que não
+    //    é desenho (HOST/LOCAL→LOCAL, barreiras). A união vale na fusão de PendingAccess::add.
+    //  * rect*: caixa de pixels do acesso (colunas/linhas, inclusive) com o endereço base em
+    //    blocos (`bp`), para comparar em nível de bloco de 256 B; rectValid = falso quando não
+    //    se conhece (volta de endereço, fusão de mapeamentos diferentes).
+    //  * host: veio de uma HOST→LOCAL (em fila).
+    std::uint32_t laneMask = ~0u;
+    std::uint32_t bp = 0;
+    std::uint16_t rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
+    bool rectValid = false;
+    bool host = false;
 };
 
 // Sobreposição de páginas, sem a exceção do mesmo mapeamento de clashes().
 bool accessesOverlap(const VramAccess& a, const VramAccess& b);
+
+// Diagnóstico: a escrita `w` toca algum bloco de 256 B que a leitura `r` (a área de uma
+// CLUT) lê? Exige as caixas (rectValid); sem elas, ou com uma fusão de várias escritas, o
+// resultado é uma aproximação por cima (a caixa é a união das caixas fundidas) e, sem
+// caixa, devolve verdadeiro.
+bool accessesOverlapBlocks(const VramAccess& w, const VramAccess& r);
 
 // Dois acessos colidem se as páginas se cruzam e pelo menos um escreve, salvo
 // quando são escritas com o mesmo mapeamento (cada pixel fica numa faixa só, e
@@ -129,6 +147,7 @@ public:
     bool full() const { return list_.size() >= max_; }
     void clear() { list_.clear(); }
     std::size_t size() const { return list_.size(); }
+    const std::vector<VramAccess>& items() const { return list_; }
 
 private:
     std::size_t max_;

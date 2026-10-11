@@ -1749,3 +1749,196 @@ TEST_CASE(gs_bands, async_display_env_switch_and_stats) {
     CHECK_EQ(f.height, 128u);
     CHECK(sameFrame(f, on->display()));
 }
+
+// ---------------------------------------------------------------------------
+// Contadores de CLUT e espera por tipo de barreira (fatia 1 do plano de dependência de
+// CLUT): só medem; aqui conferem a classificação em cenas sintéticas. A carga só vira
+// barreira se as faixas ainda estão ocupadas, então cada cena é tentada algumas vezes
+// (desenhos pesados antes dela) até as pré-condições valerem.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint32_t kClutPage = 51 * 32;  // CBP da CLUT nos testes (página 51)
+
+// Trabalho pesado em outro lugar (FRAME 0), para manter as faixas ocupadas.
+void clutBusy(Gs& g) {
+    queueBusy(g, 0, 2, 127, 127, 150, 0);
+}
+
+// Carga de CLUT PSMT4 (8x2 pixels PSMCT32 no bloco 0 da página 51).
+void clutLoad(Gs& g) {
+    g.writeRegister(TEX0_1, tex0(1344, 1, PSMT4, 6, 6, kClutPage, PSMCT32, 1, 0), 0);
+}
+
+// Desenho de sprite no FRAME da página 51 (a mesma da CLUT).
+void clutPageSprite(Gs& g, unsigned x0, unsigned y0, unsigned x1, unsigned y1) {
+    g.writeRegister(FRAME_1, frameReg(51, 2, PSMCT32), 0);
+    sprite(g, x0, y0, x1, y1);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+}
+
+template <class F>
+void clutScene(F&& scene) {
+    bool ok = false;
+    for (unsigned attempt = 0; attempt < 30 && !ok; ++attempt) {
+        StatsGs t;
+        Gs& g = *t.gs;
+        g.forceClutMeasure(true);
+        queueSetup(g);
+        ok = scene(g);
+    }
+    CHECK(ok);
+}
+
+std::uint64_t sumRecent(const BandStats& s) {
+    std::uint64_t n = 0;
+    for (const std::uint64_t r : s.clutRecent) n += r;
+    return n;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, clut_stats_covered_and_recent_four_lanes) {
+    clutScene([](Gs& g) {
+        clutBusy(g);
+        clutPageSprite(g, 0, 0, 127, 127);  // escreve a página da CLUT nas 4 faixas
+        clutLoad(g);                        // recente: escrita ainda sem barreira
+        clutLoad(g);                        // coberta: a barreira da anterior já foi emitida
+        const BandStats& s = g.bandStats();
+        if (s.clutBarriers != 2) return false;  // as faixas já tinham terminado: tenta de novo
+        CHECK_EQ(s.clutRecent[4], 1u);
+        CHECK_EQ(sumRecent(s), 1u);
+        CHECK_EQ(s.clutCovered, 1u);
+        CHECK_EQ(s.clutRecentTrueBlock, 1u);
+        CHECK_EQ(s.clutHost, 0u);
+        CHECK_EQ(s.clutLost, 0u);
+        CHECK_EQ(s.submit[BandStats::SubmitClut], 2u);
+        CHECK_EQ(s.barrierKind[BandStats::BkClut], 2u);
+        std::uint64_t lag = 0;
+        for (const std::uint64_t n : s.clutLag) lag += n;
+        CHECK_EQ(lag, 2u);
+        return true;
+    });
+}
+
+TEST_CASE(gs_bands, clut_stats_recent_one_lane_true_block_and_false_sharing) {
+    // Escrita só nas linhas 0..15 (faixa 0): sobrepõe o bloco 0 da CLUT (x < 8)...
+    clutScene([](Gs& g) {
+        clutBusy(g);
+        clutPageSprite(g, 0, 0, 127, 15);
+        clutLoad(g);
+        const BandStats& s = g.bandStats();
+        if (s.clutBarriers != 1) return false;
+        CHECK_EQ(s.clutRecent[1], 1u);
+        CHECK_EQ(sumRecent(s), 1u);
+        CHECK_EQ(s.clutRecentTrueBlock, 1u);
+        CHECK_EQ(s.clutCovered, 0u);
+        return true;
+    });
+    // ...ou só as colunas 16..: mesma página, outros blocos (conflito falso de página).
+    clutScene([](Gs& g) {
+        clutBusy(g);
+        clutPageSprite(g, 16, 0, 127, 15);
+        clutLoad(g);
+        const BandStats& s = g.bandStats();
+        if (s.clutBarriers != 1) return false;
+        CHECK_EQ(s.clutRecent[1], 1u);
+        CHECK_EQ(s.clutRecentTrueBlock, 0u);
+        return true;
+    });
+}
+
+TEST_CASE(gs_bands, clut_stats_host_queue_and_war_after_covered_load) {
+    clutScene([](Gs& g) {
+        clutBusy(g);
+        clutPageSprite(g, 0, 0, 127, 127);
+        // HOST→LOCAL sobre a página da CLUT com escrita pendente: abre em modo fila.
+        hostToLocal(g, kClutPage, 1, PSMCT32, 0, 0, 16, 16, std::vector<std::uint64_t>(128, 0x1122334455667788ull));
+        clutLoad(g);  // o conflito vem do HOST em fila (coberto pela barreira dele)
+        // Escrita na página da CLUT antes da próxima barreira: a leitura virou WAR.
+        clutPageSprite(g, 0, 0, 127, 15);
+        const BandStats& s = g.bandStats();
+        if (s.hostQueued != 1 || s.clutBarriers != 1) return false;
+        CHECK_EQ(s.clutHost, 1u);
+        CHECK_EQ(s.clutCovered, 1u);
+        CHECK_EQ(s.clutWarAfter, 1u);
+        CHECK_EQ(s.clutWarAfterCovered, 1u);
+        return true;
+    });
+}
+
+TEST_CASE(gs_bands, clut_stats_war_not_counted_after_a_barrier) {
+    clutScene([](Gs& g) {
+        clutBusy(g);
+        clutPageSprite(g, 0, 0, 127, 127);
+        clutLoad(g);
+        clutLoad(g);  // barreira: a leitura da primeira deixa de ser acompanhada
+        if (g.bandStats().clutBarriers != 2) return false;
+        const std::uint64_t before = g.bandStats().clutWarAfter;
+        CHECK_EQ(before, 0u);
+        clutPageSprite(g, 0, 0, 127, 15);  // colide só com a segunda
+        CHECK_EQ(g.bandStats().clutWarAfter, 1u);
+        clutPageSprite(g, 0, 0, 127, 15);  // já contada: não repete
+        CHECK_EQ(g.bandStats().clutWarAfter, 1u);
+        return true;
+    });
+}
+
+TEST_CASE(gs_bands, barrier_kinds_and_waits_are_counted_per_lane) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    g.forceClutMeasure(true);
+    queueSetup(g);
+    clutBusy(g);
+    clutPageSprite(g, 0, 0, 127, 127);
+    clutLoad(g);                         // CLUT
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    sprite(g, 0, 0, 100, 100);           // escreve de novo a área do desenho anterior: conflito
+    g.waitIdle();
+    const BandStats& s = g.bandStats();
+    std::uint64_t kinds = 0;
+    for (const std::uint64_t n : s.barrierKind) kinds += n;
+    std::uint64_t submits = 0;
+    for (const std::uint64_t n : s.submit) submits += n;
+    CHECK_EQ(kinds, submits + s.conflict[BandStats::ConflictFull] + s.conflict[BandStats::ConflictWrite] +
+                        s.conflict[BandStats::ConflictTexture]);
+    CHECK_EQ(s.barrierKind[BandStats::BkConflict], s.conflict[BandStats::ConflictFull] +
+                                                       s.conflict[BandStats::ConflictWrite] +
+                                                       s.conflict[BandStats::ConflictTexture]);
+    CHECK_EQ(s.lanes, 4u);
+    std::int64_t byKind = 0, byLane = 0;
+    for (const std::int64_t n : s.barrierWaitNs) {
+        CHECK(n >= 0);
+        byKind += n;
+    }
+    for (const std::int64_t n : s.laneWaitNs) byLane += n;
+    CHECK_EQ(byKind, byLane);
+}
+
+TEST_CASE(gs_bands, block_overlap_distinguishes_blocks_of_the_same_page) {
+    // Escrita PSMCT32 em colunas 16..63 × linhas 0..15 da página 0 (largura 2) e uma CLUT
+    // de 8x2 pixels no canto (0, 0): mesma página, blocos diferentes.
+    VramAccess w{};
+    w.write = true;
+    w.psm = PSMCT32;
+    w.bw = 2;
+    w.bp = 0;
+    w.rx0 = 16; w.ry0 = 0; w.rx1 = 63; w.ry1 = 15;
+    w.rectValid = true;
+    w.pages.setRange(0, 0);
+    VramAccess c{};
+    c.psm = PSMCT32;
+    c.bw = 1;
+    c.bp = 0;
+    c.rx0 = 0; c.ry0 = 0; c.rx1 = 7; c.ry1 = 1;
+    c.rectValid = true;
+    c.pages.setRange(0, 0);
+    CHECK(accessesOverlap(w, c));
+    CHECK(!accessesOverlapBlocks(w, c));
+    w.rx0 = 0;
+    CHECK(accessesOverlapBlocks(w, c));
+    w.rectValid = false;  // sem caixa: aproxima por cima
+    w.rx0 = 16;
+    CHECK(accessesOverlapBlocks(w, c));
+}

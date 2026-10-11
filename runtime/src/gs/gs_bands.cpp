@@ -211,6 +211,74 @@ bool accessesOverlap(const VramAccess& a, const VramAccess& b) {
     return overlap(a, b);
 }
 
+namespace {
+
+// Geometria de página e de bloco por tamanho de pixel (como pageSet e vram.cpp).
+struct BlockGeo {
+    unsigned pageW = 64, pageH = 32, blkW = 8, blkH = 8;
+    std::uint64_t stride = 0;
+};
+
+BlockGeo blockGeo(std::uint32_t psm, std::uint32_t bw) {
+    BlockGeo g;
+    g.stride = bw;
+    switch (psmStorageBits(psm)) {
+        case 16: g.pageH = 64; g.blkW = 16; break;
+        case 8: g.pageW = 128; g.pageH = 64; g.blkW = 16; g.blkH = 16; g.stride = bw >> 1; break;
+        case 4: g.pageW = 128; g.pageH = 128; g.blkW = 32; g.blkH = 16; g.stride = bw >> 1; break;
+        default: break;
+    }
+    return g;
+}
+
+// Bloco de 256 B (0..Vram::kBlocks−1) do pixel (x, y).
+std::uint32_t blockAt(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x, std::uint32_t y) {
+    switch (psmStorageBits(psm)) {
+        case 16: return Vram::byteAddress16(bp, bw, x, y, psm) >> 8;
+        case 8: return Vram::byteAddress8(bp, bw, x, y) >> 8;
+        case 4: return Vram::nibbleAddress4(bp, bw, x, y) >> 9;
+        default: return Vram::byteAddress32(bp, bw, x, y) >> 8;
+    }
+}
+
+}  // namespace
+
+bool accessesOverlapBlocks(const VramAccess& w, const VramAccess& r) {
+    if (!w.rectValid || !r.rectValid) return true;
+    // Blocos da leitura (uma CLUT ocupa poucos); acima do limite não vale detalhar.
+    constexpr unsigned kMaxBlocks = 64;
+    std::uint32_t rb[kMaxBlocks];
+    unsigned n = 0;
+    const BlockGeo gr = blockGeo(r.psm, r.bw);
+    for (unsigned y = r.ry0 - r.ry0 % gr.blkH; y <= r.ry1; y += gr.blkH) {
+        for (unsigned x = r.rx0 - r.rx0 % gr.blkW; x <= r.rx1; x += gr.blkW) {
+            if (n == kMaxBlocks) return true;
+            rb[n++] = blockAt(r.psm, r.bp, r.bw, x, y);
+        }
+    }
+    // Só as páginas da escrita que contêm algum desses blocos são percorridas.
+    const BlockGeo gw = blockGeo(w.psm, w.bw);
+    for (unsigned t = w.ry0 / gw.pageH; t <= w.ry1 / gw.pageH; ++t) {
+        for (unsigned c = w.rx0 / gw.pageW; c <= w.rx1 / gw.pageW; ++c) {
+            const auto base = static_cast<std::uint32_t>((w.bp + (t * gw.stride + c) * 32) % Vram::kBlocks);
+            bool any = false;
+            for (unsigned i = 0; i < n && !any; ++i) any = ((rb[i] + Vram::kBlocks - base) % Vram::kBlocks) < 32;
+            if (!any) continue;
+            const unsigned yLo = std::max<unsigned>(w.ry0, t * gw.pageH), yHi = std::min<unsigned>(w.ry1, (t + 1) * gw.pageH - 1);
+            const unsigned xLo = std::max<unsigned>(w.rx0, c * gw.pageW), xHi = std::min<unsigned>(w.rx1, (c + 1) * gw.pageW - 1);
+            for (unsigned y = yLo - yLo % gw.blkH; y <= yHi; y += gw.blkH) {
+                for (unsigned x = xLo - xLo % gw.blkW; x <= xHi; x += gw.blkW) {
+                    const std::uint32_t b = blockAt(w.psm, w.bp, w.bw, x, y);
+                    for (unsigned i = 0; i < n; ++i) {
+                        if (rb[i] == b) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool PendingAccess::conflictsWith(const VramAccess& a) const {
     return std::any_of(list_.begin(), list_.end(),
                        [&a](const VramAccess& p) { return (p.write || a.write) && overlap(p, a); });
@@ -231,6 +299,18 @@ void PendingAccess::add(const VramAccess& a) {
         // "em uso" até a barreira mais nova (esperas a mais no HOST→LOCAL).
         if (p.seq == a.seq && ((p.write && a.write && sameMapping(p, a)) || (!p.write && !a.write))) {
             p.pages.merge(a.pages);
+            // Só diagnóstico: faixas e origem em união; a caixa vira a união das caixas
+            // (leituras de mapeamentos diferentes não têm caixa em comum: perdem-na).
+            p.laneMask |= a.laneMask;
+            p.host = p.host || a.host;
+            if (p.write && p.rectValid && a.rectValid) {
+                p.rx0 = std::min(p.rx0, a.rx0);
+                p.ry0 = std::min(p.ry0, a.ry0);
+                p.rx1 = std::max(p.rx1, a.rx1);
+                p.ry1 = std::max(p.ry1, a.ry1);
+            } else {
+                p.rectValid = false;
+            }
             return;
         }
     }

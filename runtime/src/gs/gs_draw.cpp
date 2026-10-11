@@ -379,6 +379,7 @@ void Gs::draw(std::uint32_t pc) {
         a.base = bp / 32;
         a.bw = bw;
         a.psm = psm;
+        a.bp = bp;
         return a;
     };
     VramAccess writes[2];
@@ -428,6 +429,20 @@ void Gs::draw(std::uint32_t pc) {
         }
         for (unsigned j = i + 1; j < nw; ++j) selfFrameZ = selfFrameZ || clashes(writes[i], writes[j]);
     }
+    // Só diagnóstico (contadores de CLUT): faixas que escrevem e caixa dos acessos.
+    const std::uint32_t drawLanes = laneMask(rows.lo, rows.hi, worker_->lanes());
+    for (unsigned i = 0; i < nw + nr; ++i) {
+        VramAccess& a = i < nw ? writes[i] : reads[i - nw];
+        a.laneMask = drawLanes;
+        if (i < nw || a.surface == 1) {
+            a.rx0 = static_cast<std::uint16_t>(std::min(colLo, 2047u));
+            a.ry0 = static_cast<std::uint16_t>(std::min(rowLo, 2047u));
+            a.rx1 = static_cast<std::uint16_t>(std::min(colHi, 2047u));
+            a.ry1 = static_cast<std::uint16_t>(std::min(rowHi, 2047u));
+            a.rectValid = !a.pages.full();
+        }
+    }
+    if (!clutReads_.empty()) noteClutWar(writes, nw);
     // Gerações de página (bumpPages): as escritas deste desenho entram na ordem do
     // programa, antes de qualquer desenho seguinte. A simulação do cache olha antes,
     // com as gerações que a textura tinha quando o desenho a fixou. Desenhos sozinhos
@@ -514,8 +529,9 @@ void Gs::draw(std::uint32_t pc) {
         }
     }
     if (conflict) {
-        pending_.clear();
-        worker_->barrier([] {});
+        clearPending();
+        ++bandStats_.barrierKind[BandStats::BkConflict];
+        worker_->barrier([] {}, BandStats::BkConflict);
     }
     for (unsigned i = 0; i < nw; ++i) pending_.add(writes[i]);
     for (unsigned j = 0; j < nr; ++j) pending_.add(reads[j]);
@@ -525,7 +541,7 @@ void Gs::draw(std::uint32_t pc) {
 
     // Uma tarefa só para as faixas que têm linhas do desenho; cada uma recebe o
     // seu índice e sombreia só as suas linhas.
-    const std::uint32_t mask = laneMask(rows.lo, rows.hi, worker_->lanes());
+    const std::uint32_t mask = drawLanes;
     const auto task = std::make_shared<const GsWorker::Task>(
         [this, e, v0, v1, v2](unsigned lane, unsigned lanes) {
             DrawEnv d = e;

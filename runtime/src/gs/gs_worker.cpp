@@ -34,6 +34,8 @@ GsWorker::GsWorker(bool threaded, unsigned lanes)
     : threaded_(threaded), lanes_(threaded && lanes > 0 ? lanes : 1), queues_(lanes_) {
     if (!threaded_) return;
     HostProfile::setWorkerLanes(lanes_);
+    waitNs_ = std::make_unique<std::atomic<std::int64_t>[]>(std::size_t{lanes_} * kBarrierKinds);
+    for (std::size_t i = 0; i < std::size_t{lanes_} * kBarrierKinds; ++i) waitNs_[i].store(0, std::memory_order_relaxed);
     workCv_.reserve(lanes_);
     for (unsigned i = 0; i < lanes_; ++i) workCv_.push_back(std::make_unique<std::condition_variable>());
     threads_.reserve(lanes_);
@@ -57,7 +59,12 @@ void GsWorker::push(unsigned lane, const std::shared_ptr<const Task>& task) {
     workCv_[lane]->notify_one();
 }
 
-void GsWorker::barrier(Op op) {
+std::int64_t GsWorker::barrierWaitNs(unsigned lane, unsigned kind) const {
+    if (!waitNs_ || lane >= lanes_ || kind >= kBarrierKinds) return 0;
+    return waitNs_[std::size_t{lane} * kBarrierKinds + kind].load(std::memory_order_relaxed);
+}
+
+void GsWorker::barrier(Op op, unsigned kind) {
     ++issued_;
     if (!threaded_) {
         op();
@@ -66,6 +73,7 @@ void GsWorker::barrier(Op op) {
     }
     auto b = std::make_shared<Barrier>();
     b->op = std::move(op);
+    b->kind = kind < kBarrierKinds ? kind : kBarrierKinds - 1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& q : queues_) q.push_back(Item{nullptr, b});
@@ -119,6 +127,8 @@ void GsWorker::run(unsigned lane) {
         std::exception_ptr failure;
         if (item.barrier) {
             Barrier& b = *item.barrier;
+            const bool timed = forceTiming_.load(std::memory_order_relaxed) || HostProfile::enabled();
+            const auto arrival = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             if (++b.arrived == lanes_) {
                 // Última faixa a chegar: as outras esperam em barrierCv_, então
                 // a operação roda sozinha, sem o mutex.
@@ -130,6 +140,12 @@ void GsWorker::run(unsigned lane) {
                 barrierCv_.notify_all();
             } else {
                 barrierCv_.wait(lock, [&b] { return b.done; });
+            }
+            if (timed) {
+                waitNs_[std::size_t{lane} * kBarrierKinds + b.kind].fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - arrival)
+                        .count(),
+                    std::memory_order_relaxed);
             }
         } else {
             lock.unlock();

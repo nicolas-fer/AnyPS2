@@ -184,7 +184,9 @@ void Gs::flushHostQueue() {
     }
     // O destino todo conta como escrita não concluída até a barreira rodar: cargas de CLUT
     // e transferências seguintes que o tocam viram barreira/fila em vez de ler VRAM velha.
-    noteOutstanding(hostOpen_);
+    VramAccess hostAcc = hostOpen_;
+    hostAcc.host = true;  // só para o diagnóstico de CLUT
+    noteOutstanding(hostAcc);
     auto words = std::make_shared<std::vector<std::uint64_t>>();
     words->swap(hostWords_);
     ++bandStats_.hostQueuedSubmits;
@@ -246,10 +248,16 @@ VramAccess Gs::rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::
     a.base = bp / 32;
     a.bw = bw;
     a.psm = psm;
+    a.bp = bp;
     if (w == 0 || h == 0 || x0 + w > 2048 || y0 + h > 2048) {
         a.pages.setAll();
         return a;
     }
+    a.rx0 = static_cast<std::uint16_t>(x0);
+    a.ry0 = static_cast<std::uint16_t>(y0);
+    a.rx1 = static_cast<std::uint16_t>(x0 + w - 1);
+    a.ry1 = static_cast<std::uint16_t>(y0 + h - 1);
+    a.rectValid = true;
     a.pages = pageSet(psm, bp, bw, y0, y0 + h - 1, x0, x0 + w - 1);
     return a;
 }
@@ -261,7 +269,7 @@ void Gs::waitIdle(BandStats::WaitReason why) {
     // Depois da espera nada está pendente nas faixas: os acessos de desenhos já
     // enfileirados não podem mais colidir com a ordem de uma transferência aberta.
     hostDrain_ = false;
-    pending_.clear();
+    clearPending();
     if (!worker_->threaded()) {
         trackOutstanding();
         return;
@@ -291,8 +299,88 @@ std::uint64_t Gs::pixelsShaded() const {
 void Gs::submit(GsWorker::Op op, BandStats::SubmitKind kind) {
     ++bandStats_.submit[kind];
     // A operação global espera as faixas, então nada pendente sobrevive a ela.
-    pending_.clear();
-    worker_->barrier(std::move(op));
+    clearPending();
+    static constexpr BandStats::BarrierKind kBarrierOf[BandStats::SubmitCount] = {
+        BandStats::BkLocal, BandStats::BkClut, BandStats::BkReset, BandStats::BkDraw, BandStats::BkHost,
+        BandStats::BkDisplay};
+    const BandStats::BarrierKind bk = kBarrierOf[kind];
+    ++bandStats_.barrierKind[bk];
+    worker_->barrier(std::move(op), bk);
+}
+
+const BandStats& Gs::bandStats() const {
+    if (worker_->threaded() && measureClut()) {
+        // Espera das faixas nas barreiras: as faixas somam em átomos próprios; copia de relance.
+        BandStats& s = const_cast<BandStats&>(bandStats_);
+        s.lanes = worker_->lanes();
+        for (std::int64_t& n : s.barrierWaitNs) n = 0;
+        for (std::int64_t& n : s.laneWaitNs) n = 0;
+        for (unsigned l = 0; l < worker_->lanes(); ++l) {
+            for (unsigned k = 0; k < BandStats::BkCount; ++k) {
+                const std::int64_t ns = worker_->barrierWaitNs(l, k);
+                s.barrierWaitNs[k] += ns;
+                s.laneWaitNs[std::min(l, BandStats::kLaneSlots - 1)] += ns;
+            }
+        }
+    }
+    return bandStats_;
+}
+
+bool Gs::measureClut() const {
+    return forceClutMeasure_ || HostProfile::enabled();
+}
+
+bool Gs::noteClutBarrier(const VramAccess& src) {
+    ++bandStats_.clutBarriers;
+    const std::uint64_t issued = worker_->barriersIssued();
+    const std::uint64_t done = worker_->barriersDone();
+    const std::uint64_t lag = issued >= done ? issued - done : 0;
+    const unsigned lagBucket = static_cast<unsigned>(std::min<std::uint64_t>(
+        lag == 0 ? 0 : static_cast<unsigned>(std::bit_width(lag)), BandStats::kLagBuckets - 1));
+    ++bandStats_.clutLag[lagBucket];
+    // Escritas não concluídas que conflitam com a área (o outstanding_ só guarda o que as
+    // faixas ainda podem fazer); `late` = alguma ainda sem barreira emitida.
+    bool late = false, host = false;
+    for (const VramAccess& p : outstanding_.items()) {
+        if (!p.write || !accessesOverlap(p, src)) continue;
+        late = late || p.seq > issued;
+        host = host || p.host;
+    }
+    if (hostOpenValid_ && accessesOverlap(hostOpen_, src)) host = true;
+    if (outstandingLostNeed_ > done) ++bandStats_.clutLost;
+    if (host) ++bandStats_.clutHost;
+    // Escritas conflitantes desde a última barreira (pending_): faixas e blocos.
+    const bool recent = pending_.conflictsWith(src);
+    if (recent) {
+        std::uint32_t mask = 0;
+        bool trueBlock = false;
+        for (const VramAccess& p : pending_.items()) {
+            if (!p.write || !accessesOverlap(p, src)) continue;
+            mask |= p.laneMask;
+            trueBlock = trueBlock || accessesOverlapBlocks(p, src);
+        }
+        const unsigned lanes = worker_->lanes();
+        if (lanes < 32) mask &= (1u << lanes) - 1;
+        ++bandStats_.clutRecent[std::min(static_cast<unsigned>(std::popcount(mask)), 4u)];
+        if (trueBlock) ++bandStats_.clutRecentTrueBlock;
+    }
+    const bool covered = !late && outstandingLostNeed_ <= issued && !recent && !pending_.full();
+    if (covered) ++bandStats_.clutCovered;
+    return covered;
+}
+
+void Gs::noteClutWar(const VramAccess* writes, unsigned n) {
+    for (std::size_t i = 0; i < clutReads_.size();) {
+        bool hit = false;
+        for (unsigned j = 0; j < n && !hit; ++j) hit = writes[j].write && accessesOverlap(clutReads_[i].src, writes[j]);
+        if (!hit) {
+            ++i;
+            continue;
+        }
+        ++bandStats_.clutWarAfter;
+        if (clutReads_[i].covered) ++bandStats_.clutWarAfterCovered;
+        clutReads_.erase(clutReads_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
 }
 
 void Gs::unsupported(const std::string& what, std::uint32_t pc) const {
@@ -606,12 +694,16 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
         }
         return;
     }
+    const bool measure = measureClut();
+    const bool covered = measure && noteClutBarrier(src);
     noteOutstanding(src);
     next->ready.store(false, std::memory_order_relaxed);
     submit([this, next, tex0, texclut] {
         loadClutCells(*next, tex0, texclut);
         next->ready.store(true, std::memory_order_release);
     }, BandStats::SubmitClut);
+    // A leitura vale desde esta barreira: uma escrita colidente antes da próxima seria WAR.
+    if (measure && clutReads_.size() < PendingAccess::kMax) clutReads_.push_back(ClutRead{src, covered});
     noteHostHazard(&src, 1);
     clut_ = next;
     clutBarrier_ = std::move(next);

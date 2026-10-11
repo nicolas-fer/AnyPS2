@@ -125,6 +125,53 @@ std::string topPairs(const BandStats::PairTable& cur, const BandStats::PairTable
     return s;
 }
 
+// Linha "[perfil] clut": cargas de CLUT que viraram barreira (classificação da fatia 1 do
+// plano), distância issued−done e espera das faixas por tipo de barreira.
+std::string formatClut(const BandStats& cur, const BandStats& prev, double per, const char* unit) {
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    char buf[768];
+    std::string s = "[perfil] clut";
+    s += unit;
+    s += ":";
+    std::snprintf(buf, sizeof buf,
+                  " cargas em barreira %.1f: cobertas %.1f, recentes por faixas 1:%.1f 2:%.1f 3:%.1f 4+:%.1f (sem faixa %.1f),"
+                  " com bloco verdadeiro %.1f, HOST %.1f, perdidas %.1f, WAR depois %.1f (das cobertas %.1f);",
+                  d(cur.clutBarriers, prev.clutBarriers), d(cur.clutCovered, prev.clutCovered),
+                  d(cur.clutRecent[1], prev.clutRecent[1]), d(cur.clutRecent[2], prev.clutRecent[2]),
+                  d(cur.clutRecent[3], prev.clutRecent[3]), d(cur.clutRecent[4], prev.clutRecent[4]),
+                  d(cur.clutRecent[0], prev.clutRecent[0]), d(cur.clutRecentTrueBlock, prev.clutRecentTrueBlock),
+                  d(cur.clutHost, prev.clutHost), d(cur.clutLost, prev.clutLost),
+                  d(cur.clutWarAfter, prev.clutWarAfter), d(cur.clutWarAfterCovered, prev.clutWarAfterCovered));
+    s += buf;
+    s += " issued−done na carga (<2^k):";
+    for (unsigned i = 0; i < BandStats::kLagBuckets; ++i) {
+        const double n = d(cur.clutLag[i], prev.clutLag[i]);
+        if (n <= 0) continue;
+        if (i == 0) {
+            std::snprintf(buf, sizeof buf, " 0:%.1f", n);
+        } else {
+            std::snprintf(buf, sizeof buf, " <%llu:%.1f", 1ull << i, n);
+        }
+        s += buf;
+    }
+    static const char* kKind[BandStats::BkCount] = {"CLUT", "HOST", "vídeo", "conflito", "reset", "LOCAL→LOCAL", "desenho", "outros"};
+    s += "; barreiras (n; espera somada das faixas em ms; média por barreira em µs):";
+    for (unsigned k = 0; k < BandStats::BkCount; ++k) {
+        const double n = d(cur.barrierKind[k], prev.barrierKind[k]);
+        const double ns = static_cast<double>(cur.barrierWaitNs[k] - prev.barrierWaitNs[k]) / per;
+        std::snprintf(buf, sizeof buf, " %s %.1f/%.2f/%.1f%s", kKind[k], n, ns / 1e6, n > 0 ? ns / n / 1e3 : 0.0,
+                      k + 1 < BandStats::BkCount ? "," : ";");
+        s += buf;
+    }
+    s += " espera por faixa (ms):";
+    const unsigned lanes = std::min(cur.lanes, BandStats::kLaneSlots);
+    for (unsigned l = 0; l < lanes; ++l) {
+        std::snprintf(buf, sizeof buf, " %.2f", static_cast<double>(cur.laneWaitNs[l] - prev.laneWaitNs[l]) / 1e6 / per);
+        s += buf;
+    }
+    return s + "\n";
+}
+
 // `per`: divisor das contagens (VBlanks do trecho; 1 no total).
 std::string formatBands(const BandStats& cur, const BandStats& prev, double per, const char* unit) {
     auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
@@ -172,7 +219,7 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
                       static_cast<unsigned long long>(cur.conflictPairs.lost));
         s += buf;
     }
-    return s + "\n";
+    return s + "\n" + formatClut(cur, prev, per, unit);
 }
 
 // Diagnóstico de texturas: buscas por formato, filtro, tempo amostrado (1 de cada 64

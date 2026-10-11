@@ -141,6 +141,18 @@ struct BandStats {
         SubmitDisplay,    // composição de um quadro de vídeo (requestDisplay)
         SubmitCount
     };
+    // Tipo das barreiras, para o tempo de espera das faixas (GsWorker::barrierWaitNs).
+    enum BarrierKind : unsigned {
+        BkClut,       // carga de CLUT
+        BkHost,       // palavras de HOST→LOCAL em fila
+        BkDisplay,    // composição de vídeo
+        BkConflict,   // barreira posta antes de um desenho por conflito
+        BkReset,      // reset do GS
+        BkLocal,      // LOCAL→LOCAL
+        BkDraw,       // desenho sozinho
+        BkOther,
+        BkCount
+    };
     // Esperas do EE pelas faixas (waitIdle).
     enum WaitReason : unsigned {
         WaitDisplay,   // saída de vídeo (VBlank/display)
@@ -203,6 +215,31 @@ struct BandStats {
     // ordenada na fila e vezes que o EE esperou o quadro anterior (limite de um quadro de atraso).
     std::uint64_t displayQueued = 0;
     std::uint64_t displayLagWaits = 0;
+    // Cargas de CLUT que viram barreira (diagnóstico do perfil, fatia 1 do plano da
+    // dependência de CLUT; só medem, não mudam a ordem). Calculados em Gs::loadClut
+    // quando a carga não pode ser direta. "Coberta" = toda escrita não concluída que
+    // conflita com a área já está atrás de uma barreira emitida e nada conflitante foi
+    // posto desde a última (o que uma leitura adiada poderia ignorar); "recente" = há
+    // escrita conflitante desde a última barreira (no pending_), por número de faixas
+    // que a escrevem (índice 0: nenhuma conhecida; 4: quatro ou mais). Os demais
+    // (host, lost) se sobrepõem a esses; o resto das barreiras é cascata não coberta.
+    static constexpr unsigned kLagBuckets = 12;
+    std::uint64_t clutBarriers = 0;           // cargas que viraram barreira
+    std::uint64_t clutCovered = 0;
+    std::uint64_t clutRecent[5] = {};
+    std::uint64_t clutRecentTrueBlock = 0;    // das recentes: sobreposição verdadeira em bloco de 256 B
+    std::uint64_t clutHost = 0;               // o conflito vem de HOST→LOCAL (fila ou transferência aberta)
+    std::uint64_t clutLost = 0;               // outstanding_ perdeu rastro (cheio)
+    std::uint64_t clutWarAfter = 0;           // a leitura foi seguida, antes da próxima barreira, de escrita que colide com ela
+    std::uint64_t clutWarAfterCovered = 0;    // ...só entre as cobertas
+    std::uint64_t clutLag[kLagBuckets] = {};  // issued − done na carga: 0, 1, 2–3, 4–7, ...
+    // Barreiras por tipo (produtor) e espera das faixas nelas (chegada → liberação,
+    // somada nas faixas): por tipo e por faixa. Só medido com o perfil ligado.
+    static constexpr unsigned kLaneSlots = 16;
+    std::uint64_t barrierKind[BkCount] = {};
+    std::int64_t barrierWaitNs[BkCount] = {};
+    std::int64_t laneWaitNs[kLaneSlots] = {};
+    unsigned lanes = 0;
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -380,7 +417,8 @@ public:
     std::uint64_t pixelsCovered() const { return coveredTotal_; }
     std::uint64_t pixelsShaded() const;
     // Contadores de serialização das faixas (só o produtor os altera; não espera).
-    const BandStats& bandStats() const { return bandStats_; }
+    // (A espera das faixas nas barreiras é lida do worker a cada chamada.)
+    const BandStats& bandStats() const;
     // Diagnóstico de texturas: soma das faixas (leituras sem espera, aproximadas
     // enquanto elas desenham) e o histograma de pixels por desenho do produtor.
     TexReport texReport() const;
@@ -389,6 +427,11 @@ public:
     // anda com o perfil ligado ou com forceTexSim(true) (testes).
     const TexSimReport& texSim() const { return texSim_; }
     void forceTexSim(bool on) { texSimForced_ = on; }
+    // Liga os contadores de CLUT e o tempo de espera das barreiras sem o perfil (testes).
+    void forceClutMeasure(bool on) {
+        forceClutMeasure_ = on;
+        worker_->setBarrierTiming(on);
+    }
     // Cache de texels crus (gs_texcache.h). Desligado por padrão: ANYPS2_GS_TEXCACHE=1 liga;
     // ANYPS2_GS_TEXCACHE_MB limita o índice (padrão 256); ANYPS2_GS_TEXCACHE_VERIFY=1
     // liga o cache (se ainda não estiver) e confere cada leitura do cache com a VRAM.
@@ -466,6 +509,17 @@ private:
     }
     // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
     void submit(GsWorker::Op op, BandStats::SubmitKind kind);
+    // Esvazia os acessos pendentes (toda barreira o faz) e as leituras de CLUT que o
+    // diagnóstico de WAR acompanha.
+    void clearPending() {
+        pending_.clear();
+        clutReads_.clear();
+    }
+    // Diagnóstico da fatia 1 (não mudam ordem nem resultado): classifica uma carga de CLUT
+    // que vai virar barreira; confere se escritas de desenho colidem com cargas pendentes.
+    bool measureClut() const;
+    bool noteClutBarrier(const VramAccess& src);  // devolve se a carga era coberta
+    void noteClutWar(const VramAccess* writes, unsigned n);
     // Acessos diretos do produtor à VRAM (CLUT): vê se o que as faixas ainda podem
     // estar fazendo não toca as páginas. outstanding_ guarda os acessos de tudo o que
     // foi enfileirado desde que as faixas foram vistas ociosas (diferente de pending_,
@@ -549,6 +603,14 @@ private:
     bool asyncDisplay_ = false;
     // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
     PendingAccess pending_;
+    // Leituras de CLUT feitas por barreira desde a última barreira (só o diagnóstico de
+    // WAR; vazio sem perfil). covered: a carga era coberta.
+    struct ClutRead {
+        VramAccess src;
+        bool covered = false;
+    };
+    std::vector<ClutRead> clutReads_;
+    bool forceClutMeasure_ = false;
     PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()
     std::uint64_t outstandingLostNeed_ = 0;  // lista cheia: sem rastro até a barreira desse número
     // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita

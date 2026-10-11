@@ -44,8 +44,11 @@ public:
     // Enfileira um desenho na faixa `lane` (sem thread, executa já). O mesmo
     // Task pode ir a várias faixas.
     void push(unsigned lane, const std::shared_ptr<const Task>& task);
+    // Tipos de barreira para o diagnóstico de espera (o significado é do chamador, ver
+    // BandStats::BarrierKind); só rotulam o tempo medido, nunca mudam a ordem.
+    static constexpr unsigned kBarrierKinds = 8;
     // Barreira: enfileira `op` em todas as faixas (sem thread, executa já).
-    void barrier(Op op);
+    void barrier(Op op, unsigned kind = kBarrierKinds - 1);
     // Espera as filas esvaziarem e as faixas ficarem ociosas. Relança a primeira
     // exceção que uma tarefa lançou: o worker não tem para onde propagá-la.
     void drain();
@@ -55,6 +58,11 @@ public:
     // N conclui, tudo o que foi enfileirado antes dela já terminou em todas as faixas.
     std::uint64_t barriersIssued() const { return issued_; }
     std::uint64_t barriersDone() const { return done_.load(std::memory_order_acquire); }
+    // Tempo (ns) que a faixa `lane` esperou em barreiras do tipo `kind`, da chegada dela à
+    // liberação (a última faixa a chegar conta o tempo da operação). Só acumula com o perfil
+    // ligado (HostProfile) ou com setBarrierTiming(true); o produtor lê de relance.
+    std::int64_t barrierWaitNs(unsigned lane, unsigned kind) const;
+    void setBarrierTiming(bool on) { forceTiming_.store(on, std::memory_order_relaxed); }
     // Drena sem relançar e junta as threads. Pode ser chamado mais de uma vez.
     void stop() noexcept;
 
@@ -62,6 +70,7 @@ private:
     struct Barrier {
         unsigned arrived = 0;
         bool done = false;
+        unsigned kind = 0;
         Op op;
     };
     struct Item {
@@ -84,6 +93,8 @@ private:
     bool stopping_ = false;
     std::exception_ptr error_;
     std::vector<std::thread> threads_;
+    std::unique_ptr<std::atomic<std::int64_t>[]> waitNs_;  // [faixa · kBarrierKinds + tipo]
+    std::atomic<bool> forceTiming_{false};
 };
 
 }  // namespace anyps2::rt::gs
