@@ -22,7 +22,7 @@
 // desenhos em voo que a fixaram (shared_ptr no DrawEnv). Logo, enquanto uma versão
 // existe nas mãos de desenhos enfileirados, nenhuma escrita na VRAM que ela cobre pode
 // ter acontecido nem estar em andamento: um bloco preenchido em qualquer momento tem o
-// mesmo conteúdo. Ver clashes() em gs_bands.cpp, que documenta o que isto exige do
+// mesmo conteúdo. Ver clashes() em gs_access.h, que documenta o que isto exige do
 // agendamento das faixas.
 
 #include <atomic>

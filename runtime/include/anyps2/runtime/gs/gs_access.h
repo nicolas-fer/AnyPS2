@@ -98,7 +98,7 @@ bool accessesOverlap(const VramAccess& a, const VramAccess& b);
 //  * toda escrita passe por Gs::bumpPages antes do desenho seguinte (as gerações).
 // Mudar qualquer uma destas regras (por exemplo, deixar uma leitura correr junto com uma
 // escrita do mesmo mapeamento) quebra o cache. O modo ANYPS2_GS_TEXCACHE_VERIFY=1 e os
-// testes de invalidação de test_gs_texel.cpp existem para pegar isso.
+// testes de invalidação de test_gs_texcache.cpp existem para pegar isso.
 bool clashes(const VramAccess& a, const VramAccess& b);
 
 // Acessos desde a última barreira. Escritas com o mesmo mapeamento se fundem

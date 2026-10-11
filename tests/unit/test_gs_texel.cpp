@@ -133,6 +133,7 @@ ClutBuffer* mutableClut(const Gs::TexelProbe& p) {
 static void checkFetchAllFormats(bool cache) {
     setEnv("ANYPS2_GS_THREAD", "0");
     setEnv("ANYPS2_GS_TEXCACHE", cache ? "1" : "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", "");  // o VERIFY liga o cache por conta própria
     Gs g(nullptr);
     CHECK_EQ(g.texCacheEnabled(), cache);
     Lcg r{0x7E8E1ull};
@@ -175,6 +176,7 @@ static void checkFetchAllFormats(bool cache) {
 static void checkFetchCsaCpsmAndClutChange(bool cache) {
     setEnv("ANYPS2_GS_THREAD", "0");
     setEnv("ANYPS2_GS_TEXCACHE", cache ? "1" : "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", "");  // o VERIFY liga o cache por conta própria
     Gs g(nullptr);
     CHECK_EQ(g.texCacheEnabled(), cache);
     Lcg r{0xC1A7ull};

@@ -266,10 +266,12 @@ std::string formatTexCache(const gs::TexCacheReport& cur, const gs::TexCacheRepo
     s += ":";
     const double hits = d(cur.blockHits, prev.blockHits), fills = d(cur.blockFills, prev.blockFills),
                  falls = d(cur.fallbacks, prev.fallbacks);
+    // Cada texel lido cai em um dos três: bloco já pronto (acerto), bloco que ele mesmo
+    // preencheu (falta) ou fora da grade do nível (readPixel direto).
     const double texels = hits + fills + falls;
     std::snprintf(buf, sizeof buf,
-                  " texels: acertos de bloco %.0f (%.1f%%), blocos preenchidos %.1f, fallbacks fora da grade %.0f;",
-                  hits + fills, texels > 0 ? 100.0 * (hits + fills) / texels : 0.0, fills, falls);
+                  " texels: acertos %.0f (%.1f%%), blocos preenchidos %.1f, fora da grade %.0f;",
+                  hits, texels > 0 ? 100.0 * hits / texels : 0.0, fills, falls);
     s += buf;
     std::snprintf(buf, sizeof buf,
                   " desenhos: com cache %.1f, sem cache %.1f; níveis: versões criadas %.1f, reaproveitados %.1f;"

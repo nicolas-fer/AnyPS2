@@ -205,7 +205,7 @@ Frame readBuffer(Gs& gs, std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm
     f.width = width;
     f.height = height;
     f.pixels.resize(std::size_t{width} * height);
-    Vram& v = gs.vram();
+    const Vram& v = static_cast<const Gs&>(gs).vram();  // só lê: o vram() não const invalida o cache
     for (std::uint32_t y = 0; y < height; ++y) {
         for (std::uint32_t x = 0; x < width; ++x) {
             const std::uint32_t raw = v.readPixel(psm, fbp * 32, fbw, x, y);
