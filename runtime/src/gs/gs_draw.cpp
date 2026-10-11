@@ -340,8 +340,11 @@ void Gs::draw(std::uint32_t pc) {
     const std::uint64_t covered = coveredPixels(w, e.type, v0, v1, v2);
     pixels_ += covered;
     coveredTotal_ += covered;
-    ++bandStats_.pixHist[pixBucket(covered)];
-    if (e.tme) ++bandStats_.pixHistTex[pixBucket(covered)];
+    if (HostProfile::enabled()) {
+        const unsigned bucket = pixBucket(covered);
+        ++bandStats_.pixHist[bucket];
+        if (e.tme) ++bandStats_.pixHistTex[bucket];
+    }
     if (e.type > 6) return;  // tipo 7 já foi recusado em vertexKick
     const RowRange rows = drawRows(w, e.type, v0, v1, v2);
     if (rows.empty()) return;  // nada cai dentro do SCISSOR: nada a fazer

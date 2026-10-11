@@ -477,12 +477,11 @@ private:
     // Contadores de textura por faixa (só com ANYPS2_PROFILE; ver TexReport). Cada
     // faixa escreve os seus (carga + store, sem instrução atômica de leitura-
     // modificação-escrita) e o produtor lê de relance; a linha de cache é da faixa.
-    struct LaneTex {
+    struct alignas(64) LaneTex {
         std::atomic<std::uint64_t> fetch[TexReport::FmtCount] = {};
         std::atomic<std::uint64_t> samples{0}, linear{0}, trilinear{0};
         std::atomic<std::uint64_t> sampleTimed{0}, sampleNs{0};
         std::atomic<std::uint64_t> shadeCalls{0}, shadeTimed{0}, shadeNs{0};
-        std::uint64_t pad[3] = {};
     };
     mutable std::array<LaneTex, kMaxLanes> laneTex_{};
     // Paleta já expandida (CLUT + TEXA) da última versão de CLUT vista por cada faixa:
