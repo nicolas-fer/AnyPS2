@@ -205,8 +205,10 @@ private:
     static SyncStats merged();
     static inline bool enabled_ = false;
     static inline bool threaded_ = false;
-    static inline Track tracks_[2];  // 0 = EE, 1 = consumidor do VU1
-    static inline thread_local Track* track_ = &tracks_[0];
+    // Definidos em host_profile.cpp: o GCC não aceita uma variável inline de um tipo aninhado
+    // com inicializadores de membro antes do fim da classe que o contém.
+    static Track tracks_[2];  // 0 = EE, 1 = consumidor do VU1
+    static thread_local Track* track_;
     static inline Clock::time_point start_{};
     static inline std::uint64_t markVblank_ = 0;
     static inline std::atomic<std::int64_t> workerNs_{0};

@@ -9,6 +9,10 @@
 
 namespace anyps2::rt {
 
+HostProfile::Track HostProfile::tracks_[2];
+thread_local HostProfile::Track* HostProfile::track_ = &HostProfile::tracks_[0];
+
+
 void HostProfile::enable() {
     enabled_ = true;
     const std::int64_t now = nowNs();
