@@ -304,6 +304,18 @@ public:
     // enquanto elas desenham) e o histograma de pixels por desenho do produtor.
     TexReport texReport() const;
 
+    // Só para testes (gs_texel): os parâmetros de textura de um desenho, para buscar
+    // um texel sem montar um desenho inteiro.
+    struct TexelProbe {
+        std::uint32_t tbp[7] = {}, tbw[7] = {};
+        std::uint32_t tpsm = 0, tw = 0, th = 0, cpsm = 0, csa = 0;
+        std::shared_ptr<const ClutBuffer> clut;
+        unsigned wms = 0, wmt = 0, minu = 0, maxu = 0, minv = 0, maxv = 0;
+        std::uint32_t ta0 = 0, ta1 = 0;
+        bool aem = false;
+    };
+    std::uint32_t probeTexel(const TexelProbe& p, unsigned level, int u, int v) const;
+
 private:
     friend class GsTrace;
 
@@ -371,6 +383,7 @@ private:
 
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
+    static void fillEnv(DrawEnv& e, const TexelProbe& p);
     void setupEnv(DrawEnv& e, std::uint32_t pc);
     void rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2);
     void drawPoint(const DrawEnv& e, const Vertex& v);
@@ -381,6 +394,8 @@ private:
     void shadePixel(const DrawEnv& e, int x, int y, Fragment& f);
     std::uint32_t sampleTexture(const DrawEnv& e, float u, float v, float lod) const;
     std::uint32_t fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const;
+    std::uint32_t texelRaw(const DrawEnv& e, unsigned level, int u, int v) const;
+    static std::uint32_t expandTexel(const DrawEnv& e, std::uint32_t raw);
 
     // Faixas do GS. Tudo que está abaixo de "faixas" é delas: o EE só mexe nesses
     // campos depois de waitIdle() ou dentro de uma operação global (barreira).

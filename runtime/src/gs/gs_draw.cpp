@@ -483,8 +483,10 @@ void Gs::draw(std::uint32_t pc) {
 // Texturas
 // ---------------------------------------------------------------------------
 
-std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const {
-    if (HostProfile::enabled()) bump(laneTex_[e.lane].fetch[texFmtClass(e.tpsm)]);
+// Palavra crua do texel: o wrap (REPEAT/CLAMP/REGION_*) e a leitura da VRAM no
+// formato da textura, sem CLUT nem TEXA. Separada da expansão para que um cache de
+// texels crus (e a paleta memorizada) possa trocar só a segunda parte.
+std::uint32_t Gs::texelRaw(const DrawEnv& e, unsigned level, int u, int v) const {
     const int w = std::max(1, (1 << e.tw) >> level);
     const int h = std::max(1, (1 << e.th) >> level);
     auto wrap = [](int c, int size, unsigned mode, unsigned mn, unsigned mx, unsigned lvl) {
@@ -498,8 +500,12 @@ std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) con
     u = wrap(u, w, e.wms, e.minu, e.maxu, level);
     v = wrap(v, h, e.wmt, e.minv, e.maxv, level);
     const auto x = static_cast<std::uint32_t>(u) & 2047, y = static_cast<std::uint32_t>(v) & 2047;
-    const std::uint32_t bp = e.tbp[level], bw = e.tbw[level];
-    const std::uint32_t raw = vram_.readPixel(e.tpsm, bp, bw, x, y);
+    return vram_.readPixel(e.tpsm, e.tbp[level], e.tbw[level], x, y);
+}
+
+// Palavra crua -> cor RGBA de 32 bits: TEXA nos formatos sem alfa de 8 bits, CLUT
+// nos indexados.
+std::uint32_t Gs::expandTexel(const DrawEnv& e, std::uint32_t raw) {
     switch (e.tpsm) {
         case PSMCT32: case PSMZ32: return raw;
         case PSMCT24: case PSMZ24: {
@@ -519,6 +525,40 @@ std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) con
             return expand16(e.clut->v[idx & 511], e.ta0, e.ta1, e.aem);
         }
     }
+}
+
+std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const {
+    if (HostProfile::enabled()) bump(laneTex_[e.lane].fetch[texFmtClass(e.tpsm)]);
+    return expandTexel(e, texelRaw(e, level, u, v));
+}
+
+void Gs::fillEnv(DrawEnv& e, const TexelProbe& p) {
+    for (unsigned i = 0; i < 7; ++i) {
+        e.tbp[i] = p.tbp[i];
+        e.tbw[i] = p.tbw[i];
+    }
+    e.tpsm = p.tpsm;
+    e.tw = p.tw;
+    e.th = p.th;
+    e.cpsm = p.cpsm;
+    e.csa = p.csa;
+    e.clut = p.clut;
+    e.wms = p.wms;
+    e.wmt = p.wmt;
+    e.minu = p.minu;
+    e.maxu = p.maxu;
+    e.minv = p.minv;
+    e.maxv = p.maxv;
+    e.ta0 = p.ta0;
+    e.ta1 = p.ta1;
+    e.aem = p.aem;
+}
+
+// Só para testes (gs_texel): monta um DrawEnv só com os campos da textura.
+std::uint32_t Gs::probeTexel(const TexelProbe& p, unsigned level, int u, int v) const {
+    DrawEnv e;
+    fillEnv(e, p);
+    return fetchTexel(e, level, u, v);
 }
 
 std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) const {

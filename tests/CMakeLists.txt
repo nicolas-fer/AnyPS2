@@ -11,6 +11,7 @@ add_executable(anyps2_tests
     unit/test_gs.cpp
     unit/test_gs_coverage.cpp
     unit/test_gs_bands.cpp
+    unit/test_gs_texel.cpp
     unit/test_gs_trace.cpp
     unit/test_ipu.cpp
     unit/test_vu_isa.cpp
@@ -33,7 +34,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_trace ipu vu_isa vu vu_trace iop disc config gsplay)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_texel gs_trace ipu vu_isa vu vu_trace iop disc config gsplay)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
