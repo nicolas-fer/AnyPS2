@@ -88,6 +88,7 @@ void Vu::setPrograms(const VuProgramEntry* programs, std::size_t count) {
 }
 
 void Vu::seedPipeline(const VuPipelineSeed& seed) {
+    syncFlags();  // as entradas já prontas valem antes de a fila ser trocada (fila vazia: nada)
     for (unsigned i = 1; i < 32; ++i) vfReady_[i] = cycle_ + seed.vfBusy[i];
     std::vector<VuPipelineSeed::Flags> flags = seed.flags;
     if (flags.size() > kPending) flags.resize(kPending);
