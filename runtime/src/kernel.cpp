@@ -297,9 +297,11 @@ void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle
         // O INTC_GS (SIGNAL/FINISH/VSINT) vem das respostas do consumidor do VU1/GS: com o consumidor
         // em outra thread, a entrega só vale depois de um fence, senão o instante dela dependeria
         // do escalonamento (mesmo ponto lógico do modo inline, W = 0).
-        rt_.vu1Stream().fence();
-        // Um handler pode gerar novas causas; limita as voltas por segurança.
+        // Um handler pode gerar novas causas; limita as voltas por segurança. O fence vale em
+        // toda volta: um handler pode ter enfileirado um pacote com SIGNAL, e no inline o bit
+        // já estaria ligado na volta seguinte.
         for (int round = 0; round < 8; ++round) {
+            rt_.vu1Stream().fence();
             // INTC_DMAC (1) pertence ao kernel: despacha para os handlers de
             // cada canal com CIS & CIM e limpa o CIS.
             if (intcStat_ & (1u << kIntcDmac)) {
