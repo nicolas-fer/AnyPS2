@@ -733,11 +733,20 @@ void ClutBuffer::resolve() const {
     }
     for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
         const ClutBuffer* c = *it;
+        c->fillLazy();  // versão diferida: lê a VRAM agora (curto, sem esperar ninguém)
         if (c->base) c->v = c->base->v;
         for (const Cell& cell : c->overlay) c->v[cell.pos] = cell.val;
         c->base.reset();
         c->done.store(true, std::memory_order_release);
     }
+}
+
+void ClutBuffer::fillLazy() const {
+    if (!lazyFill || ready.load(std::memory_order_acquire)) return;
+    std::call_once(lazyOnce, [this] {
+        lazyFill(const_cast<ClutBuffer&>(*this));
+        ready.store(true, std::memory_order_release);
+    });
 }
 
 ClutBuffer::~ClutBuffer() {

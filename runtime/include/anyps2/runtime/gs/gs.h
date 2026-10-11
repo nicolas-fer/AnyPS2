@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -88,13 +89,20 @@ struct ClutBuffer {
     // Falso enquanto uma barreira ainda vai preencher a sobreposição (carga que não
     // pôde ler a VRAM no produtor); as faixas a marcam pronta, e só então ela pode
     // ser resolvida fora da ordem das faixas (pelo produtor).
-    std::atomic<bool> ready{true};
+    mutable std::atomic<bool> ready{true};
     // Versão anterior; solta (reset) quando esta é resolvida, para liberar a cadeia.
     mutable std::shared_ptr<const ClutBuffer> base;
     // Células carregadas por esta versão, na ordem da carga (a última vence).
     std::vector<Cell> overlay;
     // Verdadeiro depois de resolve() (com `v` montado e a base solta).
     mutable std::atomic<bool> done{false};
+    // Leitura diferida (carga "coberta", Gs::loadClut): em vez de esperar uma barreira, a
+    // versão guarda como ler a VRAM depois. Quem precisar dela (uma faixa em resolve(), ou a
+    // tarefa que o produtor põe na fila antes da próxima barreira) executa a leitura uma vez
+    // só; `ready` fica falso até lá. Definida antes de a versão ser compartilhada; só vale
+    // enquanto nenhuma escrita conflitante tiver concluído (garantia de quem cria a versão).
+    std::function<void(ClutBuffer&)> lazyFill;
+    mutable std::once_flag lazyOnce;
 
     ClutBuffer() = default;
     ClutBuffer(const ClutBuffer&) = delete;
@@ -106,8 +114,20 @@ struct ClutBuffer {
     void set(std::size_t pos, std::uint16_t val) {
         overlay.push_back(Cell{static_cast<std::uint16_t>(pos), val});
     }
+    // Torna a versão diferida: `fill` preenche a sobreposição (set) quando for chamada, uma
+    // vez só, por qualquer thread. Antes de compartilhar a versão.
+    void makeLazy(std::function<void(ClutBuffer&)> fill) {
+        lazyFill = std::move(fill);
+        ready.store(false, std::memory_order_relaxed);
+    }
+    bool lazy() const { return static_cast<bool>(lazyFill); }
+    // Executa a leitura diferida se ainda não foi feita (no-op para versões diretas ou de
+    // barreira) e marca a versão pronta. Seguro de várias threads; curto e sem espera.
+    void fillLazy() const;
     // Monta `v`. Seguro de várias threads; exige que as sobreposições desta versão e
-    // das anteriores estejam preenchidas (ordem das barreiras, ou `ready`). Iterativo:
+    // das anteriores estejam preenchidas (ordem das barreiras, ou `ready`), exceto as
+    // diferidas: resolve() executa a leitura delas (fillLazy), por isso só quem pode lê-las
+    // naquele instante (as faixas, ou o produtor com tudo pronto) o chama. Iterativo:
     // a cadeia não resolvida pode ter centenas de versões.
     void resolve() const;
 };

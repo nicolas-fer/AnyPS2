@@ -3,6 +3,8 @@
 // (ANYPS2_GS_THREAD=0), byte a byte na VRAM inteira, para qualquer número de
 // faixas; e a contagem analítica tem de continuar batendo com o rasterizador.
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -1941,4 +1943,147 @@ TEST_CASE(gs_bands, block_overlap_distinguishes_blocks_of_the_same_page) {
     w.rectValid = false;  // sem caixa: aproxima por cima
     w.rx0 = 16;
     CHECK(accessesOverlapBlocks(w, c));
+}
+
+// ---------------------------------------------------------------------------
+// ClutBuffer com leitura diferida (fatia 2 do plano de dependência de CLUT): a versão guarda
+// como ler a VRAM depois, e resolve() executa a leitura uma vez só, de baixo para cima.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Cadeia de `n` versões: as de índice par são diretas (células na hora), as ímpares são
+// diferidas (células na primeira leitura). `reads[i]` conta quantas vezes a leitura da versão
+// i rodou. `expect` é a tabela esperada depois de resolver a última.
+struct LazyChain {
+    std::vector<std::shared_ptr<ClutBuffer>> v;
+    std::unique_ptr<std::atomic<unsigned>[]> reads;
+    std::array<std::uint16_t, 512> expect{};
+
+    explicit LazyChain(unsigned n, unsigned lazyEvery = 2) : reads(new std::atomic<unsigned>[n]) {
+        std::shared_ptr<ClutBuffer> prev;
+        for (unsigned i = 0; i < n; ++i) {
+            reads[i].store(0);
+            auto b = std::make_shared<ClutBuffer>();
+            b->base = prev;
+            // Cada versão troca 3 posições (algumas repetem as de versões anteriores).
+            const auto cells = [i](ClutBuffer& dst) {
+                dst.set((i * 7u) % 512, static_cast<std::uint16_t>(0x1000 + i));
+                dst.set((i * 13u + 5u) % 512, static_cast<std::uint16_t>(0x2000 + i));
+                dst.set((i % 16u) * 3u, static_cast<std::uint16_t>(0x3000 + i));
+            };
+            if (lazyEvery != 0 && i % lazyEvery == lazyEvery - 1) {
+                std::atomic<unsigned>* counter = &reads[i];
+                b->makeLazy([cells, counter](ClutBuffer& dst) {
+                    counter->fetch_add(1);
+                    cells(dst);
+                });
+            } else {
+                cells(*b);
+            }
+            // Referência independente da implementação: aplica as células na ordem.
+            expect[(i * 7u) % 512] = static_cast<std::uint16_t>(0x1000 + i);
+            expect[(i * 13u + 5u) % 512] = static_cast<std::uint16_t>(0x2000 + i);
+            expect[(i % 16u) * 3u] = static_cast<std::uint16_t>(0x3000 + i);
+            v.push_back(b);
+            prev = b;
+        }
+    }
+};
+
+}  // namespace
+
+TEST_CASE(gs_bands, lazy_versions_interleaved_with_direct_resolve_in_order) {
+    LazyChain c(9);
+    for (unsigned i = 0; i < 9; ++i) {
+        CHECK_EQ(c.v[i]->lazy(), i % 2 == 1);
+        CHECK_EQ(c.v[i]->ready.load(), i % 2 == 0);
+    }
+    c.v.back()->resolve();
+    CHECK(c.v.back()->v == c.expect);
+    for (unsigned i = 0; i < 9; ++i) {
+        CHECK(c.v[i]->done.load());
+        CHECK(c.v[i]->ready.load());
+        CHECK_EQ(c.reads[i].load(), i % 2 == 1 ? 1u : 0u);
+    }
+    c.v.back()->resolve();  // de novo: nada muda
+    for (unsigned i = 0; i < 9; ++i) CHECK_EQ(c.reads[i].load(), i % 2 == 1 ? 1u : 0u);
+}
+
+TEST_CASE(gs_bands, lazy_fill_runs_once_and_resolve_uses_the_filled_version) {
+    LazyChain c(4);
+    // Uma tarefa de faixa lê antes (fillLazy), depois um desenho resolve: a leitura não repete.
+    c.v[1]->fillLazy();
+    c.v[1]->fillLazy();
+    CHECK(c.v[1]->ready.load());
+    CHECK(!c.v[1]->done.load());
+    CHECK(!c.v[3]->ready.load());
+    c.v[3]->resolve();
+    CHECK_EQ(c.reads[1].load(), 1u);
+    CHECK_EQ(c.reads[3].load(), 1u);
+    CHECK(c.v[3]->v == c.expect);
+    // Versão do meio resolvida antes da de cima: as duas ficam certas.
+    LazyChain d(6);
+    d.v[2]->resolve();
+    std::array<std::uint16_t, 512> mid{};
+    for (unsigned i = 0; i <= 2; ++i) {
+        mid[(i * 7u) % 512] = static_cast<std::uint16_t>(0x1000 + i);
+        mid[(i * 13u + 5u) % 512] = static_cast<std::uint16_t>(0x2000 + i);
+        mid[(i % 16u) * 3u] = static_cast<std::uint16_t>(0x3000 + i);
+    }
+    CHECK(d.v[2]->v == mid);
+    d.v[5]->resolve();
+    CHECK(d.v[5]->v == d.expect);
+    for (unsigned i = 0; i < 6; ++i) CHECK_EQ(d.reads[i].load(), i % 2 == 1 ? 1u : 0u);
+}
+
+TEST_CASE(gs_bands, lazy_resolve_from_many_threads_reads_each_version_once) {
+    for (unsigned rep = 0; rep < 40; ++rep) {
+        LazyChain c(20);
+        std::atomic<bool> go{false};
+        std::vector<std::thread> th;
+        for (unsigned t = 0; t < 8; ++t) {
+            th.emplace_back([&, t] {
+                while (!go.load()) std::this_thread::yield();
+                // Alguns resolvem a última, outros uma do meio ou só leem (fillLazy), como as faixas.
+                if (t % 3 == 0) c.v.back()->resolve();
+                if (t % 3 == 1) c.v[11]->resolve();
+                if (t % 3 == 2) {
+                    for (auto& b : c.v) b->fillLazy();
+                }
+            });
+        }
+        go.store(true);
+        for (auto& x : th) x.join();
+        c.v.back()->resolve();
+        CHECK(c.v.back()->v == c.expect);
+        for (unsigned i = 0; i < 20; ++i) CHECK_EQ(c.reads[i].load(), i % 2 == 1 ? 1u : 0u);
+    }
+}
+
+TEST_CASE(gs_bands, long_lazy_chain_resolves_and_destroys_without_recursion) {
+    {
+        LazyChain c(20000, 3);
+        c.v.back()->resolve();
+        CHECK(c.v.back()->v == c.expect);
+        std::uint64_t reads = 0;
+        for (unsigned i = 0; i < 20000; ++i) reads += c.reads[i].load();
+        CHECK_EQ(reads, 20000u / 3);
+    }
+    {
+        // Cadeia longa nunca resolvida: o destrutor desencadeia em laço (sem estourar a pilha) e
+        // nenhuma leitura diferida roda.
+        auto last = [] {
+            std::shared_ptr<ClutBuffer> prev;
+            for (unsigned i = 0; i < 200000; ++i) {
+                auto b = std::make_shared<ClutBuffer>();
+                b->base = prev;
+                if (i % 2) b->makeLazy([](ClutBuffer& d) { d.set(0, 1); });
+                prev = b;
+            }
+            return prev;
+        }();
+        CHECK(!last->done.load());
+        last.reset();
+    }
 }
