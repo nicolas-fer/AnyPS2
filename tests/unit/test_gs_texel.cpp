@@ -122,6 +122,10 @@ Gs::TexelProbe randomProbe(Lcg& r, std::uint32_t psm) {
     return p;
 }
 
+ClutBuffer* mutableClut(const Gs::TexelProbe& p) {
+    return const_cast<ClutBuffer*>(p.clut.get());
+}
+
 }  // namespace
 
 TEST_CASE(gs_texel, fetch_matches_frozen_copy_all_formats_sizes_and_wraps) {
@@ -201,5 +205,99 @@ TEST_CASE(gs_texel, fetch_matches_frozen_copy_for_every_csa_cpsm_and_clut_change
             }
         }
     }
+    setEnv("ANYPS2_GS_THREAD", "");
+}
+
+namespace {
+
+// Cor de um índice da CLUT pela regra antiga (sem memo).
+std::uint32_t frozenIndexed(const Gs::TexelProbe& e, std::uint32_t raw) {
+    const unsigned idx = e.csa * 16 + raw;
+    if (e.cpsm == PSMCT32) {
+        const unsigned i = idx & 255;
+        return static_cast<std::uint32_t>(e.clut->v[i]) | (static_cast<std::uint32_t>(e.clut->v[i + 256]) << 16);
+    }
+    return frozenExpand16(e.clut->v[idx & 511], e.ta0, e.ta1, e.aem);
+}
+
+}  // namespace
+
+TEST_CASE(gs_texel, palette_matches_expansion_for_every_raw_csa_cpsm_and_texa) {
+    setEnv("ANYPS2_GS_THREAD", "0");
+    Gs g(nullptr);
+    Lcg r{0x9A1E77Eull};
+    std::uint32_t pal[256];
+    for (std::uint32_t cpsm : kCpsms) {
+        for (unsigned csa = 0; csa < 32; ++csa) {
+            for (unsigned aem = 0; aem < 2; ++aem) {
+                for (unsigned n : {16u, 256u}) {
+                    Gs::TexelProbe p = randomProbe(r, PSMT8);
+                    p.cpsm = cpsm;
+                    p.csa = csa;
+                    p.aem = aem != 0;
+                    // Alguns TEXA extremos além dos aleatórios; entradas com cor 0 e com bit 15.
+                    if (csa % 8 == 0) p.ta0 = 0;
+                    if (csa % 8 == 1) p.ta1 = 0x80;
+                    for (auto& x : mutableClut(p)->v) {
+                        if (r.next(8) == 0) x = r.next(2) ? std::uint16_t{0} : std::uint16_t{0x8000};
+                    }
+                    g.probePalette(p, n, pal);
+                    for (unsigned raw = 0; raw < n; ++raw) {
+                        const std::uint32_t want = frozenIndexed(p, raw);
+                        if (pal[raw] != want) {
+                            CHECK_EQ(pal[raw], want);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    setEnv("ANYPS2_GS_THREAD", "");
+}
+
+TEST_CASE(gs_texel, palette_is_rebuilt_only_when_the_key_changes) {
+    setEnv("ANYPS2_GS_THREAD", "0");
+    Gs g(nullptr);
+    Lcg r{0x51ull};
+    std::uint32_t pal[256];
+    Gs::TexelProbe p = randomProbe(r, PSMT8);
+    p.cpsm = PSMCT16;
+    p.csa = 3;
+    g.probePalette(p, 256, pal);
+    const std::uint64_t b0 = g.paletteBuilds();
+    g.probePalette(p, 256, pal);
+    g.probePalette(p, 16, pal);  // T4 cabe na tabela de T8
+    CHECK_EQ(g.paletteBuilds(), b0);
+    p.csa = 4;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 1);
+    p.ta0 ^= 0x40;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 2);
+    p.ta1 ^= 0x40;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 3);
+    p.aem = !p.aem;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 4);
+    p.cpsm = PSMCT32;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 5);
+    // Com CPSM=32 o TEXA não conta.
+    p.ta0 ^= 0x10;
+    p.aem = !p.aem;
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 5);
+    // Outra versão da CLUT (outro ponteiro) reconstrói.
+    p.clut = randomClut(r);
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b0 + 6);
+    // Tabela de 16 entradas, depois pedido de 256: reconstrói.
+    p.csa = 9;
+    g.probePalette(p, 16, pal);
+    const std::uint64_t b1 = g.paletteBuilds();
+    g.probePalette(p, 256, pal);
+    CHECK_EQ(g.paletteBuilds(), b1 + 1);
     setEnv("ANYPS2_GS_THREAD", "");
 }

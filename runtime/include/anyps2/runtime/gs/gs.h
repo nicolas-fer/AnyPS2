@@ -315,6 +315,10 @@ public:
         bool aem = false;
     };
     std::uint32_t probeTexel(const TexelProbe& p, unsigned level, int u, int v) const;
+    // Copia a paleta memorizada (n entradas, 16 ou 256) que a faixa 0 usaria.
+    void probePalette(const TexelProbe& p, unsigned n, std::uint32_t* out) const;
+    // Quantas vezes a paleta da faixa 0 foi reconstruída (para conferir a chave).
+    std::uint64_t paletteBuilds() const { return lanePal_[0].builds; }
 
 private:
     friend class GsTrace;
@@ -384,6 +388,7 @@ private:
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
     static void fillEnv(DrawEnv& e, const TexelProbe& p);
+    const std::uint32_t* palette(const DrawEnv& e, unsigned n) const;
     void setupEnv(DrawEnv& e, std::uint32_t pc);
     void rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const Vertex& v2);
     void drawPoint(const DrawEnv& e, const Vertex& v);
@@ -480,6 +485,19 @@ private:
         std::uint64_t pad[3] = {};
     };
     mutable std::array<LaneTex, kMaxLanes> laneTex_{};
+    // Paleta já expandida (CLUT + TEXA) da última versão de CLUT vista por cada faixa:
+    // 16 entradas (T4) ou 256 (T8). Estado da faixa, sem sincronização (como
+    // laneShaded_); segura a ClutBuffer para o endereço não ser reaproveitado por
+    // outra versão enquanto a chave vale. O modo síncrono usa só a faixa 0.
+    struct LanePal {
+        std::shared_ptr<const ClutBuffer> clut;
+        std::uint32_t cpsm = 0, csa = 0, ta0 = 0, ta1 = 0;
+        bool aem = false;
+        unsigned n = 0;  // entradas válidas (0: vazia)
+        std::uint64_t builds = 0;
+        std::array<std::uint32_t, 256> pal{};
+    };
+    mutable std::array<LanePal, kMaxLanes> lanePal_{};
     std::set<std::string> warned_;
 
     // Diagnóstico: VBlanks recebidos (vblankStart) e o rastreador, nulo sem as

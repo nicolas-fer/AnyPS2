@@ -76,6 +76,13 @@ private:
     std::chrono::steady_clock::time_point t0_{};
 };
 
+bool isT4(std::uint32_t psm) {
+    return psm == PSMT4 || psm == PSMT4HL || psm == PSMT4HH;
+}
+bool isIndexed(std::uint32_t psm) {
+    return psm == PSMT8 || psm == PSMT8H || isT4(psm);
+}
+
 unsigned texFmtClass(std::uint32_t psm) {
     switch (psm) {
         case PSMT4: case PSMT4HL: case PSMT4HH: return TexReport::FmtT4;
@@ -166,6 +173,9 @@ struct Gs::DrawEnv {
     std::uint32_t ta0 = 0, ta1 = 0;
     bool aem = false;
     int fogR = 0, fogG = 0, fogB = 0;
+    // Paleta expandida da faixa (Gs::palette), posta por rasterize depois do resolve da
+    // CLUT; nula fora dos indexados. O desenho em si é const, daí o mutable.
+    mutable const std::uint32_t* pal = nullptr;
 };
 
 struct Gs::Fragment {
@@ -296,8 +306,9 @@ void Gs::rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const V
     // Uma vez por desenho (e por faixa), fora do laço de texels: a versão da CLUT é
     // preguiçosa e as barreiras enfileiradas antes deste desenho já preencheram as
     // sobreposições de que ela depende.
-    if (e.clut && (e.tpsm == PSMT8 || e.tpsm == PSMT4 || e.tpsm == PSMT8H || e.tpsm == PSMT4HL || e.tpsm == PSMT4HH)) {
+    if (e.clut && isIndexed(e.tpsm)) {
         e.clut->resolve();
+        e.pal = palette(e, isT4(e.tpsm) ? 16u : 256u);
     }
     switch (e.type) {
         case 0: drawPoint(e, v0); break;
@@ -527,9 +538,33 @@ std::uint32_t Gs::expandTexel(const DrawEnv& e, std::uint32_t raw) {
     }
 }
 
+// Paleta expandida da faixa para a CLUT deste desenho, reconstruída só quando a chave
+// (versão da CLUT, CPSM, CSA, TEXA/AEM) muda. O TEXA não entra na chave com CPSM=32
+// (a entrada de 32 bits já traz o alfa). Exige a CLUT resolvida.
+const std::uint32_t* Gs::palette(const DrawEnv& e, unsigned n) const {
+    LanePal& m = lanePal_[e.lane];
+    const bool texa = e.cpsm != PSMCT32;
+    const std::uint32_t ta0 = texa ? e.ta0 : 0, ta1 = texa ? e.ta1 : 0;
+    const bool aem = texa && e.aem;
+    if (m.n < n || m.clut != e.clut || m.cpsm != e.cpsm || m.csa != e.csa || m.ta0 != ta0 || m.ta1 != ta1 ||
+        m.aem != aem) {
+        m.clut = e.clut;
+        m.cpsm = e.cpsm;
+        m.csa = e.csa;
+        m.ta0 = ta0;
+        m.ta1 = ta1;
+        m.aem = aem;
+        m.n = n;
+        ++m.builds;
+        for (unsigned i = 0; i < n; ++i) m.pal[i] = expandTexel(e, i);
+    }
+    return m.pal.data();
+}
+
 std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const {
     if (HostProfile::enabled()) bump(laneTex_[e.lane].fetch[texFmtClass(e.tpsm)]);
-    return expandTexel(e, texelRaw(e, level, u, v));
+    const std::uint32_t raw = texelRaw(e, level, u, v);
+    return e.pal ? e.pal[raw] : expandTexel(e, raw);
 }
 
 void Gs::fillEnv(DrawEnv& e, const TexelProbe& p) {
@@ -558,7 +593,15 @@ void Gs::fillEnv(DrawEnv& e, const TexelProbe& p) {
 std::uint32_t Gs::probeTexel(const TexelProbe& p, unsigned level, int u, int v) const {
     DrawEnv e;
     fillEnv(e, p);
+    if (e.clut && isIndexed(e.tpsm)) e.pal = palette(e, isT4(e.tpsm) ? 16u : 256u);
     return fetchTexel(e, level, u, v);
+}
+
+void Gs::probePalette(const TexelProbe& p, unsigned n, std::uint32_t* out) const {
+    DrawEnv e;
+    fillEnv(e, p);
+    const std::uint32_t* pal = palette(e, n);
+    for (unsigned i = 0; i < n; ++i) out[i] = pal[i];
 }
 
 std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) const {
