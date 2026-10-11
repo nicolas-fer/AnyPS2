@@ -115,7 +115,7 @@ public:
     // CSR como o EE o lê em `now` (sem contar como leitura privilegiada).
     std::uint64_t csr(std::uint64_t now);
     std::uint64_t imr();
-    void setImr(std::uint64_t v) { eeState().setImr(v); }
+    void setImr(std::uint64_t v) { fence(); eeState().setImr(v); }
     std::uint32_t readGif(std::uint32_t addr, std::uint32_t pc);
     bool path3Masked();
     // Espelho do EE (sem fence: quem lê estado que o consumidor altera chama fence antes).

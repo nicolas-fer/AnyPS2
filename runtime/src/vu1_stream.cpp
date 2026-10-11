@@ -88,7 +88,10 @@ void Vu1Stream::pushGifReset() {
 void Vu1Stream::writeGsPrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t pc) {
     const std::uint32_t off = addr - 0x12000000u;
     if (off >= 0xF0) {
-        // CSR (sem RESET), IMR e SIGLBLID são estado do EE: vão direto ao espelho, no ponto do EE.
+        // CSR (sem RESET), IMR e SIGLBLID são estado do EE: vão direto ao espelho, no ponto do EE,
+        // depois das respostas dos itens anteriores (senão um SIGNAL antigo reapareceria depois
+        // da limpeza, ou o IMR novo decidiria um evento antigo).
+        fence();
         switch (off & ~0xFu) {
             case 0x1000:
                 if (!(value & gs::kCsrResetMask)) {

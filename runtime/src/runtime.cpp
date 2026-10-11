@@ -84,7 +84,13 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     // direta nas páginas; ANYPS2_VU1_MEMCOUNT=1 liga a contagem dos acessos (medição "vu1 sync").
     vu1Mem_ = std::make_unique<Vu1Memory>(vu_->micro1.get(), vu_->data1.get());
     vu1Mem_->attach(*mem_);
-    vu1Mem_->setFence([](void*) {}, this);
+    vu1Mem_->setFence(
+        [](void* ctx) {
+            // O Vu1Memory existe (e recebe segmentos da imagem) antes do stream.
+            auto* rt = static_cast<Runtime*>(ctx);
+            if (rt->vu1Stream_) rt->vu1Stream_->fence();
+        },
+        this);
     if (const char* c = std::getenv("ANYPS2_VU1_MEMCOUNT"); c && *c && std::string(c) != "0") {
         vu1Mem_->setCounting(true);
         HostProfile::sync().vu1MemCounted = true;
