@@ -805,9 +805,19 @@ Marco 7 — o vídeo de abertura (em andamento):
   `ANYPS2_GS_TEXCACHE_VERIFY`. Na corrida do GT4: correto (VERIFY limpo, 99,8% de
   acertos), mas sem ganho, porque a amostragem custa o mesmo e o custo não está na
   leitura da VRAM. O perfil ganhou as linhas `texels` e `texcache`.
-- A espera do EE na corrida (~35–45%) é quase toda do HOST→LOCAL em conflito com
-  desenhos ainda nas faixas (~5 por VBlank, ~46 ms): próximo passo, levar essa
-  transferência para a fila ordenada das faixas. Mais faixas (8) não ajudam.
+- ✅ HOST→LOCAL em conflito com acessos nas faixas abre em modo fila (palavras num
+  buffer do produtor, escritas por barreira ordenada) em vez de o EE esperar: a espera
+  de ~46 ms/VBlank sumiu. Mais faixas (8) não ajudam.
+- ✅ Exibição assíncrona (`requestDisplay`/`latestDisplay`, `ANYPS2_GS_ASYNC_DISPLAY=0`
+  desliga): o quadro é composto por barreira, no máximo um quadro atrás.
+- ✅ Carga de CLUT coberta sem barreira (`ANYPS2_GS_CLUT_DEP=0` desliga): se nada desde a
+  última barreira escreve na área, a versão é lida sob demanda nas faixas (e por uma
+  tarefa numa faixa, antes da próxima barreira). Barreiras de CLUT na corrida: de
+  ~1100–1300 para ~27 por VBlank. Acessos não concluídos rastreados por página (exato;
+  a lista de 256 perdia o rastro com o produtor mil barreiras à frente).
+- Corrida do GT4: 8–10,5 VBlanks/s; o EE espera o GS só ~7–9% nos trechos de corrida.
+  O caminho crítico passou a ser a thread do EE (VU1 39–51%, GIF 19–23%): próximo
+  passo, VU1/GIF/produtor do GS numa thread própria (plano em `jogos/wf/vu1_plano.txt`).
   O som: ver o marco 8.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
