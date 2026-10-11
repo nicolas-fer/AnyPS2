@@ -799,7 +799,15 @@ Marco 7 — o vídeo de abertura (em andamento):
 - Ferramentas de diagnóstico: `anyps2_gsplay` (reproduz GS dumps do PCSX2),
   `ANYPS2_GS_TEXDUMP`, `ANYPS2_GS_VRAMLOG` (com o PATH de origem), vértices no
   `ANYPS2_GS_DRAWLOG`, `ANYPS2_VU_TRACE`.
-- Próximos passos: medir a velocidade com a máquina livre; o cache de texturas.
+- ✅ Cache de texels crus (`ANYPS2_GS_TEXCACHE=1`, desligado por padrão): versões por
+  textura validadas por gerações de página no produtor, blocos de 256 bytes preenchidos
+  sob demanda pelas faixas, paleta expandida por faixa, modo
+  `ANYPS2_GS_TEXCACHE_VERIFY`. Na corrida do GT4: correto (VERIFY limpo, 99,8% de
+  acertos), mas sem ganho, porque a amostragem custa o mesmo e o custo não está na
+  leitura da VRAM. O perfil ganhou as linhas `texels` e `texcache`.
+- A espera do EE na corrida (~35–45%) é quase toda do HOST→LOCAL em conflito com
+  desenhos ainda nas faixas (~5 por VBlank, ~46 ms): próximo passo, levar essa
+  transferência para a fila ordenada das faixas. Mais faixas (8) não ajudam.
   O som: ver o marco 8.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
