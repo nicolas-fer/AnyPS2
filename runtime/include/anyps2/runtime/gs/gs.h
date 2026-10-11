@@ -125,6 +125,7 @@ struct BandStats {
         SubmitClut,       // carga de CLUT
         SubmitReset,      // reset do GS
         SubmitDraw,       // desenho sozinho
+        SubmitHost,       // palavras de uma HOST→LOCAL em modo fila (hostQueued)
         SubmitCount
     };
     // Esperas do EE pelas faixas (waitIdle).
@@ -134,7 +135,7 @@ struct BandStats {
         WaitDownload,  // LOCAL→HOST
         WaitSignal,    // SIGNAL
         WaitFinish,    // FINISH no relógio real
-        WaitHost,      // HOST→LOCAL: destino com acesso não concluído, ou ordem com um desenho que o lê
+        WaitHost,      // HOST→LOCAL direta: ordem com um desenho que lê/escreve o destino aberto (em modo fila não há espera)
         WaitOther,
         WaitCount
     };
@@ -178,8 +179,13 @@ struct BandStats {
     std::uint64_t submit[SubmitCount] = {};
     std::uint64_t clutDirect = 0;   // cargas de CLUT feitas no produtor, sem barreira
     std::uint64_t hostDirect = 0;   // transferências HOST→LOCAL escritas direto pelo produtor, sem esperar
-    std::uint64_t hostBarrier = 0;  // ...que esperaram as faixas no início (destino com acesso não concluído)
+    std::uint64_t hostBarrier = 0;  // espera no início (destino com acesso não concluído): o modo fila a substituiu, deve ficar em 0
     std::uint64_t hostOrder = 0;    // esperas no meio: palavra nova depois de um desenho que lê/escreve o destino aberto
+    // HOST→LOCAL em modo fila: o destino tinha acesso não concluído nas faixas, então as
+    // palavras vão para um buffer do produtor e uma barreira ordenada as escreve na VRAM.
+    std::uint64_t hostQueued = 0;         // transferências abertas em modo fila
+    std::uint64_t hostQueuedSubmits = 0;  // barreiras de escrita enfileiradas por elas (parciais + final)
+    std::uint64_t hostQueuedWords = 0;    // palavras de 64 bits levadas por essas barreiras
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -433,8 +439,16 @@ private:
     void noteOutstanding(VramAccess a);
     // Há acesso não concluído que colide com `a` (ou a lista perdeu o rastro).
     bool outstandingConflicts(const VramAccess& a);
-    // Fim da transferência HOST→LOCAL aberta (o produtor já escreveu tudo na VRAM).
+    // Fim da transferência HOST→LOCAL aberta: em modo direto o produtor já escreveu tudo
+    // na VRAM; em modo fila submete o que falta (flushHostQueue).
     void closeHostTransfer();
+    // Modo fila: enfileira como barreira as palavras guardadas desde a última submissão (a
+    // transferência segue aberta). Depois dela a VRAM, para quem vier na fila, tem tudo o
+    // que o programa enviou até aqui. Sem palavras guardadas não faz nada.
+    void flushHostQueue();
+    // Modo fila: submete antes de uma operação que toca `acc` (n acessos) e precisa ver as
+    // palavras já enviadas, ou não pode ser sobrescrita por elas fora de ordem.
+    void flushHostQueueIfTouches(const VramAccess* acc, unsigned n);
     VramAccess rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x0,
                           std::uint32_t y0, std::uint32_t w, std::uint32_t h) const;
     VramAccess clutSource(std::uint64_t tex0, std::uint64_t texclut) const;
@@ -487,11 +501,22 @@ private:
     // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita
     // em andamento enquanto o produtor ainda pode enviar dados.
     bool hostOpenValid_ = false;
-    bool hostDrain_ = false;  // há operação enfileirada que toca o destino aberto: esperar antes da próxima palavra
+    bool hostDrain_ = false;  // (modo direto) há operação enfileirada que toca o destino aberto: esperar antes da próxima palavra
+    // Modo fila (só com worker em thread): o destino tinha acesso não concluído quando a
+    // transferência abriu, então as palavras NÃO vão à VRAM no produtor: ficam em hostWords_
+    // e flushHostQueue as passa a uma barreira que roda hostWord sobre hostQueuedXfer_ (o
+    // estado da transferência, de posse das barreiras: o produtor só o cria). Operações do
+    // produtor que tocam o destino submetem antes (flushHostQueueIfTouches, waitIdle), então
+    // as enfileiradas depois veem a VRAM com as palavras já enviadas e as enfileiradas antes
+    // não. Nunca há hostDrain_ neste modo.
+    bool hostQueued_ = false;
+    std::vector<std::uint64_t> hostWords_;
+    std::shared_ptr<Transfer> hostQueuedXfer_;
     VramAccess hostOpen_;
     std::uint64_t hostWordsLeft_ = 0;
     // Um desenho fixou uma versão de textura cujas páginas cruzam o destino aberto: a
-    // próxima palavra incrementa as páginas do destino antes de escrever (senão um
+    // próxima palavra (modo direto) ou a próxima submissão do buffer (modo fila,
+    // flushHostQueue) incrementa as páginas do destino antes de escrever (senão um
     // desenho posterior acertaria numa versão com o conteúdo parcial). A marca vale
     // pelo alcance de leitura do desenho (reads[] de draw: o que ele pode preencher),
     // não pela grade inteira da versão. Basta: um bloco do cache cabe numa página lógica

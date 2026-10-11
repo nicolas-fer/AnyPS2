@@ -128,7 +128,7 @@ std::string topPairs(const BandStats::PairTable& cur, const BandStats::PairTable
 // `per`: divisor das contagens (VBlanks do trecho; 1 no total).
 std::string formatBands(const BandStats& cur, const BandStats& prev, double per, const char* unit) {
     auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
-    char buf[512];  // texto em UTF-8 com setas de 3 bytes e muitos campos: folga para não cortar
+    char buf[640];  // texto em UTF-8 com setas de 3 bytes e muitos campos: folga para não cortar
     std::string s = "[perfil] faixas";
     s += unit;
     s += ":";
@@ -147,11 +147,12 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
     std::snprintf(buf, sizeof buf,
                   " barreiras de submit: LOCAL→LOCAL %.1f, CLUT %.1f, reset %.1f, desenho %.1f;"
                   " CLUT sem barreira %.1f; HOST→LOCAL direto: sem espera %.1f, espera no início %.1f, "
-                  "espera de ordem %.1f;",
+                  "espera de ordem %.1f; HOST→LOCAL na fila: transferências %.1f, submissões %.1f;",
                   d(cur.submit[0], prev.submit[0]), d(cur.submit[1], prev.submit[1]), d(cur.submit[2], prev.submit[2]),
                   d(cur.submit[3], prev.submit[3]), d(cur.clutDirect, prev.clutDirect),
                   d(cur.hostDirect, prev.hostDirect), d(cur.hostBarrier, prev.hostBarrier),
-                  d(cur.hostOrder, prev.hostOrder));
+                  d(cur.hostOrder, prev.hostOrder), d(cur.hostQueued, prev.hostQueued),
+                  d(cur.hostQueuedSubmits, prev.hostQueuedSubmits));
     s += buf;
     static const char* kWait[BandStats::WaitCount] = {"vídeo", "vram()", "LOCAL→HOST", "SIGNAL", "FINISH", "HOST→LOCAL", "outros"};
     s += " esperas do EE (n, ms):";

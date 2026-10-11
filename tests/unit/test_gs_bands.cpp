@@ -921,14 +921,14 @@ TEST_CASE(gs_bands, host_uploads_are_identical_for_any_lane_count) {
     bool any = false;
     for (std::uint8_t b : ref.img.vram) any = any || b != 0;
     CHECK(any);
-    // Todo upload é direto (o produtor escreve na VRAM), com ou sem espera das faixas.
+    // Todo upload é direto (o produtor escreve na VRAM) ou, com acesso pendente no destino, em fila.
     CHECK_EQ(ref.stats.hostDirect, 12u * 5 + 1);
     CHECK_EQ(ref.stats.hostBarrier + ref.stats.hostOrder, 0u);  // sem thread não há o que esperar
     for (unsigned rep = 0; rep < 5; ++rep) {
         for (unsigned lanes : {2u, 3u, 4u}) {
             const UploadRender got = renderUploads(true, lanes);
             CHECK(got.img.vram == ref.img.vram);
-            CHECK_EQ(got.stats.hostDirect + got.stats.hostBarrier, ref.stats.hostDirect);
+            CHECK_EQ(got.stats.hostDirect + got.stats.hostBarrier + got.stats.hostQueued, ref.stats.hostDirect);
             CHECK_EQ(got.img.shaded, got.img.covered);
         }
     }
@@ -1002,11 +1002,13 @@ TEST_CASE(gs_bands, texture_cache_upload_keeps_clut_loads_barrier_free) {
             const UploadRender got = renderTextureCache(true, lanes);
             CHECK(got.img.vram == ref.img.vram);
             CHECK_EQ(got.img.shaded, got.img.covered);
-            // Direta, com ou sem espera pelas faixas no início (depende do tempo).
-            CHECK_EQ(got.stats.hostDirect + got.stats.hostBarrier, 11u);
-            // O upload não fica pendente nas faixas: nenhuma carga de CLUT precisa de barreira.
-            CHECK_EQ(got.stats.submit[BandStats::SubmitClut], 0u);
-            CHECK_EQ(got.stats.clutDirect, ref.stats.clutDirect);
+            // Direta ou em fila, nunca com espera no início (depende do tempo).
+            CHECK_EQ(got.stats.hostDirect + got.stats.hostQueued, 11u);
+            CHECK_EQ(got.stats.hostBarrier, 0u);
+            // Direta, o upload não fica pendente nas faixas e nenhuma carga de CLUT precisa de
+            // barreira; em fila, a escrita pendente da área faz algumas virarem barreira.
+            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+            if (got.stats.hostQueued == 0) CHECK_EQ(got.stats.submit[BandStats::SubmitClut], 0u);
         }
     }
 }
@@ -1222,7 +1224,7 @@ TEST_CASE(gs_bands, host_upload_away_from_pending_pages_has_no_barrier) {
     CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
 }
 
-TEST_CASE(gs_bands, upload_over_pending_readers_waits_once_then_writes_direct) {
+TEST_CASE(gs_bands, upload_over_pending_readers_is_queued_without_waiting) {
     StatsGs t;
     Gs& g = *t.gs;
     // Leitores pendentes da área (textura da página 40), todos grandes para seguirem nas faixas.
@@ -1230,8 +1232,9 @@ TEST_CASE(gs_bands, upload_over_pending_readers_waits_once_then_writes_direct) {
     for (unsigned i = 0; i < 20; ++i) sprite(g, 0, 0, 100, 63, true);
     hostToLocal(g, 40 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
     const BandStats& s = g.bandStats();
-    // Uma espera no início (ou nenhuma, se as faixas já tinham terminado), nunca lotes.
-    CHECK_EQ(s.hostDirect + s.hostBarrier, 1u);
+    // Em fila (ou direta, se as faixas já tinham terminado): o EE não espera no início.
+    CHECK_EQ(s.hostDirect + s.hostQueued, 1u);
+    CHECK_EQ(s.hostBarrier, 0u);
     CHECK(s.hostOrder == 0u);
     CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
 }
@@ -1265,4 +1268,287 @@ TEST_CASE(gs_bands, clut_barrier_load_does_not_cascade_into_next_loads) {
         CHECK(s.submit[BandStats::SubmitClut] - before <= 1u);
         CHECK_EQ(s.clutDirect + s.submit[BandStats::SubmitClut], 4u);
     }
+}
+
+// ---------------------------------------------------------------------------
+// HOST→LOCAL em modo fila: o destino tem acesso não concluído nas faixas, então a
+// transferência não faz o EE esperar; as palavras viram uma barreira ordenada. O
+// resultado (VRAM inteira e o que o LOCAL→HOST devolve) tem de ser o do modo síncrono.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint32_t kQT = 40 * 32;  // textura/destino PSMCT32 de 64x64 (páginas 40 e 41)
+
+struct QueueRun {
+    Render img;
+    BandStats stats;
+    std::vector<std::uint8_t> download;
+    std::uint64_t mismatches = 0;
+};
+
+void queueSetup(Gs& g) {
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    g.writeRegister(COLCLAMP, 1, 0);
+    g.writeRegister(ALPHA_1, 0 | (2ull << 2) | (1ull << 6) | (0x80ull << 32), 0);  // Cs·As + Cd
+}
+
+// Sprites com alfa (a ordem importa) sobre um retângulo w x h do buffer (fbp em páginas).
+void queueBusy(Gs& g, unsigned fbp, unsigned fbw, unsigned w, unsigned h, unsigned n, unsigned salt) {
+    g.writeRegister(FRAME_1, frameReg(fbp, fbw, PSMCT32), 0);
+    g.writeRegister(PRIM, prim(6, false, false, true), 0);
+    for (unsigned i = 0; i < n; ++i) {
+        const std::uint64_t c =
+            rgbaq(40 + (i * 29 + salt * 7) % 200, (i * 13 + salt) % 256, 90 + salt % 50, 0x28 + i % 16);
+        vertex(g, 0, 0, c);
+        vertex(g, w, h, c);
+    }
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+}
+
+// Sprite opaco que lê a textura de 64x64 em `tbp` e escreve no FRAME 0.
+void queueTexSprite(Gs& g, std::uint32_t tbp, unsigned k) {
+    g.writeRegister(TEX0_1, tex0(tbp, 1, PSMCT32, 6, 6), 0);
+    g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+    vertex(g, 2 + k % 7, 5 + k % 5, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+    vertex(g, 70 + k % 7, 90 + k % 9, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+}
+
+// Sprite que lê a textura PSMT8 em kQT com a CLUT de `cbp` (CLD = 1: carrega a CLUT).
+void queueClutSprite(Gs& g, std::uint32_t cbp, unsigned k) {
+    g.writeRegister(TEX0_1, tex0(kQT, 1, PSMT8, 6, 6, cbp, PSMCT32, 1), 0);
+    g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+    vertex(g, 1 + k % 5, 4 + k % 3, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+    vertex(g, 90 + k % 5, 100 + k % 3, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+}
+
+void queueBegin(Gs& g, std::uint32_t dbp, std::uint32_t dbw, std::uint32_t psm, std::uint32_t x, std::uint32_t y,
+                std::uint32_t w, std::uint32_t h) {
+    g.writeRegister(BITBLTBUF, (std::uint64_t{dbp} << 32) | (std::uint64_t{dbw} << 48) | (std::uint64_t{psm} << 56), 0);
+    g.writeRegister(TRXPOS, (std::uint64_t{x} << 32) | (std::uint64_t{y} << 48), 0);
+    g.writeRegister(TRXREG, w | (std::uint64_t{h} << 32), 0);
+    g.writeRegister(TRXDIR, 0, 0);
+}
+
+void queueSend(Gs& g, const std::vector<std::uint64_t>& v, std::size_t from, std::size_t to) {
+    for (std::size_t i = from; i < to; ++i) g.writeRegister(HWREG, v[i], 0);
+}
+
+// LOCAL→HOST do retângulo; os bytes entregues vão para `out`.
+void queueDownload(Gs& g, std::vector<std::uint8_t>& out, std::uint32_t sbp, std::uint32_t sbw, std::uint32_t psm,
+                   std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) {
+    g.writeRegister(BITBLTBUF, std::uint64_t{sbp} | (std::uint64_t{sbw} << 16) | (std::uint64_t{psm} << 24), 0);
+    g.writeRegister(TRXPOS, (std::uint64_t{x}) | (std::uint64_t{y} << 16), 0);
+    g.writeRegister(TRXREG, w | (std::uint64_t{h} << 32), 0);
+    g.writeRegister(TRXDIR, 1, 0);
+    const std::size_t q = g.downloadRemaining();
+    const std::size_t at = out.size();
+    out.resize(at + q * 16);
+    g.readDownload(out.data() + at, q);
+}
+
+std::vector<std::uint64_t> queueWords(Lcg& r, unsigned n) {
+    std::vector<std::uint64_t> v;
+    for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+    return v;
+}
+
+enum QueueScenario : unsigned {
+    QsReaderSeesOld,      // desenhos pendentes que lêem o destino veem a VRAM antiga
+    QsWriterThenHost,     // desenhos pendentes que escrevem o destino: o HOST fica por cima
+    QsDrawMidTransfer,    // desenhos no meio da transferência: leitor e escritor do destino
+    QsClutAfterHost,      // carga de CLUT do destino logo depois (e no meio) do HOST em fila
+    QsDownloadAfterHost,  // LOCAL→HOST logo depois (e no meio) do HOST em fila
+    QsCopyAfterHost,      // LOCAL→LOCAL do destino no meio de um HOST em fila
+    QsHostOverHost,       // HOST em fila sobre HOST em fila (mesma área)
+    QsCount
+};
+
+QueueRun renderQueue(QueueScenario sc, bool threaded, unsigned lanes, bool texCache) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    setEnv("ANYPS2_GS_TEXCACHE", texCache ? "1" : "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", texCache ? "1" : "");
+    Gs g(nullptr);
+    setEnv("ANYPS2_GS_TEXCACHE", "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", "");
+    g.setTexVerifyAbort(false);
+    CHECK_EQ(g.threaded(), threaded);
+    queueSetup(g);
+    Lcg r{0x5EED0000u + sc};
+    QueueRun out;
+    constexpr unsigned kRounds = 6;
+    constexpr unsigned kPending = 14;
+    if (sc == QsClutAfterHost) {
+        queueBegin(g, kQT, 1, PSMT8, 0, 0, 64, 64);  // índices da textura PSMT8
+        const auto idx = queueWords(r, 512);
+        queueSend(g, idx, 0, idx.size());
+    } else {
+        queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);  // textura inicial: nada pendente ainda
+        const auto w = queueWords(r, 2048);
+        queueSend(g, w, 0, w.size());
+    }
+    for (unsigned k = 0; k < kRounds; ++k) {
+        switch (sc) {
+            case QsReaderSeesOld: {
+                for (unsigned i = 0; i < kPending; ++i) queueTexSprite(g, kQT, k + i);
+                const auto w = queueWords(r, 2048);
+                queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                queueSend(g, w, 0, w.size());
+                queueTexSprite(g, kQT, k);  // vê a textura nova
+                break;
+            }
+            case QsWriterThenHost: {
+                queueBusy(g, 40, 1, 64, 64, kPending, k);  // escreve o destino (pendente)
+                const auto w = queueWords(r, 512);
+                queueBegin(g, kQT, 1, PSMCT32, 8 + k, 8, 32, 32);  // retângulo no meio
+                queueSend(g, w, 0, w.size());
+                queueTexSprite(g, kQT, k);
+                break;
+            }
+            case QsDrawMidTransfer: {
+                for (unsigned i = 0; i < kPending; ++i) queueTexSprite(g, kQT, k + i);
+                const auto w = queueWords(r, 2048);
+                queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                queueSend(g, w, 0, 700);
+                queueTexSprite(g, kQT, k + 1);      // lê: só as primeiras 700 palavras são novas
+                queueSend(g, w, 700, 1400);
+                queueBusy(g, 40, 1, 64, 40, 3, k);  // escreve o destino no meio da transferência
+                queueSend(g, w, 1400, w.size());    // o resto vai por cima do desenho
+                queueTexSprite(g, kQT, k + 2);
+                break;
+            }
+            case QsClutAfterHost: {
+                queueBusy(g, 48, 1, 63, 31, kPending, k);  // escreve a página da CLUT
+                const auto c1 = queueWords(r, 128), c2 = queueWords(r, 128);
+                queueBegin(g, 48 * 32, 1, PSMCT32, 0, 0, 16, 16);
+                queueSend(g, c1, 0, c1.size());
+                queueClutSprite(g, 48 * 32, k);  // carga logo depois do HOST em fila
+                queueBusy(g, 48, 1, 63, 31, kPending, k + 9);
+                queueBegin(g, 48 * 32, 1, PSMCT32, 0, 0, 16, 16);
+                queueSend(g, c2, 0, 64);  // metade
+                queueClutSprite(g, 48 * 32, k + 1);
+                queueSend(g, c2, 64, c2.size());  // o resto
+                queueClutSprite(g, 48 * 32, k + 2);
+                break;
+            }
+            case QsDownloadAfterHost: {
+                queueBusy(g, 40, 1, 64, 64, kPending, k);
+                const auto w = queueWords(r, 2048);
+                queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                queueSend(g, w, 0, 1000);
+                queueDownload(g, out.download, kQT, 1, PSMCT32, 0, 0, 64, 40);  // só as 1000 primeiras são novas
+                queueSend(g, w, 1000, w.size());
+                queueDownload(g, out.download, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                break;
+            }
+            case QsCopyAfterHost: {
+                queueBusy(g, 40, 1, 64, 64, kPending, k);
+                const auto w = queueWords(r, 2048);
+                queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                queueSend(g, w, 0, 900);
+                // LOCAL→LOCAL do destino (PSMCT32 64 px) para o FRAME 0, no meio da transferência.
+                g.writeRegister(BITBLTBUF, std::uint64_t{kQT} | (1ull << 16) | (std::uint64_t{PSMCT32} << 24) |
+                                               (0ull << 32) | (2ull << 48) | (std::uint64_t{PSMCT32} << 56),
+                                0);
+                g.writeRegister(TRXPOS, std::uint64_t{8} | (std::uint64_t{4} << 16) | (std::uint64_t{20 + k} << 32) |
+                                            (std::uint64_t{30} << 48),
+                                0);
+                g.writeRegister(TRXREG, 40 | (std::uint64_t{50} << 32), 0);
+                g.writeRegister(TRXDIR, 2, 0);
+                queueSend(g, w, 900, w.size());
+                queueTexSprite(g, kQT, k);
+                break;
+            }
+            case QsHostOverHost: {
+                queueBusy(g, 40, 1, 64, 64, kPending, k);
+                const auto a = queueWords(r, 2048), b = queueWords(r, 512);
+                queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+                queueSend(g, a, 0, a.size());
+                queueBegin(g, kQT, 1, PSMCT32, 16, 16, 32, 32);  // por cima da anterior, ainda na fila
+                queueSend(g, b, 0, b.size());
+                queueTexSprite(g, kQT, k);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    out.stats = g.bandStats();
+    out.mismatches = g.texVerifyMismatches();
+    out.img = capture(g);
+    return out;
+}
+
+void checkQueueScenario(QueueScenario sc, bool texCache) {
+    const QueueRun ref = renderQueue(sc, false, 1, false);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    CHECK_EQ(ref.stats.hostQueued, 0u);  // sem thread não há acesso pendente
+    std::uint64_t queued = 0;
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {1u, 2u, 4u}) {
+            const QueueRun got = renderQueue(sc, true, lanes, texCache);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK(got.download == ref.download);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+            CHECK_EQ(got.mismatches, 0u);
+            // Nenhuma espera no início: ou direta, ou em fila.
+            CHECK_EQ(got.stats.hostBarrier, 0u);
+            CHECK_EQ(got.stats.hostDirect + got.stats.hostQueued, ref.stats.hostDirect);
+            queued += got.stats.hostQueued;
+        }
+    }
+    CHECK(queued > 0);  // o modo fila foi exercitado
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, host_queue_pending_reader_sees_old_vram) { checkQueueScenario(QsReaderSeesOld, false); }
+TEST_CASE(gs_bands, host_queue_over_pending_writer_ends_on_top) { checkQueueScenario(QsWriterThenHost, false); }
+TEST_CASE(gs_bands, host_queue_draws_in_the_middle_see_only_sent_words) { checkQueueScenario(QsDrawMidTransfer, false); }
+TEST_CASE(gs_bands, host_queue_clut_load_right_after) { checkQueueScenario(QsClutAfterHost, false); }
+TEST_CASE(gs_bands, host_queue_local_to_host_right_after) { checkQueueScenario(QsDownloadAfterHost, false); }
+TEST_CASE(gs_bands, host_queue_local_to_local_in_the_middle) { checkQueueScenario(QsCopyAfterHost, false); }
+TEST_CASE(gs_bands, host_queue_over_host_queue) { checkQueueScenario(QsHostOverHost, false); }
+
+TEST_CASE(gs_bands, host_queue_with_texture_cache_verify) {
+    for (unsigned sc = 0; sc < QsCount; ++sc) checkQueueScenario(static_cast<QueueScenario>(sc), true);
+}
+
+TEST_CASE(gs_bands, host_queue_counts_transfers_and_submits) {
+    // Leitores pendentes do destino fazem a transferência abrir em fila; partida em duas por
+    // um desenho que a lê, vira duas submissões.
+    bool seen = false;
+    for (unsigned rep = 0; rep < 20 && !seen; ++rep) {
+        StatsGs t;
+        Gs& g = *t.gs;
+        Lcg r{0xC0FFEE};
+        queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+        const auto w0 = queueWords(r, 2048);
+        queueSend(g, w0, 0, w0.size());
+        g.waitIdle();
+        for (unsigned i = 0; i < 40; ++i) queueTexSprite(g, kQT, i);
+        const auto w = queueWords(r, 2048);
+        queueBegin(g, kQT, 1, PSMCT32, 0, 0, 64, 64);
+        queueSend(g, w, 0, 1024);
+        queueTexSprite(g, kQT, 1);
+        queueSend(g, w, 1024, w.size());
+        const BandStats& s = g.bandStats();
+        if (s.hostQueued == 0) continue;
+        seen = true;
+        CHECK_EQ(s.hostQueued, 1u);
+        CHECK_EQ(s.hostQueuedSubmits, 2u);
+        CHECK_EQ(s.hostQueuedWords, 2048u);
+        CHECK_EQ(s.submit[BandStats::SubmitHost], 2u);
+        CHECK_EQ(s.hostBarrier, 0u);
+        CHECK_EQ(g.vram().read32(Vram::byteAddress32(kQT, 1, 0, 0)), static_cast<std::uint32_t>(w[0]));
+    }
+    CHECK(seen);
 }

@@ -151,7 +151,9 @@ bool Gs::outstandingConflicts(const VramAccess& a) {
 }
 
 void Gs::noteHostHazard(const VramAccess* acc, unsigned n) {
-    if (!hostOpenValid_ || hostDrain_) return;
+    // Em modo fila quem toca o destino já submeteu as palavras antes de ser enfileirado
+    // (flushHostQueueIfTouches), e as próximas vão para uma barreira posterior a ele.
+    if (!hostOpenValid_ || hostDrain_ || hostQueued_) return;
     for (unsigned i = 0; i < n; ++i) {
         if (accessesOverlap(hostOpen_, acc[i])) {
             // A operação já está nas faixas e as palavras que faltam ainda não foram
@@ -166,8 +168,44 @@ void Gs::noteHostHazard(const VramAccess* acc, unsigned n) {
     }
 }
 
+void Gs::flushHostQueue() {
+    if (hostWords_.empty()) return;
+    if (hostGenDirty_) {
+        // Um desenho fixou uma versão de textura sobre o destino depois da última escrita
+        // (ou do início): as palavras desta barreira mudam o que ele leu, então os desenhos
+        // seguintes (que entram depois dela na fila) precisam de uma geração nova.
+        hostGenDirty_ = false;
+        bumpPages(hostOpen_.pages, WkHost);
+    }
+    // O destino todo conta como escrita não concluída até a barreira rodar: cargas de CLUT
+    // e transferências seguintes que o tocam viram barreira/fila em vez de ler VRAM velha.
+    noteOutstanding(hostOpen_);
+    auto words = std::make_shared<std::vector<std::uint64_t>>();
+    words->swap(hostWords_);
+    ++bandStats_.hostQueuedSubmits;
+    bandStats_.hostQueuedWords += words->size();
+    const std::shared_ptr<Transfer> xfer = hostQueuedXfer_;
+    submit([this, words, xfer] {
+        for (const std::uint64_t w : *words) hostWord(*xfer, w);
+    }, BandStats::SubmitHost);
+}
+
+void Gs::flushHostQueueIfTouches(const VramAccess* acc, unsigned n) {
+    if (!hostQueued_ || hostWords_.empty()) return;
+    for (unsigned i = 0; i < n; ++i) {
+        if (accessesOverlap(hostOpen_, acc[i])) {
+            flushHostQueue();
+            return;
+        }
+    }
+}
+
 void Gs::closeHostTransfer() {
-    // Tudo o que foi enviado já está na VRAM (modo direto): não há nada a concluir.
+    // Modo direto: tudo o que foi enviado já está na VRAM, não há nada a concluir. Modo
+    // fila: o que ainda está no buffer vai agora para a fila das faixas.
+    flushHostQueue();
+    hostQueued_ = false;
+    hostQueuedXfer_.reset();
     hostOpenValid_ = false;
     hostDrain_ = false;
     hostGenDirty_ = false;  // sem palavras novas, a versão fixada continua certa
@@ -212,6 +250,9 @@ VramAccess Gs::rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::
 }
 
 void Gs::waitIdle(BandStats::WaitReason why) {
+    // Quem espera as faixas vai ler a VRAM (ou precisa dela em ordem): as palavras de uma
+    // HOST→LOCAL em modo fila que o programa já enviou têm de estar na fila antes.
+    flushHostQueue();
     // Depois da espera nada está pendente nas faixas: os acessos de desenhos já
     // enfileirados não podem mais colidir com a ordem de uma transferência aberta.
     hostDrain_ = false;
@@ -544,6 +585,7 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
     // Senão a carga vira uma operação global, que lê as células na faixa.
     const std::uint64_t texclut = regs_[TEXCLUT];
     const VramAccess src = clutSource(tex0, texclut);
+    flushHostQueueIfTouches(&src, 1);  // a carga tem de ver as palavras já enviadas (modo fila)
     auto next = std::make_shared<ClutBuffer>();
     next->base = clut_;
     if (!outstandingConflicts(src)) {
@@ -717,33 +759,41 @@ void Gs::startTransfer(std::uint32_t pc) {
             if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
             if (t.w == 0 || t.h == 0) t.active = false;
             if (trace_ && t.active) trace_->vramHostStart(*this, t, pc);
-            // O produtor escreve as palavras direto na VRAM, na hora (writeTransferData),
-            // sem passar pelas faixas. Isso só vale se nenhum acesso ainda não concluído das
-            // faixas (desenho que lê ou escreve, cópia, CLUT) toca o destino: se toca, uma
-            // única espera (waitIdle) termina o que está pendente e a transferência segue
-            // direta do mesmo jeito, em vez de ir em lotes pelas faixas, o que deixava o
-            // destino como escrita pendente e fazia cada carga de CLUT seguinte esperar.
+            // Sem conflito, o produtor escreve as palavras direto na VRAM, na hora
+            // (writeTransferData), sem passar pelas faixas. Isso só vale se nenhum acesso
+            // ainda não concluído das faixas (desenho que lê ou escreve, cópia, CLUT, escrita
+            // de outra transferência em fila) toca o destino. Se toca, o EE não espera: a
+            // transferência abre em MODO FILA. As palavras ficam num buffer do produtor e
+            // viram uma barreira ordenada (flushHostQueue), que só roda quando as faixas
+            // terminaram tudo o que veio antes dela; o que o programa enfileira depois vê a
+            // VRAM já escrita, e o que foi enfileirado antes não a vê, como no hardware.
             //
-            // Desenhos enfileirados depois que tocam o destino aberto veem só as palavras já
-            // escritas se as faixas terminarem antes da palavra seguinte (noteHostHazard).
-            // O modo em lotes não existe mais: o produtor sempre pode esperar, então não há
-            // caso (nem transferência partida) que precise dele.
-            closeHostTransfer();
-            xferDirect_.active = false;  // a anterior, se ainda aberta, é substituída
+            // Direto: desenhos enfileirados depois que tocam o destino aberto veem só as
+            // palavras já escritas se as faixas terminarem antes da palavra seguinte
+            // (noteHostHazard). Fila: quem toca o destino submete o buffer antes de entrar na
+            // fila (flushHostQueueIfTouches). Sem worker em thread nada fica pendente, então
+            // o modo é sempre direto.
+            closeHostTransfer();  // a anterior, se ainda aberta, é substituída (e submetida)
+            xferDirect_ = Transfer{};
             if (t.active) {
                 const VramAccess dest = rectAccess(true, t.psm, t.dbp, t.dbw, t.x0, t.y0, t.w, t.h);
-                if (outstandingConflicts(dest)) {
-                    ++bandStats_.hostBarrier;
-                    waitIdle(BandStats::WaitHost);
+                hostWordsLeft_ = (std::uint64_t{t.w} * t.h * psmTransferBits(t.psm) + 63) / 64;
+                if (worker_->threaded() && outstandingConflicts(dest)) {
+                    ++bandStats_.hostQueued;
+                    hostQueued_ = true;
+                    hostQueuedXfer_ = std::make_shared<Transfer>(t);
+                    hostWords_.clear();
+                    hostWords_.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(hostWordsLeft_, 1u << 16)));
                 } else {
                     ++bandStats_.hostDirect;
+                    xferDirect_ = t;
                 }
+                // Início da escrita, na ordem do programa; em modo fila cada submissão com um
+                // desenho que fixou uma versão de textura sobre o destino muda de novo (flushHostQueue).
                 bumpPages(dest.pages, WkHost);
                 hostOpen_ = dest;
-                hostWordsLeft_ = (std::uint64_t{t.w} * t.h * psmTransferBits(t.psm) + 63) / 64;
                 hostOpenValid_ = true;
             }
-            xferDirect_ = t;
             return;
         }
         case 1:
@@ -762,7 +812,16 @@ void Gs::startTransfer(std::uint32_t pc) {
 void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
     (void)pc;
     addWork(1);  // 64 bits: meio ciclo do barramento
+    // Com ANYPS2_GS_VRAMLOG o início e o fim da transferência são registrados aqui, no
+    // produtor, na ordem do programa, também em modo fila (a escrita real vem depois).
     if (trace_) trace_->vramHostWord(*this);
+    if (hostQueued_) {
+        // Modo fila: a palavra só vai à VRAM pela barreira (flushHostQueue). Depois do fim da
+        // transferência (hostQueued_ cai em closeHostTransfer) as sobras são descartadas.
+        hostWords_.push_back(data);
+        if (--hostWordsLeft_ == 0) closeHostTransfer();
+        return;
+    }
     if (hostDrain_) {
         // Há um desenho (ou cópia, CLUT) nas faixas que toca o destino: ele vê só as
         // palavras anteriores a esta se as faixas terminarem antes de ela ser escrita.
@@ -837,6 +896,7 @@ void Gs::localToLocal(std::uint32_t pc) {
     if (trace_) trace_->vramLocalCopy(*this, c, pc);
     const VramAccess touched[2] = {rectAccess(false, c.spsm, c.sbp, c.sbw, c.sx, c.sy, c.w, c.h),
                                    rectAccess(true, c.dpsm, c.dbp, c.dbw, c.dx, c.dy, c.w, c.h)};
+    flushHostQueueIfTouches(touched, 2);  // a cópia lê/escreve depois das palavras já enviadas
     noteOutstanding(touched[0]);
     noteOutstanding(touched[1]);
     bumpPages(touched[1].pages, WkCopy);

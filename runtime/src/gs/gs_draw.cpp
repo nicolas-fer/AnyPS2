@@ -433,6 +433,12 @@ void Gs::draw(std::uint32_t pc) {
     // com as gerações que a textura tinha quando o desenho a fixou. Desenhos sozinhos
     // (selfX) também escrevem; só não usam cache.
     const bool anySelf = selfWrap || selfTexture || selfFrameZ;
+    // HOST→LOCAL em modo fila com palavras ainda no buffer do produtor: se este desenho toca
+    // o destino, elas entram na fila antes dele (ele as vê, e os desenhos seguintes também;
+    // uma escrita dele não é sobrescrita por palavras anteriores a ele). Tem de vir antes
+    // de qualquer versão de textura ser fixada: a submissão pode trocar as gerações.
+    flushHostQueueIfTouches(writes, nw);
+    flushHostQueueIfTouches(reads, nr);
     if (e.tme && (HostProfile::enabled() || texSimForced_)) {
         simTexture(e, selfWrap      ? static_cast<int>(TexSimReport::OffWrap)
                       : selfTexture ? static_cast<int>(TexSimReport::OffTexture)

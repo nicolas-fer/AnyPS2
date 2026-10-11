@@ -91,11 +91,19 @@ bool accessesOverlap(const VramAccess& a, const VramAccess& b);
 //  * a leitura declarada de um desenho (reads[] de Gs::draw, por páginas) cubra toda página
 //    que tenha um texel que ele busca: o preenchimento é por bloco, e um bloco inteiro cabe
 //    numa página lógica, então preencher um bloco só lê páginas que o desenho declarou;
-//  * as escritas fora dos desenhos tenham ordem com as faixas: HOST→LOCAL espera
-//    (waitIdle em startTransfer) quando o destino tem acesso não concluído e, com a
-//    transferência aberta, a palavra seguinte espera (hostDrain_) os desenhos que a
-//    tocam; LOCAL→LOCAL e a carga de CLUT são barreiras (submit);
-//  * toda escrita passe por Gs::bumpPages antes do desenho seguinte (as gerações).
+//  * as escritas fora dos desenhos tenham ordem com as faixas: HOST→LOCAL em modo direto só
+//    é escrita pelo produtor se o destino não tem acesso não concluído e, com a transferência
+//    aberta, a palavra seguinte espera (hostDrain_) os desenhos que a tocam; com acesso não
+//    concluído a HOST→LOCAL abre em modo fila e suas palavras só chegam à VRAM por uma
+//    barreira (Gs::flushHostQueue), submetida antes de qualquer desenho, cópia ou carga de
+//    CLUT que toque o destino, e antes de qualquer waitIdle; LOCAL→LOCAL e a carga de CLUT
+//    são barreiras (submit);
+//  * toda escrita passe por Gs::bumpPages antes do desenho seguinte (as gerações). No modo
+//    fila a escrita real acontece depois, na barreira: a geração muda no início da
+//    transferência e de novo em cada submissão se um desenho fixou, nesse meio tempo, uma
+//    versão de textura que cruza o destino (hostGenDirty_). Assim uma versão fixada antes
+//    de uma barreira de palavras nunca serve a um desenho enfileirado depois dela, e as
+//    leituras do desenho que a fixou, enfileirado antes da barreira, não veem as palavras.
 // Mudar qualquer uma destas regras (por exemplo, deixar uma leitura correr junto com uma
 // escrita do mesmo mapeamento) quebra o cache. O modo ANYPS2_GS_TEXCACHE_VERIFY=1 e os
 // testes de invalidação de test_gs_texcache.cpp existem para pegar isso.
