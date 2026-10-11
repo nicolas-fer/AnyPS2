@@ -450,7 +450,10 @@ private:
     std::uint64_t hostWordsLeft_ = 0;
     // Um desenho fixou uma versão de textura cujas páginas cruzam o destino aberto: a
     // próxima palavra incrementa as páginas do destino antes de escrever (senão um
-    // desenho posterior acertaria numa versão com o conteúdo parcial).
+    // desenho posterior acertaria numa versão com o conteúdo parcial). A marca vale
+    // pelo alcance de leitura do desenho (reads[] de draw: o que ele pode preencher),
+    // não pela grade inteira da versão; por isso o cache só pode servir coordenadas
+    // dentro de alcance ∩ grade, e o resto vai direto para readPixel.
     bool hostGenDirty_ = false;
 
     // Geração por página, época da última escrita e quem escreveu (só o produtor).

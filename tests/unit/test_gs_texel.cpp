@@ -477,11 +477,61 @@ TEST_CASE(gs_texel, texcache_sim_texture_on_own_frame_is_off_cache) {
     SimScene s;
     s.hostAll();
     s.g.writeRegister(FRAME_1, frameRegT(kTexBp / 32, 1), 0);
+    // A geração é lida depois do HOST→LOCAL (que já bumpou a página 32): só o desenho
+    // sozinho pode fazê-la subir daqui em diante.
+    const std::uint32_t g0 = s.g.pageGeneration(32);
     s.texDraw();  // textura sobre o próprio FRAME
     CHECK_EQ(s.g.texSim().off[TexSimReport::OffTexture], 1u);
     CHECK_EQ(s.g.texSim().hits, 0u);
     CHECK_EQ(s.g.texSim().miss[TexSimReport::MissFirst], 0u);
     // O desenho sozinho também escreveu: a geração da página mudou.
-    CHECK(s.g.pageGeneration(32) > 0u);
+    CHECK_EQ(s.g.pageGeneration(32), g0 + 1);
     setEnv("ANYPS2_GS_THREAD", "");
+}
+
+TEST_CASE(gs_texel, texcache_sim_frame_and_zbuf_on_same_page_bumps_both) {
+    setEnv("ANYPS2_GS_THREAD", "0");
+    SimScene s;
+    // Desenho sem textura com FRAME e ZBUF na mesma página (selfFrameZ): roda sozinho,
+    // mas escreve as duas superfícies, e a geração da página tem de subir.
+    const std::uint32_t page = 40;
+    const std::uint32_t g0 = s.g.pageGeneration(page);
+    s.g.writeRegister(FRAME_1, frameRegT(page, 1), 0);
+    s.g.writeRegister(ZBUF_1, page, 0);
+    s.g.writeRegister(TEST_1, (1ull << 16) | (1ull << 17), 0);  // ZTE, ZTST = ALWAYS
+    s.g.writeRegister(PRIM, 6u, 0);
+    s.g.writeRegister(RGBAQ, 0x40404040ull | (0x3F800000ull << 32), 0);
+    s.g.writeRegister(XYZ2, xyT(0, 0), 0);
+    s.g.writeRegister(XYZ2, xyT(8, 8), 0);
+    CHECK_EQ(s.g.bandStats().self[BandStats::SelfFrameZ], 1u);
+    CHECK(s.g.pageGeneration(page) >= g0 + 1);
+    setEnv("ANYPS2_GS_THREAD", "");
+}
+
+TEST_CASE(gs_texel, texcache_sim_zbuf_write_on_texture_page_misses_by_zbuf) {
+    for (const char* threaded : {"0", "1"}) {
+        setEnv("ANYPS2_GS_THREAD", threaded);
+        setEnv("ANYPS2_GS_THREADS", "2");
+        SimScene s;
+        s.hostAll();
+        s.texDraw();
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, 1u);
+        Snap a(s.g);
+        // Desenho sem textura: FRAME em outro lugar, ZBUF em cima da página 32 da textura.
+        s.g.writeRegister(ZBUF_1, kTexBp / 32, 0);
+        s.g.writeRegister(TEST_1, (1ull << 16) | (1ull << 17), 0);  // ZTE, ZTST = ALWAYS
+        s.g.writeRegister(PRIM, 6u, 0);
+        s.g.writeRegister(RGBAQ, 0x40404040ull | (0x3F800000ull << 32), 0);
+        s.g.writeRegister(XYZ2, xyT(0, 0), 0);
+        s.g.writeRegister(XYZ2, xyT(8, 8), 0);
+        s.g.writeRegister(TEST_1, 0, 0);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().miss[TexSimReport::MissZbuf], a.miss[TexSimReport::MissZbuf] + 1);
+        CHECK_EQ(s.g.texSim().hits, a.hits);
+        s.texDraw();
+        CHECK_EQ(s.g.texSim().hits, a.hits + 1);
+    }
+    setEnv("ANYPS2_GS_THREAD", "");
+    setEnv("ANYPS2_GS_THREADS", "");
 }

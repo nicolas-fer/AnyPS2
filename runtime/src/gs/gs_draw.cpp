@@ -436,7 +436,10 @@ void Gs::draw(std::uint32_t pc) {
     if (nw > 1) bumpPages(writes[1].pages, WkZbuf);
     if (e.tme && !anySelf && hostOpenValid_) {
         // A versão da textura fica fixada por este desenho; se a transferência HOST→LOCAL
-        // aberta ainda vai escrever nela, a próxima palavra invalida a versão.
+        // aberta ainda vai escrever nela, a próxima palavra invalida a versão. O teste
+        // usa o alcance de leitura do desenho (reads[]), que com REGION_CLAMP/REGION_REPEAT
+        // difere da grade w×h da versão; vale porque só o que o desenho alcança pode ser
+        // preenchido por ele (fora disso a leitura vai direto para a VRAM).
         for (unsigned j = 0; j < nr; ++j) {
             if (reads[j].surface == 2 && accessesOverlap(hostOpen_, reads[j])) {
                 hostGenDirty_ = true;
