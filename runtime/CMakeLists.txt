@@ -60,6 +60,7 @@ add_library(anyps2_runtime STATIC
     src/dmac.cpp
     src/gif.cpp
     src/vif.cpp
+    src/vif_exec.cpp
     src/gs/vram.cpp
     src/gs/gs.cpp
     src/gs/gs_draw.cpp

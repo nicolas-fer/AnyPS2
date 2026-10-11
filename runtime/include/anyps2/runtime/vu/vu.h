@@ -123,6 +123,18 @@ public:
 
     // Inicia o microprograma em pc (bytes) e executa até o bit E.
     void start(std::uint32_t pc, std::uint32_t eePc);
+    // XTOP/XITOP do VU1 leem o TOP/ITOP do VIF1 que o executor do VIF copia para cá (no MSCAL, do
+    // item; no reset do VIF1, zero): o VU não consulta o VIF1 durante a execução.
+    void setVifTop(std::uint32_t top, std::uint32_t itop) {
+        vifTop_ = top;
+        vifItop_ = itop;
+    }
+    // Início por MSCAL/MSCALF/MSCNT do VIF: TOP/ITOP e o VBlank do rastreador vêm do item.
+    void startVif(std::uint32_t pc, std::uint32_t eePc, std::uint32_t top, std::uint32_t itop,
+                  std::uint64_t vblanks) {
+        setVifTop(top, itop);
+        run(pc, eePc, mode_ != Mode::Interpret, vblanks);
+    }
     enum class Mode {
         Auto,         // recompilado quando houver, senão interpretado
         Interpret,    // só o interpretador (ANYPS2_VU=interp)
@@ -206,7 +218,7 @@ private:
         std::uint32_t base = 0;
     };
     Match findBlock(std::uint32_t pc) const;
-    void run(std::uint32_t pc, std::uint32_t eePc, bool compiled);
+    void run(std::uint32_t pc, std::uint32_t eePc, bool compiled, std::uint64_t vblanks);
     const vu::Instr& fetch(std::uint32_t pc);
     void dumpMicro();
 
@@ -245,6 +257,7 @@ private:
 
     Runtime* rt_;
     unsigned unit_;
+    std::uint32_t vifTop_ = 0, vifItop_ = 0;  // espelho do TOP/ITOP do VIF1 (ver setVifTop)
     vucore::Regs regs_;
     std::uint8_t* data_;
     std::uint32_t dataSize_;

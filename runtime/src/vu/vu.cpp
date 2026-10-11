@@ -229,7 +229,7 @@ void Vu::execEfu(const vu::Lower& l, std::uint32_t pc) {
 
 std::uint32_t Vu::vifTop(bool itop, std::uint32_t pc) {
     if (unit_ != 1 || !rt_) fail(std::string(itop ? "XITOP" : "XTOP") + " só existe no VU1", pc);
-    return itop ? rt_->vif1().itop() : rt_->vif1().top();
+    return itop ? vifItop_ : vifTop_;
 }
 
 void Vu::xgkick(std::uint32_t addr, std::uint32_t pc) {
@@ -305,14 +305,14 @@ Vu::Match Vu::findBlock(std::uint32_t pc) const {
 }
 
 void Vu::start(std::uint32_t pc, std::uint32_t eePc) {
-    run(pc, eePc, mode_ != Mode::Interpret);
+    run(pc, eePc, mode_ != Mode::Interpret, rt_ ? rt_->vblanks() : 0);
 }
 
 void Vu::interpret(std::uint32_t pc, std::uint32_t eePc) {
-    run(pc, eePc, false);
+    run(pc, eePc, false, rt_ ? rt_->vblanks() : 0);
 }
 
-void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
+void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled, std::uint64_t vblanks) {
     const HostProfile::Scope prof(unit_ == 0 ? HostProfile::Vu0 : HostProfile::Vu1);
     startPc_ = pc & (microSize_ - 8);
     eePc_ = eePc;
@@ -320,7 +320,7 @@ void Vu::run(std::uint32_t pc, std::uint32_t eePc, bool compiled) {
     if (rt_ && rt_->options().traceGs) {
         std::fprintf(stderr, "[vu%u] início em 0x%04x\n", unit_, startPc_);
     }
-    if (tracing_) trace_->beginRun(*this, startPc_, eePc, rt_ ? rt_->vblanks() : 0);
+    if (tracing_) trace_->beginRun(*this, startPc_, eePc, vblanks);
     VuCursor cur;
     cur.pc = startPc_;
     std::uint64_t viaCompiled = 0, viaInterpreter = 0;

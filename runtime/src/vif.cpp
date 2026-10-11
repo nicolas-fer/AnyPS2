@@ -57,9 +57,43 @@ std::string cmdName(std::uint32_t cmd) {
 }
 }  // namespace
 
-Vif::Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif) : rt_(rt), unit_(unit), vu_(vu), gif_(gif) {}
+namespace {
+// Lote do UNPACK/MPG: passando disto vai para o executor (nenhum dos dois pode falhar, então a
+// ordem em relação aos demais itens continua a mesma).
+constexpr std::size_t kBatchMax = 1024;
+}  // namespace
+
+Vif::Vif(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif)
+    : rt_(rt),
+      unit_(unit),
+      exec_(rt, unit, vu, gif),
+      dataQwords_((unit == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size) / 16) {}
+
+void Vif::emit(const VifItem& item) {
+    flush();
+    exec_.apply(item);
+}
+
+void Vif::flush() {
+    if (!upBatch_.empty()) {
+        VifItem it{VifItem::Kind::Unpack};
+        it.writes = upBatch_.data();
+        it.count = upBatch_.size();
+        exec_.apply(it);
+        upBatch_.clear();
+    }
+    if (!mpgBatch_.empty()) {
+        VifItem it{VifItem::Kind::Mpg};
+        it.words = mpgBatch_.data();
+        it.count = mpgBatch_.size();
+        it.addr = mpgBatchAddr_;
+        exec_.apply(it);
+        mpgBatch_.clear();
+    }
+}
 
 void Vif::reset() {
+    flush();
     state_ = State::Idle;
     irqPending_ = false;
     fifo_.clear();
@@ -69,18 +103,26 @@ void Vif::reset() {
     itops_ = base_ = ofst_ = tops_ = itop_ = top_ = 0;
     std::memset(row_, 0, sizeof(row_));
     std::memset(col_, 0, sizeof(col_));
-    if (unit_ == 1 && gif_) gif_->setPath3Masked(false);
+    // PATH3 volta a não mascarado e o VU1 volta a ver TOP/ITOP zerados.
+    emit(VifItem{VifItem::Kind::Reset});
 }
-
-std::uint8_t* Vif::dataMem() const { return unit_ == 0 ? vu_.data0.get() : vu_.data1.get(); }
-std::uint32_t Vif::dataSize() const { return unit_ == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size; }
-std::uint8_t* Vif::microMem() const { return unit_ == 0 ? vu_.micro0.get() : vu_.micro1.get(); }
-std::uint32_t Vif::microSize() const { return unit_ == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size; }
 
 bool Vif::stalled() const { return (stat_ & kStatStall) != 0; }
 
+namespace {
+// Entrega o lote pendente ao sair da transferência, por retorno ou por exceção (o que foi
+// decodificado antes do erro já tem de ter chegado à memória do VU, como quando era síncrono).
+// Só UNPACK e MPG ficam em lote, e nenhum dos dois falha.
+struct FlushOnExit {
+    explicit FlushOnExit(Vif& v) : vif(v) {}
+    ~FlushOnExit() { vif.flushBatches(); }
+    Vif& vif;
+};
+}  // namespace
+
 std::size_t Vif::transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
     if (stalled()) return 0;
+    const FlushOnExit guard(*this);
     // Parse e UNPACK saem do balde do EE; o VU e o GIF chamados daqui abrem escopos mais internos.
     const HostProfile::Scope prof(HostProfile::Vif);
     for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
@@ -112,6 +154,7 @@ void Vif::transferTag(std::uint64_t upper, std::uint32_t pc) {
 }
 
 void Vif::stallOnIrq() {
+    flush();  // os dados do comando já valem antes da interrupção
     irqPending_ = false;
     stat_ |= kStatVis | kStatInt;
     if (rt_) rt_->kernel().raiseIntc(unit_ == 0 ? 4 : 5);
@@ -125,6 +168,7 @@ void Vif::resume(std::uint32_t pc) {
     pending.swap(fifo_);
     std::size_t off = 0;
     {
+        const FlushOnExit guard(*this);
         const HostProfile::Scope prof(HostProfile::Vif);
         for (; off + 4 <= pending.size() && !stalled(); off += 4) {
             std::uint32_t w;
@@ -153,24 +197,27 @@ void Vif::word(std::uint32_t w, std::uint32_t pc) {
             (state_ == State::Row ? row_ : col_)[index_++] = w;
             if (index_ == 4) state_ = State::Idle;
             break;
-        case State::Mpg: {
-            std::uint8_t* m = microMem();
-            std::memcpy(m + (mpgAddr_ & (microSize() - 4)), &w, 4);
+        case State::Mpg:
+            if (mpgBatch_.empty()) mpgBatchAddr_ = mpgAddr_;
+            mpgBatch_.push_back(w);
             mpgAddr_ += 4;
+            if (mpgBatch_.size() >= kBatchMax) flush();
             if (--remaining_ == 0) state_ = State::Idle;
             break;
-        }
         case State::Direct:
             std::memcpy(directBuf_ + directFill_, &w, 4);
             directFill_ += 4;
             if (directFill_ == 16) {
                 directFill_ = 0;
-                gif_->transfer(2, directBuf_, 1, pc);
+                VifItem it{VifItem::Kind::Direct};
+                it.pc = pc;
+                it.data = directBuf_;
+                emit(it);
                 if (--remaining_ == 0) state_ = State::Idle;
             }
             break;
         case State::Unpack:
-            unpackWord(w, pc);
+            unpackWord(w);
             break;
     }
     // Bit I: a interrupção vem ao fim do comando (com os dados dele).
@@ -206,7 +253,11 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
         case 0x05: mode_ = imm & 3; return;
         case 0x06:
             if (!vif1) break;
-            gif_->setPath3Masked((imm & 0x8000) != 0);
+            {
+                VifItem it{VifItem::Kind::Path3Mask};
+                it.masked = (imm & 0x8000) != 0;
+                emit(it);
+            }
             return;
         case 0x07:
             mark_ = imm;
@@ -218,22 +269,27 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
         case 0x14: case 0x15: case 0x17: {  // MSCAL, MSCALF, MSCNT
             if (!rt_) throw Unimplemented(unitName + ": " + cmdName(cmd) + " sem runtime", pc);
             itop_ = itops_;
-            if (vif1) HostProfile::noteMscal((cmd & 0x7F) == 0x17);
             if (vif1) {
                 // Double buffering: o VU1 lê TOP; o próximo UNPACK com FLG vai para o outro buffer.
                 top_ = tops_;
                 tops_ = (stat_ & kStatDbf) ? base_ : base_ + ofst_;
                 stat_ ^= kStatDbf;
             }
-            Vu& vu = vif1 ? rt_->vu1() : rt_->vu0();
-            const std::uint32_t start = (cmd & 0x7F) == 0x17 ? vu.regs().vi[vucore::reg::TPC] * 8 : imm * 8;
-            vu.start(start, pc);
+            // MSCNT continua do TPC do VU, que só o executor conhece; TOP/ITOP e o VBlank vão no item.
+            VifItem it{(cmd & 0x7F) == 0x17 ? VifItem::Kind::Mscnt : VifItem::Kind::Mscal};
+            it.pc = pc;
+            it.start = imm * 8;
+            it.top = top_;
+            it.itop = itop_;
+            it.vblanks = rt_->vblanks();
+            emit(it);
             return;
         }
         case 0x20: state_ = State::Mask; return;
         case 0x30: state_ = State::Row; index_ = 0; return;
         case 0x31: state_ = State::Col; index_ = 0; return;
         case 0x4A:
+            flush();  // o lote do MPG anterior vale só para os endereços seguidos dele
             mpgAddr_ = imm * 8;
             remaining_ = (num == 0 ? 256u : num) * 2;
             state_ = State::Mpg;
@@ -274,7 +330,7 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
                 }
                 const unsigned vbits = (upVn_ == 3 && upVl_ == 3) ? 16 : (upVn_ + 1) * (32u >> upVl_);
                 upWordsLeft_ = (upReadLeft_ * vbits + 31) / 32;
-                writeFillVectors(pc);
+                writeFillVectors();
                 if (upWordsLeft_ > 0) state_ = State::Unpack;
                 return;
             }
@@ -288,7 +344,7 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
     throw Unimplemented(unitName + ": VIFcode inválido " + anyps2::hex(w) + "; anteriores:" + recent, pc);
 }
 
-void Vif::unpackWord(std::uint32_t w, std::uint32_t pc) {
+void Vif::unpackWord(std::uint32_t w) {
     const unsigned ebits = (upVn_ == 3 && upVl_ == 3) ? 16 : (32u >> upVl_);
     const unsigned comps = (upVn_ == 3 && upVl_ == 3) ? 1 : upVn_ + 1;
     for (unsigned off = 0; off < 32 && upReadLeft_ > 0; off += ebits) {
@@ -322,10 +378,10 @@ void Vif::unpackWord(std::uint32_t w, std::uint32_t pc) {
                 v[3] = comps == 4 ? comp[3] : 0;
             }
             upNbits_ = 0;
-            writeUnpackedVector(v, pc);
+            writeUnpackedVector(v);
             --upNum_;
             --upReadLeft_;
-            writeFillVectors(pc);
+            writeFillVectors();
         }
     }
     if (--upWordsLeft_ == 0) state_ = State::Idle;
@@ -334,21 +390,22 @@ void Vif::unpackWord(std::uint32_t w, std::uint32_t pc) {
 // Preenchimento: nas posições CL..WL-1 de cada ciclo nada é lido; o valor
 // vem da máscara (ROW/COL). Com máscara 0 o dado é indefinido no hardware;
 // aqui é zero (somado a ROW nos modos de offset).
-void Vif::writeFillVectors(std::uint32_t pc) {
+void Vif::writeFillVectors() {
     if (!upFill_) return;
     static constexpr std::uint32_t zero[4] = {0, 0, 0, 0};
     while (upNum_ > 0 && upIndex_ % upWl_ >= upCl_) {
-        writeUnpackedVector(zero, pc);
+        writeUnpackedVector(zero);
         --upNum_;
     }
 }
 
-void Vif::writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t) {
+// Monta o quadword (máscara, ROW/COL e MODE da época; o ROW acumula aqui, no decodificador) e o
+// põe no lote; quem grava na memória de dados é o executor.
+void Vif::writeUnpackedVector(const std::uint32_t (&v)[4]) {
     const std::uint32_t i = upIndex_++;
     const std::uint32_t cyclePos = i % upWl_;
     const std::uint32_t qw = upFill_ ? upAddr_ + i : upAddr_ + (i / upWl_) * upCl_ + cyclePos;
-    const std::uint32_t qwords = dataSize() / 16;
-    std::uint8_t* dst = dataMem() + (qw % qwords) * 16;
+    VifQwWrite out{qw % dataQwords_, 0, {0, 0, 0, 0}};
     const unsigned maskRow = std::min<std::uint32_t>(cyclePos, 3);
     const bool v3 = upVn_ == 2;
     for (unsigned c = 0; c < 4; ++c) {
@@ -368,8 +425,12 @@ void Vif::writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t) {
             case 2: value = col_[maskRow]; break;
             default: continue;  // protegido contra escrita
         }
-        std::memcpy(dst + c * 4, &value, 4);
+        out.v[c] = value;
+        out.mask |= 1u << c;
     }
+    if (out.mask == 0) return;
+    upBatch_.push_back(out);
+    if (upBatch_.size() >= kBatchMax) flush();
 }
 
 std::uint32_t Vif::readRegister(std::uint32_t addr, std::uint32_t pc) {

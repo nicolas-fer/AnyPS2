@@ -5,6 +5,8 @@
 #include <memory>
 #include <vector>
 
+#include "anyps2/runtime/vif_exec.h"
+
 namespace anyps2::rt {
 
 class Runtime;
@@ -23,6 +25,13 @@ struct VuMemory {
 };
 
 // VIF0/VIF1: interpretam o fluxo de VIFcodes vindo do DMA (ou do FIFO).
+//
+// Duas camadas (fatia 3 do plano do VU1 em outra thread). A DECODIFICAÇÃO é esta classe: a
+// máquina de estados dos VIFcodes e todo o estado que o EE enxerga (STAT, FQC, MARK, DBF, TOPS,
+// TOP, ITOP, CYCLE, MASK, ROW, COL, MODE, bit I, FIFO, bytes consumidos do DMA). Ela roda no EE e
+// não toca a memória do VU, não chama o VU nem o GIF: produz itens (vif_exec.h). A EXECUÇÃO é o
+// VifExec, que aplica os itens (memória do VU, MSCAL, GIF) e hoje roda inline, na hora e na mesma
+// ordem. A separação vale para as duas unidades; só o VIF1 gera Direct e MSKPATH3.
 // Implementado: NOP, STCYCL, OFFSET, BASE, ITOP, STMOD, MSKPATH3, MARK,
 // FLUSH/FLUSHE/FLUSHA, STMASK, STROW, STCOL, MPG, DIRECT/DIRECTHL (PATH2) e
 // UNPACK (todos os formatos, com máscara, modos offset/difference e
@@ -51,6 +60,8 @@ public:
     std::uint32_t readRegister(std::uint32_t addr, std::uint32_t pc);
     void writeRegister(std::uint32_t addr, std::uint32_t value, std::uint32_t pc);
     void reset();
+    // Entrega ao executor o lote de UNPACK/MPG acumulado (uso interno de transfer e resume).
+    void flushBatches() { flush(); }
     bool idle() const { return state_ == State::Idle; }
     std::uint32_t top() const { return top_; }
     std::uint32_t itop() const { return itop_; }
@@ -60,18 +71,17 @@ private:
 
     void word(std::uint32_t w, std::uint32_t pc);
     void command(std::uint32_t w, std::uint32_t pc);
-    void unpackWord(std::uint32_t w, std::uint32_t pc);
-    void writeUnpackedVector(const std::uint32_t (&v)[4], std::uint32_t pc);
-    void writeFillVectors(std::uint32_t pc);
-    std::uint8_t* dataMem() const;
-    std::uint32_t dataSize() const;
-    std::uint8_t* microMem() const;
-    std::uint32_t microSize() const;
+    void unpackWord(std::uint32_t w);
+    void writeUnpackedVector(const std::uint32_t (&v)[4]);
+    void writeFillVectors();
+    // Entrega ao executor o que está acumulado (UNPACK e MPG saem em lotes) e depois o item.
+    void emit(const VifItem& item);
+    void flush();
 
     Runtime* rt_;
     unsigned unit_;
-    VuMemory& vu_;
-    Gif* gif_;
+    VifExec exec_;
+    std::uint32_t dataQwords_;  // quadwords da memória de dados da unidade
 
     State state_ = State::Idle;
     std::uint32_t code_ = 0;
@@ -86,6 +96,9 @@ private:
     unsigned index_ = 0;
     // MPG
     std::uint32_t mpgAddr_ = 0;
+    std::vector<std::uint32_t> mpgBatch_;  // palavras ainda não entregues, a partir de mpgBatchAddr_
+    std::uint32_t mpgBatchAddr_ = 0;
+    std::vector<VifQwWrite> upBatch_;      // quadwords do UNPACK ainda não entregues
     // DIRECT
     std::uint8_t directBuf_[16] = {};
     unsigned directFill_ = 0;

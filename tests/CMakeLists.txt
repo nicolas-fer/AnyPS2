@@ -24,6 +24,7 @@ add_executable(anyps2_tests
     unit/test_gsplay.cpp
     unit/test_vu1_mem.cpp
     unit/test_vu1_sync.cpp
+    unit/test_vif_split.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)
 target_link_libraries(anyps2_tests PRIVATE anyps2::recompiler anyps2::runtime anyps2::vu anyps2_disc anyps2_gsplay_lib)
