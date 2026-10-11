@@ -16,6 +16,15 @@ endif()
 
 option(ANYPS2_BUILD_TESTS "Compila os testes automatizados" ON)
 option(ANYPS2_WARNINGS_AS_ERRORS "Trata avisos do compilador como erros" OFF)
+option(ANYPS2_TSAN "Compila e liga com -fsanitize=thread (GCC/Clang; para a thread do VU1 e as faixas do GS)" OFF)
+
+if(ANYPS2_TSAN)
+    if(MSVC)
+        message(FATAL_ERROR "ANYPS2_TSAN precisa de GCC ou Clang (o MSVC não tem ThreadSanitizer)")
+    endif()
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)

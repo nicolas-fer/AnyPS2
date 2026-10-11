@@ -819,6 +819,20 @@ Marco 7 — o vídeo de abertura (em andamento):
   O caminho crítico passou a ser a thread do EE (VU1 39–51%, GIF 19–23%): próximo
   passo, VU1/GIF/produtor do GS numa thread própria (plano em `jogos/wf/vu1_plano.txt`).
   O som: ver o marco 8.
+- ✅ **VU1/GIF/GS produtor numa thread** (fatia 5 do plano; `vu1_stream.h`, `ANYPS2_VU1_THREAD=1`;
+  o padrão continua inline). Anel SPSC de blocos com os dados copiados, um store release por
+  lote, o EE bloqueia quando enche. Com W = 0 (sem horizonte) o resultado é idêntico ao
+  inline: toda leitura do EE de estado do consumidor passa por fence, e as respostas
+  (SIGNAL/FINISH/VSINT, INTC_GS) só entram no EE num fence — no safepoint (Timing), na entrega
+  de interrupções, na leitura/escrita do INTC_STAT, no CSR/GIF/GS privilegiado, nos downloads,
+  no VPU_STAT, no VU0 tocando o VU1, na memória do VU1 e no VBlank. O PATH3 mascarado é um
+  espelho do EE (sem fence). Erros do consumidor sobem no próximo fence ou enfileiramento.
+  `HostProfile` ganhou uma trilha por thread ("thread do VU1" no relatório; baldes novos
+  "espera pelo VU1 (fence)" e "anel cheio" no EE). Testes: `test_vu1_thread.cpp` (diferencial
+  contra o inline com 50 sementes de jitter, anel de 2 a 4 slots, fence forçado, 1/2/4
+  faixas do GS) e as suítes existentes com `ANYPS2_VU1_THREAD=1`. **Pendente:** TSan (não
+  existe no MSVC; `-DANYPS2_TSAN=ON` com GCC/Clang liga `-fsanitize=thread`). O ganho com
+  W = 0 é pequeno; o horizonte W é a fatia 6.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
 (efeitos; a música de fundo e o áudio dos vídeos ainda não):
