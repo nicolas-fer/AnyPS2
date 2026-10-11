@@ -13,6 +13,8 @@
 //    → escrita.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +28,84 @@
 #include "anyps2/runtime/host_profile.h"
 
 namespace anyps2::rt::gs {
+
+namespace {
+// Contador de uma faixa só: carga + store (sem lock add), lido de relance pelo produtor.
+inline void bump(std::atomic<std::uint64_t>& c, std::uint64_t n = 1) {
+    c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+}
+
+// Balde do histograma de pixels por desenho: 0 para zero, senão 1 + log2 (cortado).
+unsigned pixBucket(std::uint64_t n) {
+    unsigned b = 0;
+    while (n && b + 1 < BandStats::kPixBuckets) {
+        ++b;
+        n >>= 1;
+    }
+    return b;
+}
+
+// Mede 1 de cada 64 chamadas (só com ANYPS2_PROFILE ligado): conta cada chamada e
+// cronometra a de número múltiplo de 64. Desligado, não faz nada além de um teste.
+class SampledTimer {
+public:
+    SampledTimer(std::atomic<std::uint64_t>& calls, std::atomic<std::uint64_t>& timed, std::atomic<std::uint64_t>& ns,
+                 bool on)
+        : timed_(timed), ns_(ns) {
+        if (!on) return;
+        const std::uint64_t n = calls.load(std::memory_order_relaxed) + 1;
+        calls.store(n, std::memory_order_relaxed);
+        if ((n & 63) == 0) {
+            active_ = true;
+            t0_ = std::chrono::steady_clock::now();
+        }
+    }
+    ~SampledTimer() {
+        if (!active_) return;
+        bump(ns_, static_cast<std::uint64_t>(
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0_).count()));
+        bump(timed_);
+    }
+    SampledTimer(const SampledTimer&) = delete;
+    SampledTimer& operator=(const SampledTimer&) = delete;
+
+private:
+    std::atomic<std::uint64_t>& timed_;
+    std::atomic<std::uint64_t>& ns_;
+    bool active_ = false;
+    std::chrono::steady_clock::time_point t0_{};
+};
+
+unsigned texFmtClass(std::uint32_t psm) {
+    switch (psm) {
+        case PSMT4: case PSMT4HL: case PSMT4HH: return TexReport::FmtT4;
+        case PSMT8: case PSMT8H: return TexReport::FmtT8;
+        case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: return TexReport::FmtCT16;
+        case PSMCT32: case PSMZ32: return TexReport::FmtCT32;
+        default: return TexReport::FmtOther;
+    }
+}
+}  // namespace
+
+TexReport Gs::texReport() const {
+    TexReport r;
+    for (const LaneTex& l : laneTex_) {
+        for (unsigned i = 0; i < TexReport::FmtCount; ++i) r.fetch[i] += l.fetch[i].load(std::memory_order_relaxed);
+        r.samples += l.samples.load(std::memory_order_relaxed);
+        r.linear += l.linear.load(std::memory_order_relaxed);
+        r.trilinear += l.trilinear.load(std::memory_order_relaxed);
+        r.sampleTimed += l.sampleTimed.load(std::memory_order_relaxed);
+        r.sampleNs += l.sampleNs.load(std::memory_order_relaxed);
+        r.shadeCalls += l.shadeCalls.load(std::memory_order_relaxed);
+        r.shadeTimed += l.shadeTimed.load(std::memory_order_relaxed);
+        r.shadeNs += l.shadeNs.load(std::memory_order_relaxed);
+    }
+    for (unsigned i = 0; i < BandStats::kPixBuckets; ++i) {
+        r.pixHist[i] = bandStats_.pixHist[i];
+        r.pixHistTex[i] = bandStats_.pixHistTex[i];
+    }
+    return r;
+}
 
 namespace {
 
@@ -249,6 +329,8 @@ void Gs::draw(std::uint32_t pc) {
     const std::uint64_t covered = coveredPixels(w, e.type, v0, v1, v2);
     pixels_ += covered;
     coveredTotal_ += covered;
+    ++bandStats_.pixHist[pixBucket(covered)];
+    if (e.tme) ++bandStats_.pixHistTex[pixBucket(covered)];
     if (e.type > 6) return;  // tipo 7 já foi recusado em vertexKick
     const RowRange rows = drawRows(w, e.type, v0, v1, v2);
     if (rows.empty()) return;  // nada cai dentro do SCISSOR: nada a fazer
@@ -402,6 +484,7 @@ void Gs::draw(std::uint32_t pc) {
 // ---------------------------------------------------------------------------
 
 std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) const {
+    if (HostProfile::enabled()) bump(laneTex_[e.lane].fetch[texFmtClass(e.tpsm)]);
     const int w = std::max(1, (1 << e.tw) >> level);
     const int h = std::max(1, (1 << e.th) >> level);
     auto wrap = [](int c, int size, unsigned mode, unsigned mn, unsigned mx, unsigned lvl) {
@@ -440,6 +523,9 @@ std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) con
 
 std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) const {
     // u, v em texels do nível 0.
+    LaneTex& lt = laneTex_[e.lane];
+    const bool prof = HostProfile::enabled();
+    const SampledTimer timer(lt.samples, lt.sampleTimed, lt.sampleNs, prof);
     bool linear = e.mmag;
     unsigned level = 0;
     unsigned level2 = 0;
@@ -462,6 +548,10 @@ std::uint32_t Gs::sampleTexture(const DrawEnv& e, float u, float v, float lod) c
                 break;
             }
         }
+    }
+    if (prof) {
+        if (linear) bump(lt.linear);
+        if (blend > 0 && level2 != level) bump(lt.trilinear);
     }
     auto sampleLevel = [&](unsigned lvl) -> std::uint32_t {
         const float scale = 1.0f / static_cast<float>(1u << lvl);
@@ -509,6 +599,8 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
     if ((e.scanmsk == 2 && (y & 1)) || (e.scanmsk == 3 && !(y & 1))) return;
     // Mesmo ponto em que gs_coverage conta: confere a conta analítica.
     ++laneShaded_[e.lane].shaded;
+    LaneTex& lt = laneTex_[e.lane];
+    const SampledTimer shadeTimer(lt.shadeCalls, lt.shadeTimed, lt.shadeNs, HostProfile::enabled());
     int r = f.r, g = f.g, b = f.b, a = f.a;
 
     if (e.tme) {

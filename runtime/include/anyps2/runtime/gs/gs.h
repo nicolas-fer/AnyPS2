@@ -182,6 +182,28 @@ struct BandStats {
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
     PairTable conflictPairs;              // barreiras por leitura de textura
+    // Pixels por desenho (conta analítica), em potências de 2: o balde i guarda os
+    // desenhos com 2^(i-1) <= pixels < 2^i (balde 0: zero pixels; o último junta o resto).
+    static constexpr unsigned kPixBuckets = 24;
+    std::uint64_t pixHist[kPixBuckets] = {};     // todos os desenhos
+    std::uint64_t pixHistTex[kPixBuckets] = {};  // só os texturizados (TME)
+};
+
+// Diagnóstico de texturas (ANYPS2_PROFILE): somas das faixas, vistas pelo produtor.
+// Não mudam o comportamento nem a imagem.
+struct TexReport {
+    // Buscas de texel por formato.
+    enum Fmt : unsigned { FmtT4, FmtT8, FmtCT16, FmtCT32, FmtOther, FmtCount };
+    std::uint64_t fetch[FmtCount] = {};
+    std::uint64_t samples = 0;    // chamadas de sampleTexture
+    std::uint64_t linear = 0;     // ...com filtro bilinear (em ao menos um nível)
+    std::uint64_t trilinear = 0;  // ...que misturaram dois níveis de mipmap
+    // Tempo amostrado (1 de cada 64 chamadas), em ns. *Timed = chamadas medidas.
+    std::uint64_t sampleTimed = 0, sampleNs = 0;  // sampleTexture
+    std::uint64_t shadeCalls = 0, shadeTimed = 0, shadeNs = 0;  // shadePixel (pixels sombreados)
+    // Pixels por desenho (cópia do histograma do produtor).
+    std::uint64_t pixHist[BandStats::kPixBuckets] = {};
+    std::uint64_t pixHistTex[BandStats::kPixBuckets] = {};
 };
 
 // Graphics Synthesizer em software: estado completo dos registradores,
@@ -278,6 +300,9 @@ public:
     std::uint64_t pixelsShaded() const;
     // Contadores de serialização das faixas (só o produtor os altera; não espera).
     const BandStats& bandStats() const { return bandStats_; }
+    // Diagnóstico de texturas: soma das faixas (leituras sem espera, aproximadas
+    // enquanto elas desenham) e o histograma de pixels por desenho do produtor.
+    TexReport texReport() const;
 
 private:
     friend class GsTrace;
@@ -429,6 +454,17 @@ private:
         std::uint64_t pad[7] = {};
     };
     std::array<LaneCount, kMaxLanes> laneShaded_{};
+    // Contadores de textura por faixa (só com ANYPS2_PROFILE; ver TexReport). Cada
+    // faixa escreve os seus (carga + store, sem instrução atômica de leitura-
+    // modificação-escrita) e o produtor lê de relance; a linha de cache é da faixa.
+    struct LaneTex {
+        std::atomic<std::uint64_t> fetch[TexReport::FmtCount] = {};
+        std::atomic<std::uint64_t> samples{0}, linear{0}, trilinear{0};
+        std::atomic<std::uint64_t> sampleTimed{0}, sampleNs{0};
+        std::atomic<std::uint64_t> shadeCalls{0}, shadeTimed{0}, shadeNs{0};
+        std::uint64_t pad[3] = {};
+    };
+    mutable std::array<LaneTex, kMaxLanes> laneTex_{};
     std::set<std::string> warned_;
 
     // Diagnóstico: VBlanks recebidos (vblankStart) e o rastreador, nulo sem as

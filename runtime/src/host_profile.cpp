@@ -172,7 +172,80 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
     return s + "\n";
 }
 
+// Diagnóstico de texturas: buscas por formato, filtro, tempo amostrado (1 de cada 64
+// chamadas, escalado) e histograma de pixels por desenho texturizado.
+std::string formatTexels(const gs::TexReport& cur, const gs::TexReport& prev, double per, const char* unit) {
+    using gs::TexReport;
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    char buf[512];
+    std::string s = "[perfil] texels";
+    s += unit;
+    s += ":";
+    static const char* kFmt[TexReport::FmtCount] = {"T4", "T8", "CT16", "CT32", "outros"};
+    std::uint64_t fetches = 0;
+    for (unsigned i = 0; i < TexReport::FmtCount; ++i) {
+        std::snprintf(buf, sizeof buf, " %s %.0f%s", kFmt[i], d(cur.fetch[i], prev.fetch[i]),
+                      i + 1 < TexReport::FmtCount ? "," : ";");
+        s += buf;
+        fetches += diff(cur.fetch[i], prev.fetch[i]);
+    }
+    const double samples = static_cast<double>(diff(cur.samples, prev.samples));
+    auto pct = [&](std::uint64_t c, std::uint64_t p) { return samples > 0 ? 100.0 * static_cast<double>(diff(c, p)) / samples : 0.0; };
+    std::snprintf(buf, sizeof buf, " amostras %.0f (bilinear %.1f%%, nearest %.1f%%, trilinear %.1f%%);",
+                  samples / per, pct(cur.linear, prev.linear), 100.0 - pct(cur.linear, prev.linear),
+                  pct(cur.trilinear, prev.trilinear));
+    s += buf;
+    // Tempo de CPU somado das faixas, estimado pelas chamadas medidas.
+    const double shT = static_cast<double>(diff(cur.shadeTimed, prev.shadeTimed));
+    const double saT = static_cast<double>(diff(cur.sampleTimed, prev.sampleTimed));
+    const double shNs = shT > 0 ? static_cast<double>(diff(cur.shadeNs, prev.shadeNs)) / shT : 0.0;
+    const double saNs = saT > 0 ? static_cast<double>(diff(cur.sampleNs, prev.sampleNs)) / saT : 0.0;
+    const double shMs = shNs * static_cast<double>(diff(cur.shadeCalls, prev.shadeCalls)) / 1e6 / per;
+    const double saMs = saNs * samples / 1e6 / per;
+    std::snprintf(buf, sizeof buf,
+                  " pixels sombreados %.0f, %.0f ns/pixel => %.2f ms; sampleTexture %.0f ns/amostra => %.2f ms (f = %.2f);"
+                  " texels por amostra %.2f;",
+                  d(cur.shadeCalls, prev.shadeCalls), shNs, shMs, saNs, saMs, shMs > 0 ? saMs / shMs : 0.0,
+                  samples > 0 ? static_cast<double>(fetches) / samples : 0.0);
+    s += buf;
+    s += " desenhos texturizados por pixels (2^k):";
+    for (unsigned i = 0; i < gs::BandStats::kPixBuckets; ++i) {
+        const double n = d(cur.pixHistTex[i], prev.pixHistTex[i]);
+        if (n <= 0) continue;
+        if (i == 0) {
+            std::snprintf(buf, sizeof buf, " 0:%.1f", n);
+        } else {
+            std::snprintf(buf, sizeof buf, " <%llu:%.1f", 1ull << i, n);
+        }
+        s += buf;
+    }
+    return s + "\n";
+}
+
+gs::TexReport& texelsMark() {
+    static gs::TexReport mark;
+    return mark;
+}
+std::uint64_t texelsMarkVblank = 0;
+
 }  // namespace
+
+std::string HostProfile::texelsInterval(const gs::TexReport& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    const std::uint64_t n = vblank > texelsMarkVblank ? vblank - texelsMarkVblank : 1;
+    gs::TexReport& mark = texelsMark();
+    const std::string s = formatTexels(total, mark, static_cast<double>(n), " (por VBlank)");
+    mark = total;
+    texelsMarkVblank = vblank;
+    return s;
+}
+
+std::string HostProfile::texelsReport(const gs::TexReport& total, std::uint64_t vblank) {
+    if (!enabled_) return "";
+    char unit[48];
+    std::snprintf(unit, sizeof unit, " (total, %llu VBlanks)", static_cast<unsigned long long>(vblank));
+    return formatTexels(total, gs::TexReport{}, 1.0, unit);
+}
 
 std::string HostProfile::bandsInterval(const gs::BandStats& total, std::uint64_t vblank) {
     if (!enabled_) return "";

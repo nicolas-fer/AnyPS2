@@ -9,6 +9,7 @@ namespace anyps2::rt {
 
 namespace gs {
 struct BandStats;
+struct TexReport;
 }
 
 // Tempo do host por parte do runtime (ANYPS2_PROFILE=1): diz onde o PC
@@ -36,6 +37,10 @@ public:
     static std::string bandsInterval(const gs::BandStats& total, std::uint64_t vblank);
     // O mesmo desde o começo (valores totais), para o relatório final.
     static std::string bandsReport(const gs::BandStats& total, std::uint64_t vblank);
+    // Texturas (Gs::texReport()): a linha "[perfil] texels: ..." do trecho desde a última
+    // chamada (por VBlank) e o total desde o começo.
+    static std::string texelsInterval(const gs::TexReport& total, std::uint64_t vblank);
+    static std::string texelsReport(const gs::TexReport& total, std::uint64_t vblank);
     // Tempo gasto pelo worker do GS (chamado da thread dele).
     static void addWorker(std::int64_t ns) { workerNs_.fetch_add(ns, std::memory_order_relaxed); }
     // Faixas do GS (threads) que somam em addWorker: o relatório divide a soma
