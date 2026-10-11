@@ -54,6 +54,33 @@ void Memory::mapDevice(std::uint32_t base, std::uint32_t size, MmioDevice* devic
               [](const DeviceRange& a, const DeviceRange& b) { return a.base < b.base; });
 }
 
+void Memory::mapVirtualDevice(std::uint32_t vbase, std::uint32_t size, MmioDevice* device) {
+    for (const auto& d : virtualDevices_) {
+        if (vbase < d.base + d.size && d.base < vbase + size) {
+            throw anyps2::Error("faixas de memória por dispositivo sobrepostas em " + anyps2::hex(vbase));
+        }
+    }
+    virtualDevices_.push_back({vbase, size, device});
+}
+
+MmioDevice* Memory::virtualDeviceFor(std::uint32_t addr, std::uint32_t size, std::uint32_t* plain) const {
+    if (virtualDevices_.empty() || size == 0) return nullptr;
+    // O único espelho é o kseg1 (vbase | 0xA000_0000), igual ao de mapRam.
+    const std::uint32_t a = (addr & 0xE0000000u) == 0xA0000000u ? addr & 0x1FFFFFFFu : addr;
+    for (const auto& d : virtualDevices_) {
+        if (a >= d.base && size <= d.size && a - d.base <= d.size - size) {
+            *plain = a;
+            return d.device;
+        }
+    }
+    return nullptr;
+}
+
+bool Memory::isVirtualDevice(std::uint32_t addr, std::uint32_t size) const {
+    std::uint32_t plain;
+    return virtualDeviceFor(addr, size, &plain) != nullptr;
+}
+
 std::uint32_t Memory::physical(std::uint32_t addr) {
     if (addr >= 0x80000000u && addr < 0xC0000000u) return addr & 0x1FFFFFFFu;  // kseg0/kseg1
     if (addr >= 0x20000000u && addr < 0x40000000u) return addr & 0x0FFFFFFFu;  // uncached
@@ -88,6 +115,18 @@ void Memory::slowRead(std::uint32_t addr, void* out, unsigned size, std::uint32_
                              anyps2::hex(addr) + " (exceção de endereço no hardware)",
                          pc);
     }
+    std::uint32_t plain;
+    // Pelo primeiro byte, como a página da RAM: um acesso desalinhado que passa do fim da faixa
+    // também é "desalinhado"; um alinhado cabe sempre (as faixas são múltiplos de 16 bytes).
+    if (MmioDevice* dev = virtualDeviceFor(addr, 1, &plain)) {
+        if (addr & (size - 1)) {
+            throw GuestError("leitura desalinhada de " + std::string(sizeName(size)) + " em " +
+                                 anyps2::hex(addr) + " (exceção de endereço no hardware)",
+                             pc);
+        }
+        dev->read(plain, out, size, pc);
+        return;
+    }
     if (MmioDevice* dev = deviceFor(addr, size)) {
         dev->read(physical(addr), out, size, pc);
         return;
@@ -102,6 +141,16 @@ void Memory::slowWrite(std::uint32_t addr, const void* in, unsigned size, std::u
         throw GuestError("escrita desalinhada de " + std::string(sizeName(size)) + " em " +
                              anyps2::hex(addr) + " (exceção de endereço no hardware)",
                          pc);
+    }
+    std::uint32_t plain;
+    if (MmioDevice* dev = virtualDeviceFor(addr, 1, &plain)) {
+        if (addr & (size - 1)) {
+            throw GuestError("escrita desalinhada de " + std::string(sizeName(size)) + " em " +
+                                 anyps2::hex(addr) + " (exceção de endereço no hardware)",
+                             pc);
+        }
+        dev->write(plain, in, size, pc);
+        return;
     }
     if (MmioDevice* dev = deviceFor(addr, size)) {
         dev->write(physical(addr), in, size, pc);
@@ -118,6 +167,11 @@ void Memory::copyFromGuest(void* dst, std::uint32_t addr, std::uint32_t size, st
         std::memcpy(dst, p, size);
         return;
     }
+    std::uint32_t plain;
+    if (MmioDevice* dev = virtualDeviceFor(addr, size, &plain)) {
+        dev->read(plain, dst, size, pc);
+        return;
+    }
     throw GuestError("faixa [" + anyps2::hex(addr) + ", +" + anyps2::hex(size) +
                          ") não está em RAM/scratchpad",
                      pc);
@@ -129,6 +183,11 @@ void Memory::copyToGuest(std::uint32_t addr, const void* src, std::uint32_t size
         std::memcpy(p, src, size);
         return;
     }
+    std::uint32_t plain;
+    if (MmioDevice* dev = virtualDeviceFor(addr, size, &plain)) {
+        dev->write(plain, src, size, pc);
+        return;
+    }
     throw GuestError("faixa [" + anyps2::hex(addr) + ", +" + anyps2::hex(size) +
                          ") não está em RAM/scratchpad",
                      pc);
@@ -137,10 +196,17 @@ void Memory::copyToGuest(std::uint32_t addr, const void* src, std::uint32_t size
 std::string Memory::readCString(std::uint32_t addr, std::uint32_t maxLen, std::uint32_t pc) {
     std::string s;
     for (std::uint32_t i = 0; i < maxLen; ++i) {
-        std::uint8_t* p = hostPointer(addr + i, 1);
-        if (!p) throw GuestError("string em " + anyps2::hex(addr) + " sai da RAM", pc);
-        if (*p == 0) return s;
-        s.push_back(static_cast<char>(*p));
+        std::uint8_t byte;
+        if (std::uint8_t* p = hostPointer(addr + i, 1)) {
+            byte = *p;
+        } else {
+            std::uint32_t plain;
+            MmioDevice* dev = virtualDeviceFor(addr + i, 1, &plain);
+            if (!dev) throw GuestError("string em " + anyps2::hex(addr) + " sai da RAM", pc);
+            dev->read(plain, &byte, 1, pc);
+        }
+        if (byte == 0) return s;
+        s.push_back(static_cast<char>(byte));
     }
     throw GuestError("string em " + anyps2::hex(addr) + " sem terminador em " +
                          std::to_string(maxLen) + " bytes",

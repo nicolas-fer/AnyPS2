@@ -22,6 +22,7 @@ class Gif;
 class Vif;
 class Ipu;
 struct VuMemory;
+class Vu1Memory;
 class Video;
 class Input;
 class Audio;
@@ -188,7 +189,7 @@ private:
     std::unique_ptr<Timing> timing_;
     std::unique_ptr<Kernel> kernel_;
     std::unique_ptr<VuMemory> vu_;
-    std::unique_ptr<MmioDevice> vu1Mem_;  // ANYPS2_VU1_MEMCOUNT=1: memória do VU1 como MMIO contador (diagnóstico)
+    std::unique_ptr<Vu1Memory> vu1Mem_;  // memória do VU1 pelo EE (dispositivo com gancho de fence)
     std::unique_ptr<gs::Gs> gs_;
     std::unique_ptr<gs::Frame> frame_;  // quadro entregue pela saída de vídeo assíncrona (reaproveitado)
     std::unique_ptr<Gif> gif_;

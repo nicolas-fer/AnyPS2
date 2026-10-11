@@ -22,6 +22,7 @@ add_executable(anyps2_tests
     unit/test_disc.cpp
     unit/test_config.cpp
     unit/test_gsplay.cpp
+    unit/test_vu1_mem.cpp
     unit/test_vu1_sync.cpp
 )
 target_include_directories(anyps2_tests PRIVATE framework unit)

@@ -46,6 +46,16 @@ public:
     // Mapeia memória comum do host (ex.: memórias dos VUs) em [vbase, vbase+size)
     // e no espelho uncached (vbase | 0xA000_0000 quando aplicável).
     void mapRam(std::uint32_t vbase, std::uint8_t* host, std::uint32_t size);
+    // Memória que o EE enxerga como RAM, mas cujo acesso passa por um dispositivo (a memória
+    // do VU1, que precisa de um gancho de fence). Fica fora das páginas diretas: leitura e
+    // escrita escalar/128 bits, copyFromGuest/copyToGuest e readCString chegam ao
+    // dispositivo (hostPointer devolve nulo). Vale em [vbase, vbase+size) e no espelho
+    // kseg1 (vbase | 0xA000_0000), como mapRam, e só neles; o dispositivo recebe o
+    // endereço sem o espelho e acessos que cabem inteiros na faixa (de qualquer tamanho
+    // nas cópias em bloco). Acesso desalinhado lança o mesmo GuestError da RAM.
+    void mapVirtualDevice(std::uint32_t vbase, std::uint32_t size, MmioDevice* device);
+    // O intervalo inteiro está numa faixa de mapVirtualDevice (vale nos dois espelhos).
+    bool isVirtualDevice(std::uint32_t addr, std::uint32_t size) const;
 
     std::uint8_t* ram() { return ram_.get(); }
     std::uint8_t* scratchpad() { return spr_.get(); }
@@ -108,6 +118,8 @@ private:
     void slowRead(std::uint32_t addr, void* out, unsigned size, std::uint32_t pc);
     void slowWrite(std::uint32_t addr, const void* in, unsigned size, std::uint32_t pc);
     MmioDevice* deviceFor(std::uint32_t addr, unsigned size) const;
+    // Faixa de mapVirtualDevice que contém [addr, addr+size); `plain` recebe o endereço sem o espelho.
+    MmioDevice* virtualDeviceFor(std::uint32_t addr, std::uint32_t size, std::uint32_t* plain) const;
     void mapPages(std::uint32_t vbase, std::uint8_t* host, std::uint32_t size);
 
     struct DeviceRange {
@@ -120,6 +132,7 @@ private:
     std::unique_ptr<std::uint8_t[]> spr_;
     std::unique_ptr<std::uint8_t*[]> pages_;  // 2^20 entradas (páginas de 4 KB)
     std::vector<DeviceRange> devices_;
+    std::vector<DeviceRange> virtualDevices_;
 };
 
 }  // namespace anyps2::rt
