@@ -318,11 +318,11 @@ struct Scenario {
 // Estado final inteiro, depois de um fence.
 void finalState(Rig& r, Observed& o) {
     r.rt.vu1Stream().fence();
-    Gs& gs = r.rt.gs();
-    o.trace.push_back(fnv(gs.vram().data(), Vram::kSize));
+    Gs& gsRef = r.rt.gs();
+    o.trace.push_back(fnv(gsRef.vram().data(), Vram::kSize));
     std::uint64_t regs = 0xcbf29ce484222325ull;
     for (unsigned i = 0; i < 0x63; ++i) {
-        const std::uint64_t v = gs.reg(static_cast<std::uint8_t>(i));
+        const std::uint64_t v = gsRef.reg(static_cast<std::uint8_t>(i));
         regs = fnv(&v, sizeof v, regs);
     }
     o.trace.push_back(regs);
@@ -340,8 +340,8 @@ void finalState(Rig& r, Observed& o) {
     o.trace.push_back(ee.pendingFinishes());
     o.trace.push_back(ee.nextEventTime());
     o.trace.push_back(r.rt.kernel().intcStat());
-    o.trace.push_back(gs.drawCount());
-    o.trace.push_back(gs.xgkicks());
+    o.trace.push_back(gsRef.drawCount());
+    o.trace.push_back(gsRef.xgkicks());
     o.trace.push_back(r.rt.gif().path3Masked());
     o.trace.push_back(r.rt.vu1Stream().path3Masked());
     o.trace.push_back(r.rt.vblanks());
