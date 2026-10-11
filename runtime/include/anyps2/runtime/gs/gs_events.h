@@ -9,8 +9,9 @@ namespace anyps2::rt::gs {
 // Eventos do GS visíveis ao EE (fatia 4 do plano do VU1 em outra thread). O consumidor (dono
 // do GIF e do Gs como produtor) nunca altera o CSR/IMR/SIGLBLID do lado do EE nem pede a
 // interrupção do INTC: ele PUBLICA eventos (GsEvent) numa fila de respostas, e o EE os aplica
-// num espelho dele (GsEeState) no ponto em que hoje a interrupção acontece. Nesta fatia a fila é
-// esvaziada logo depois de cada item, então o tempo é o de antes da separação.
+// num espelho dele (GsEeState) no ponto em que hoje a interrupção acontece. Com o horizonte
+// W = 0 a fila é esvaziada logo depois de cada item, então o tempo é o de antes da separação;
+// com W > 0 (fatia 6) cada resposta vale em `at` = carimbo do item + W (ver Vu1Stream).
 
 // Bits de evento do CSR.
 inline constexpr unsigned kCsrSignalBit = 0, kCsrFinishBit = 1, kCsrHsintBit = 2, kCsrVsintBit = 3;
@@ -30,7 +31,13 @@ struct GsEvent {
     Kind kind = Kind::Raise;
     unsigned bit = 0;
     std::uint64_t mask = 0, value = 0;
-    std::uint64_t due = 0;  // ciclos do EE em que o efeito vale (hoje: o carimbo do item)
+    // Ciclos do EE em que o efeito vale: o carimbo do item (+ W no runtime). Para o FinishDue é o
+    // instante em que o FINISH dispara (max(fim do trabalho do GS, `at`)).
+    std::uint64_t due = 0;
+    // Ciclos do EE a partir dos quais o EE aplica a resposta no espelho: carimbo do item + W
+    // (preenchido pelo Vu1Stream; o Gs isolado aplica na hora e ignora). A ordem de aplicação é a
+    // da fila (`seq`); `at` não decresce nela.
+    std::uint64_t at = 0;
     std::uint64_t seq = 0;  // numeração da fila de respostas (a ordem de aplicação)
 };
 

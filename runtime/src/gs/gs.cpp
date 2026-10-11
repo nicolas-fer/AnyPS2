@@ -516,6 +516,10 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
 
 void Gs::vblankStart() {
     ++vblanks_;
+    // Com o Vu1Stream o VSINT e o campo são do EE (o VBlank é do Timing, não do consumidor): ele
+    // os aplica no espelho no próprio instante do VBlank, sem o horizonte W. Só o Gs isolado
+    // (sem sink) aplica aqui.
+    if (sink_) return;
     GsEvent e;
     e.kind = GsEvent::Kind::Vblank;
     emit(e);

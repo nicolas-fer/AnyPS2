@@ -81,7 +81,7 @@ namespace {
 constexpr HostProfile::Part kEeParts[] = {HostProfile::Ee,    HostProfile::Gif,  HostProfile::Gs,
                                           HostProfile::GsWait, HostProfile::Vu0, HostProfile::Vu1,
                                           HostProfile::Ipu,   HostProfile::Vif,  HostProfile::VuWait,
-                                          HostProfile::RingFull};
+                                          HostProfile::RingFull, HostProfile::HorizonWait};
 constexpr HostProfile::Part kConsParts[] = {HostProfile::Item, HostProfile::Gif, HostProfile::Gs,
                                             HostProfile::GsWait, HostProfile::Vu1, HostProfile::Vif,
                                             HostProfile::Idle};
@@ -91,10 +91,11 @@ std::string HostProfile::report() {
     if (!enabled_) return "";
     static const char* kNames[Count] = {"EE (código e HLE)", "GIF", "GS (desenho no EE)", "GS (EE esperando o worker)",
                                         "VU0", "VU1", "IPU", "VIF (parse e UNPACK)",
-                                        "espera pelo VU1 (fence)", "anel cheio",
+                                        "espera pelo VU1 (fence de leitura)", "anel cheio",
+                                        "espera do horizonte",
                                         "ocioso", "item (outros)"};
     static const char* kConsNames[Count] = {"", "GIF", "GS (produtor)", "GS (esperando o worker)", "", "VU1", "",
-                                            "VIF (UNPACK e MPG)", "", "", "ocioso (anel vazio)", "item (outros)"};
+                                            "VIF (UNPACK e MPG)", "", "", "", "ocioso (anel vazio)", "item (outros)"};
     std::int64_t ns[Count];
     snapshot(tracks_[0], ns);
     std::int64_t total = 0;
@@ -105,7 +106,7 @@ std::string HostProfile::report() {
                   threaded_ ? " (thread do EE)" : "");
     s += line;
     for (const Part i : kEeParts) {
-        if ((i == VuWait || i == RingFull) && !threaded_) continue;
+        if ((i == VuWait || i == RingFull || i == HorizonWait) && !threaded_) continue;
         std::snprintf(line, sizeof line, "[perfil] %6.2f%%  %8.2f s  %s\n",
                       total ? 100.0 * static_cast<double>(ns[i]) / static_cast<double>(total) : 0.0,
                       static_cast<double>(ns[i]) / 1e9, kNames[i]);
@@ -139,7 +140,7 @@ std::string HostProfile::report() {
 std::string HostProfile::interval(std::uint64_t vblank) {
     if (!enabled_) return "";
     static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU", "VIF",
-                                        "VUesp", "Anel", "ocioso", "item"};
+                                        "VUesp", "Anel", "Horiz", "ocioso", "item"};
     Track& t0 = tracks_[0];
     std::int64_t cur[Count];
     snapshot(t0, cur);
@@ -151,7 +152,7 @@ std::string HostProfile::interval(std::uint64_t vblank) {
                   total ? static_cast<double>(vblank - markVblank_) * 1e9 / static_cast<double>(total) : 0.0);
     std::string s = line;
     for (const Part i : kEeParts) {
-        if ((i == VuWait || i == RingFull) && !threaded_) continue;
+        if ((i == VuWait || i == RingFull || i == HorizonWait) && !threaded_) continue;
         std::snprintf(line, sizeof line, " %s %.0f%%", kShort[i],
                       total ? 100.0 * static_cast<double>(cur[i] - t0.mark[i]) / static_cast<double>(total) : 0.0);
         s += line;

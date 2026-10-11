@@ -1,6 +1,7 @@
 #include "minitest.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 
@@ -33,6 +34,16 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
+    // Os testes unitários foram escritos para o horizonte W = 0 (as respostas do GS valem na hora,
+    // como antes da fatia 6 do plano do VU1 em outra thread). Os testes do horizonte trocam W com
+    // Vu1Stream::setHorizon; quem quiser outro W para a suíte inteira define ANYPS2_VU1_HORIZON.
+    if (!std::getenv("ANYPS2_VU1_HORIZON")) {
+#ifdef _WIN32
+        _putenv_s("ANYPS2_VU1_HORIZON", "0");
+#else
+        setenv("ANYPS2_VU1_HORIZON", "0", 1);
+#endif
+    }
     using namespace minitest;
     std::string filter;
     bool list = false;

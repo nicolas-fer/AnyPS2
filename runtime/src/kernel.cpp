@@ -295,13 +295,14 @@ void Kernel::queueAlarm(const Timing::Alarm& a) {
 void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle) {
     if (interruptDepth_ == 0 && (idle || (rt_.context().cop0[cop0::Status] & ops::kStatusEIE))) {
         // O INTC_GS (SIGNAL/FINISH/VSINT) vem das respostas do consumidor do VU1/GS: com o consumidor
-        // em outra thread, a entrega só vale depois de um fence, senão o instante dela dependeria
-        // do escalonamento (mesmo ponto lógico do modo inline, W = 0).
-        // Um handler pode gerar novas causas; limita as voltas por segurança. O fence vale em
-        // toda volta: um handler pode ter enfileirado um pacote com SIGNAL, e no inline o bit
-        // já estaria ligado na volta seguinte.
+        // em outra thread, a entrega só vale depois de sincronizar o espelho com o relógio de agora
+        // (poll: espera os itens com carimbo + W <= agora e aplica as respostas devidas), senão o
+        // instante dela dependeria do escalonamento. Com W = 0 é um fence completo.
+        // Um handler pode gerar novas causas; limita as voltas por segurança. O poll vale em
+        // toda volta: um handler pode ter enfileirado um pacote com SIGNAL, e no inline com W = 0
+        // o bit já estaria ligado na volta seguinte.
         for (int round = 0; round < 8; ++round) {
-            rt_.vu1Stream().fence();
+            rt_.vu1Stream().poll();
             // INTC_DMAC (1) pertence ao kernel: despacha para os handlers de
             // cada canal com CIS & CIM e limpa o CIS.
             if (intcStat_ & (1u << kIntcDmac)) {

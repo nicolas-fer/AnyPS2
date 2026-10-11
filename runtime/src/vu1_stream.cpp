@@ -58,6 +58,13 @@ Vu1Stream::Vu1Stream(Runtime& rt, VuMemory& vu, Gif& gif, gs::Gs& gs)
         if (n >= 2) setRingSlots(n);
     }
     forceFence_ = envFlag("ANYPS2_VU1_FENCE_ALL");
+    // Horizonte W (ciclos do EE): só vale no relógio virtual (no real não há horizonte).
+    virtual_ = rt.options().virtualClock;
+    horizon_ = defaultHorizon();
+    if (const char* v = std::getenv("ANYPS2_VU1_HORIZON"); v && *v) {
+        horizon_ = static_cast<std::uint64_t>(std::strtoull(v, nullptr, 0));
+    }
+    w_ = virtual_ ? horizon_ : 0;
     if (const char* v = std::getenv("ANYPS2_VU1_JITTER"); v && *v) {
         jitterSeed_.store(std::strtoull(v, nullptr, 0), std::memory_order_relaxed);
     }
@@ -68,6 +75,21 @@ Vu1Stream::~Vu1Stream() {
     shutdown();
 }
 
+std::uint64_t Vu1Stream::defaultHorizon() {
+    return Timing::kCyclesPerField / 4;
+}
+
+void Vu1Stream::setHorizon(std::uint64_t cycles) {
+    fence();
+    horizon_ = cycles;
+    w_ = virtual_ ? cycles : 0;
+    horizonQ_.clear();
+}
+
+std::size_t Vu1Stream::pendingResponses() const {
+    return due_.size() + respCount_.load(std::memory_order_acquire);
+}
+
 void Vu1Stream::setDeferred(bool on) {
     if (on == deferred_) return;
     if (on) {
@@ -75,7 +97,7 @@ void Vu1Stream::setDeferred(bool on) {
         ensureRing();
     } else {
         drain();
-        applyResponses();
+        applyResponses(rt_.timing().now());
     }
     deferred_ = on;
 }
@@ -121,8 +143,11 @@ void Vu1Stream::push(Item& item) {
     }
     rethrowPending();  // erro de um item anterior: relançado no enfileiramento
     item.seq = nextSeq_++;
+    noteHorizon(item);
     consume(item);
-    applyResponses();
+    // As respostas com at <= agora valem já (W = 0: todas, como antes); as outras esperam o
+    // safepoint ou a leitura que chegar ao horizonte delas, igual na thread.
+    if (respCount_.load(std::memory_order_acquire) != 0 || !due_.empty()) applyResponses(rt_.timing().now());
     rethrowPending();
 }
 
@@ -147,6 +172,7 @@ void Vu1Stream::pushQueued(Item& item) {
         }
     }
     item.seq = nextSeq_++;
+    noteHorizon(item);
     fillSlot(slot(item.seq), item);
     if (!threaded_) return;
     // Publica por lote: os itens que disparam trabalho vão de imediato; UNPACK e MPG (muitos e
@@ -197,8 +223,8 @@ void Vu1Stream::writeGsPrivileged(std::uint32_t addr, std::uint64_t value, std::
     if (off >= 0xF0) {
         // CSR (sem RESET), IMR e SIGLBLID são estado do EE: vão direto ao espelho, no ponto do EE,
         // depois das respostas dos itens anteriores (senão um SIGNAL antigo reapareceria depois
-        // da limpeza, ou o IMR novo decidiria um evento antigo).
-        fence();
+        // da limpeza, ou o IMR novo decidiria um evento antigo): o espelho vale como em `agora`.
+        syncMirror();
         switch (off & ~0xFu) {
             case 0x1000:
                 if (!(value & gs::kCsrResetMask)) {
@@ -230,6 +256,13 @@ void Vu1Stream::setCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_
 }
 
 void Vu1Stream::pushVblank(std::uint64_t stamp) {
+    // VSINT e a inversão do campo são do EE (o VBlank é do Timing): entram no espelho agora, sem o
+    // horizonte W (senão um programa que espera o VSINT por polling do CSR perderia W por quadro).
+    // Antes, as respostas devidas dos itens anteriores, que no baseline já valiam.
+    syncMirror();
+    gs::GsEvent v;
+    v.kind = gs::GsEvent::Kind::Vblank;
+    eeState().apply(v);
     Item it(Item::Kind::Vblank);
     it.stamp = stamp;
     push(it);
@@ -294,8 +327,59 @@ void Vu1Stream::trimSlot(Queued& q) {
 void Vu1Stream::fenceSlow() {
     if (tlOnConsumer) return;
     drain();
-    applyResponses();
+    applyResponses(rt_.timing().now());
     rethrowPending();
+}
+
+bool Vu1Stream::responseDue() const {
+    return !due_.empty() && due_.front().at <= rt_.timing().now();
+}
+
+bool Vu1Stream::needsMirrorSync(bool wait) const {
+    if (!virtual_) {
+        // Relógio real: sem horizonte. Safepoint (!wait) só aplica o que o consumidor já publicou.
+        return wait ? needsFence() : (respCount_.load(std::memory_order_acquire) != 0 ||
+                                      failed_.load(std::memory_order_acquire) || responseDue());
+    }
+    if (w_ == 0) return needsFence();  // W = 0: todo item já venceu, o fence completo
+    const std::uint64_t now = rt_.timing().now();
+    return (!horizonQ_.empty() && horizonQ_.front().stamp + w_ <= now) ||
+           respCount_.load(std::memory_order_acquire) != 0 || (!due_.empty() && due_.front().at <= now) ||
+           failed_.load(std::memory_order_acquire);
+}
+
+void Vu1Stream::syncSlow(bool wait) {
+    if (tlOnConsumer) return;
+    const std::uint64_t now = rt_.timing().now();
+    if (!virtual_) {
+        if (wait) drain();
+    } else if (w_ == 0) {
+        drain();
+    } else {
+        waitHorizon(now);
+    }
+    applyResponses(now);
+    rethrowPending();
+}
+
+void Vu1Stream::noteHorizon(const Item& item) {
+    if (w_ == 0) return;
+    // Os carimbos não decrescem (Timing::now()); se um item vier com carimbo menor, vale o maior,
+    // o mesmo que o consumidor usa para o `at` das respostas (consStamp_).
+    if (!horizonQ_.empty() && horizonQ_.back().stamp >= item.stamp) {
+        horizonQ_.back().seq = item.seq;
+        return;
+    }
+    horizonQ_.push_back({item.stamp, item.seq});
+}
+
+void Vu1Stream::waitHorizon(std::uint64_t now) {
+    std::uint64_t target = 0;
+    while (!horizonQ_.empty() && horizonQ_.front().stamp + w_ <= now) {
+        target = horizonQ_.front().seq;
+        horizonQ_.pop_front();
+    }
+    if (target != 0) drainTo(target, HostProfile::HorizonWait);
 }
 
 void Vu1Stream::rethrowPending() {
@@ -313,33 +397,37 @@ void Vu1Stream::rethrowPending() {
 }
 
 std::uint64_t Vu1Stream::readGsPrivileged(std::uint32_t addr, std::uint32_t pc) {
-    fence();
     const std::uint32_t off = addr - 0x12000000u;
     if (off >= 0xF0) {
+        // CSR, IMR e SIGLBLID são do espelho do EE: basta o horizonte.
         switch (off & ~0xFu) {
             case 0x1000:
+                syncMirror();
                 HostProfile::count(&SyncStats::gsCsrReads);
                 return eeState().csr(rt_.timing().now());
             case 0x1010:
+                syncMirror();
                 HostProfile::count(&SyncStats::gsOtherPrivReads);
                 return eeState().imr();
             case 0x1080:
+                syncMirror();
                 HostProfile::count(&SyncStats::gsSiglblidReads);
                 return eeState().siglblid();
             default: break;
         }
     }
     // Registradores de vídeo e BUSDIR (estado do consumidor) e o erro de endereço inexistente.
+    fence();
     return gs_.readPrivileged(addr, pc);
 }
 
 std::uint64_t Vu1Stream::csr(std::uint64_t now) {
-    fence();
+    syncMirror();
     return eeState().csr(now);
 }
 
 std::uint64_t Vu1Stream::imr() {
-    fence();
+    syncMirror();
     return eeState().imr();
 }
 
@@ -357,12 +445,17 @@ gs::GsEeState& Vu1Stream::eeState() {
 }
 
 std::uint64_t Vu1Stream::nextEventTime() {
-    fence();
-    return eeState().nextEventTime();
+    poll();
+    std::uint64_t next = eeState().nextEventTime();
+    // O orçamento do safepoint não cruza o horizonte do item mais antigo ainda não vencido. Depois
+    // do poll, carimbo + W > agora; a lista é do EE e igual em todos os modos, então os
+    // safepoints caem nos mesmos ciclos com ou sem a thread.
+    if (w_ != 0 && !horizonQ_.empty()) next = std::min(next, horizonQ_.front().stamp + w_);
+    return next;
 }
 
 void Vu1Stream::processEvents(std::uint64_t now) {
-    fence();
+    poll();
     eeState().processEvents(now);
 }
 
@@ -371,23 +464,29 @@ void Vu1Stream::processEvents(std::uint64_t now) {
 // ---------------------------------------------------------------------------
 
 void Vu1Stream::drain() {
+    drainTo(nextSeq_ - 1, HostProfile::VuWait);
+}
+
+void Vu1Stream::drainTo(std::uint64_t target, unsigned part) {
     if (threaded_) {
-        const std::uint64_t target = nextSeq_ - 1;
         if (processedSeq_.load(std::memory_order_acquire) < target) {
-            ++stats_.fenceWaits;
+            if (part == HostProfile::HorizonWait) ++stats_.horizonWaits;
+            else ++stats_.fenceWaits;
             publishPending();
-            waitProcessed(target, HostProfile::VuWait);
+            waitProcessed(target, part);
         }
         return;
     }
-    // Adiado: o consumidor é a própria thread do EE.
-    while (processedSeq_.load(std::memory_order_relaxed) + 1 < nextSeq_) {
+    // Adiado: o consumidor é a própria thread do EE. Inline: nada a esperar (processou no push).
+    while (processedSeq_.load(std::memory_order_relaxed) < target) {
         Queued& q = slot(processedSeq_.load(std::memory_order_relaxed) + 1);
         consume(q.item, &q);
     }
 }
 
 void Vu1Stream::consume(const Item& item, Queued* q) {
+    // Carimbo das respostas deste item (máximo até ele, como na lista do horizonte do EE).
+    consStamp_ = std::max(consStamp_, item.stamp);
     // Depois de um erro o EE o recebe e para: o resto não roda (até o relançamento).
     if (!failed_.load(std::memory_order_acquire)) {
         gs_.setItemClock(item.stamp);
@@ -442,20 +541,29 @@ void Vu1Stream::apply(const Item& item) {
 void Vu1Stream::publish(const gs::GsEvent& e) {
     gs::GsEvent c = e;
     c.seq = respSeq_++;
+    // A resposta vale para o EE em carimbo + W (o EE a aplica quando o relógio chega lá); o FINISH
+    // dispara em max(fim do trabalho do GS, carimbo + W). Só o seq, o carimbo e W entram na conta.
+    c.at = consStamp_ + w_;
+    c.due = c.kind == gs::GsEvent::Kind::FinishDue ? std::max(c.due, c.at) : c.at;
     const std::lock_guard<std::mutex> lock(respMutex_);
     responses_.push_back(c);
     respCount_.store(responses_.size(), std::memory_order_release);
 }
 
-void Vu1Stream::applyResponses() {
-    if (respCount_.load(std::memory_order_acquire) == 0) return;
-    std::deque<gs::GsEvent> local;
-    {
+void Vu1Stream::applyResponses(std::uint64_t now) {
+    if (respCount_.load(std::memory_order_acquire) != 0) {
         const std::lock_guard<std::mutex> lock(respMutex_);
-        local.swap(responses_);
+        for (const gs::GsEvent& e : responses_) due_.push_back(e);
+        responses_.clear();
         respCount_.store(0, std::memory_order_release);
     }
-    for (const gs::GsEvent& e : local) gs_.eeState().apply(e);
+    // Na ordem da fila, só as devidas: as de itens posteriores (at > agora) ficam para depois,
+    // mesmo que o consumidor já as tenha publicado.
+    while (!due_.empty() && due_.front().at <= now) {
+        const gs::GsEvent e = due_.front();
+        due_.pop_front();
+        gs_.eeState().apply(e);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -474,14 +582,14 @@ void Vu1Stream::setThreaded(bool on) {
             return;
         }
         drain();
-        applyResponses();
+        applyResponses(rt_.timing().now());
         deferred_ = false;
         ensureRing();
         pubSeq_.store(processedSeq_.load(std::memory_order_acquire), std::memory_order_release);
         startThread();
     } else {
         drain();
-        applyResponses();
+        applyResponses(rt_.timing().now());
         stopThread();
     }
 }

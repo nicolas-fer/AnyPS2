@@ -833,6 +833,43 @@ Marco 7 — o vídeo de abertura (em andamento):
   faixas do GS) e as suítes existentes com `ANYPS2_VU1_THREAD=1`. **Pendente:** TSan (não
   existe no MSVC; `-DANYPS2_TSAN=ON` com GCC/Clang liga `-fsanitize=thread`). O ganho com
   W = 0 é pequeno; o horizonte W é a fatia 6.
+- ✅ **Horizonte W** (fatia 6 do plano; `ANYPS2_VU1_HORIZON`, em ciclos do EE; padrão 1/4 de
+  quadro = 1 227 666; `0` reproduz exatamente o comportamento da fatia 5). **É a única mudança
+  temporal observável do VU1 em outra thread:** os eventos que o consumidor gera (SIGNAL, LABEL,
+  FINISH, reset por CSR.RESET) chegam ao EE `W` ciclos mais tarde do que no baseline. O VSINT e a
+  inversão do campo NÃO atrasam: o VBlank é do `Timing` (EE), que os aplica no espelho no
+  próprio instante (`Vu1Stream::pushVblank`), de modo que o VBlank não depende do consumidor.
+  Cada
+  resposta do consumidor ganha `at` = carimbo do item (`Timing::now()` do EE ao enfileirar) + W; o
+  espelho do EE (CSR, IMR, SIGLBLID, INTC_GS, FINISH pendentes) só reflete as respostas com
+  `at <= agora`, na ordem da fila; o FINISH dispara em `max(fim do trabalho do GS, at)`. Efeitos
+  visíveis ao programa: SIGNAL/LABEL/FINISH levam até W (≈ 4,2 ms de relógio do PS2 para
+  W = 1/4 de quadro) a aparecer no CSR/SIGLBLID e a pedir o INTC_GS; um programa que enfileira
+  um pacote com FINISH e faz polling do CSR vê o bit depois de W em vez de depois do tempo de
+  desenho. Caso real: o teapot do SDK (`e2e_sdk_teapot`) desenha um quadro por FINISH, por
+  polling do CSR; com W = 1/4 de quadro ele faz 11 quadros em 8 VBlanks em vez de 16 (o FINISH
+  espera W em vez dos poucos milhares de ciclos de desenho), então a imagem sai noutra fase da
+  rotação. É diferença esperada (o programa depende do instante do FINISH, e de forma
+  determinista), não erro: esse e2e roda com `ANYPS2_VU1_HORIZON=0` para manter a imagem de
+  referência; cube3d, gfx2d, gskit, sdk_cube/texture/vu1 e vu1draw saem idênticos com o W padrão.
+  A ordem relativa das respostas e a ordem
+  PATH1/2/3 não mudam, e a leitura de estado do próprio consumidor (GIF, VPU_STAT, memória do
+  VU1, vídeo/BUSDIR, downloads, apresentação do quadro) continua enxergando tudo o que o EE já
+  enfileirou. Um programa que espera o FINISH com polling continua certo, só mais devagar (no
+  máximo W ciclos virtuais); um que mede o tempo entre o envio e o FINISH vê W a mais.
+  Determinismo: o EE espera o consumidor só quando o relógio dele passa de carimbo + W do item
+  mais antigo ainda não processado (`Timing::cyclesUntilNextEvent` inclui esse horizonte, então o
+  orçamento do safepoint não o cruza; a lista de horizontes é do EE e igual com e sem thread), e
+  as leituras do espelho (CSR, IMR, SIGLBLID, INTC_STAT, entrega de interrupções) fazem a mesma
+  espera e aplicam só as respostas devidas. Resultado: `ANYPS2_VU1_THREAD=0` e `=1` com o mesmo
+  W dão resultado bit a bit igual (o determinismo depende de W, não do escalonamento). As
+  leituras de estado do consumidor mantêm o fence completo (esperam todos os itens), mas aplicam
+  só as respostas devidas. No relógio real não há horizonte: o evento é aplicado no primeiro
+  safepoint depois de o consumidor publicá-lo (o safepoint não espera). `HostProfile` separa
+  "espera do horizonte" de "espera pelo VU1 (fence de leitura)". Testes: suíte `vu1_horizon`
+  (diferencial thread × inline com o mesmo W = 0, 700, 1/4 de quadro e 1 quadro, com jitter, anel
+  minúsculo, fence forçado e 1/2/4 faixas; semântica de `at` nos três modos; fence completo; relógio
+  real); as demais suítes rodam com W = 0.
 
 Marco 8 — os primeiros sons: driver de som da Polyphony (PDISPU2) em HLE ✅
 (efeitos; a música de fundo e o áudio dos vídeos ainda não):

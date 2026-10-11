@@ -70,10 +70,12 @@ public:
     // VBlank). O desenho em si roda na thread do worker e é medido à parte
     // (addWorker), como fração do tempo de parede.
     //
-    // Só na trilha do EE: VuWait (o EE parado em fence, esperando o consumidor do VU1) e RingFull
-    // (parado porque o anel de itens encheu). Só na trilha do consumidor: Idle (sem itens) e Item
+    // Só na trilha do EE: VuWait (o EE parado em fence de LEITURA, esperando o consumidor do VU1
+    // por um registrador ou memória que ele altera), HorizonWait (parado no horizonte W: o
+    // relógio do EE chegou a stamp + W de um item que o consumidor ainda não processou) e
+    // RingFull (parado porque o anel de itens encheu). Só na trilha do consumidor: Idle (sem itens) e Item
     // (aplicando um item fora das demais partes).
-    enum Part : unsigned { Ee, Gif, Gs, GsWait, Vu0, Vu1, Ipu, Vif, VuWait, RingFull, Idle, Item, Count };
+    enum Part : unsigned { Ee, Gif, Gs, GsWait, Vu0, Vu1, Ipu, Vif, VuWait, RingFull, HorizonWait, Idle, Item, Count };
 
     static void enable();
     static bool enabled() { return enabled_; }

@@ -85,6 +85,7 @@ struct Cfg {
     bool forceFence = false;
     std::size_t ring = 0;  // 0 = padrão
     unsigned lanes = 0;  // faixas do GS (ANYPS2_GS_THREADS); 0 = o do ambiente
+    std::uint64_t horizon = 0;  // W em ciclos do EE (0 = o comportamento das fatias 4 e 5)
 };
 
 // Restaura uma variável de ambiente ao sair do teste.
@@ -129,6 +130,7 @@ struct Rig {
         if (cfg.ring) s.setRingSlots(cfg.ring);
         s.setJitterSeed(cfg.jitter);
         s.setForceFence(cfg.forceFence);
+        s.setHorizon(cfg.horizon);  // explícito: o ambiente pode ter ANYPS2_VU1_HORIZON
         if (cfg.thread) s.setThreaded(true);
     }
 };
@@ -284,6 +286,9 @@ struct Scenario {
             obs(r.rt.kernel().intcStat());
             obs(r.rt.timing().now());
             obs(r.rt.vblanks());
+            // O orçamento do próximo safepoint (inclui o horizonte do item mais antigo): igual nos
+            // dois modos, senão os safepoints cairiam em ciclos diferentes.
+            obs(r.rt.timing().cyclesUntilNextEvent());
         } else if (k < 79) {
             obs(mem().read<std::uint64_t>(0x12001000, 0));  // CSR
         } else if (k < 83) {
@@ -318,6 +323,7 @@ struct Scenario {
 // Estado final inteiro, depois de um fence.
 void finalState(Rig& r, Observed& o) {
     r.rt.vu1Stream().fence();
+    o.trace.push_back(r.rt.timing().now());
     Gs& gsRef = r.rt.gs();
     o.trace.push_back(fnv(gsRef.vram().data(), Vram::kSize));
     std::uint64_t regs = 0xcbf29ce484222325ull;
@@ -345,6 +351,8 @@ void finalState(Rig& r, Observed& o) {
     o.trace.push_back(r.rt.gif().path3Masked());
     o.trace.push_back(r.rt.vu1Stream().path3Masked());
     o.trace.push_back(r.rt.vblanks());
+    // Depois do fence completo todas as respostas foram coletadas: o que sobra é só o que vale no futuro.
+    o.trace.push_back(r.rt.vu1Stream().pendingResponses());
 }
 
 Observed runScenario(const Cfg& cfg, std::uint64_t seed, unsigned ops) {
@@ -653,7 +661,8 @@ TEST_CASE(vu1_thread, host_profile_has_a_track_per_thread) {
     CHECK(HostProfile::threaded());
     const std::string rep = HostProfile::report();
     CHECK(rep.find("thread do VU1") != std::string::npos);
-    CHECK(rep.find("espera pelo VU1 (fence)") != std::string::npos);
+    CHECK(rep.find("espera pelo VU1 (fence de leitura)") != std::string::npos);
+    CHECK(rep.find("espera do horizonte") != std::string::npos);
     CHECK(rep.find("anel cheio") != std::string::npos);
     CHECK(rep.find("ocioso (anel vazio)") != std::string::npos);
     // A linha "GIF" aparece duas vezes: na thread do EE (nada: o GIF roda no consumidor) e na do VU1.
@@ -687,4 +696,243 @@ TEST_CASE(vu1_thread, deferred_mode_drains_when_the_ring_is_full) {
     d.rt.vu1Stream().fence();
     CHECK_EQ(d.rt.gs().drawCount(), 100u);
     CHECK_EQ(fnv(d.rt.gs().vram().data(), Vram::kSize), fnv(ref.rt.gs().vram().data(), Vram::kSize));
+}
+
+// ---------------------------------------------------------------------------
+// Horizonte W (fatia 6)
+// ---------------------------------------------------------------------------
+
+// O diferencial do horizonte: com o MESMO W, a thread (com jitter, anel minúsculo, fence forçado,
+// 1/2/4 faixas) dá o resultado bit a bit igual ao do consumidor inline. O determinismo depende de
+// W, não do escalonamento. W = 0, pequeno, 1/4 de quadro e 1 quadro.
+TEST_CASE(vu1_horizon, differential_thread_against_inline_with_the_same_w) {
+    constexpr unsigned kSeeds = 24, kOps = 90;
+    const EnvGuard lanesEnv("ANYPS2_GS_THREADS");
+    const std::uint64_t widths[] = {0, 700, Vu1Stream::defaultHorizon(), Timing::kCyclesPerField};
+    std::uint64_t checks = 0;
+    bool anyDifferentFromZero = false;
+    for (const std::uint64_t w : widths) {
+        for (unsigned seed = 1; seed <= kSeeds; ++seed) {
+            Cfg refCfg;
+            refCfg.horizon = w;
+            const Observed ref = runScenario(refCfg, seed, kOps);
+            struct Variant {
+                const char* name;
+                Cfg cfg;
+            };
+            const Variant variants[] = {
+                {"jitter", Cfg{true, seed * 31ull + 1, false, 0, 1, w}},
+                {"anel de 4 + jitter, 2 faixas", Cfg{true, seed * 17ull + 5, false, 4, 2, w}},
+                {"fence forçado, 4 faixas", Cfg{true, 0, true, 64, 4, w}},
+                {"anel de 2, 4 faixas", Cfg{true, seed * 13ull + 3, false, 2, 4, w}},
+            };
+            for (const Variant& v : variants) {
+                const Observed got = runScenario(v.cfg, seed, kOps);
+                const std::string d = firstDiff(got, ref);
+                if (!d.empty()) {
+                    if (std::getenv("ANYPS2_TEST_VERBOSE")) {
+                        for (std::size_t i = 0; i < ref.trace.size() && i < got.trace.size(); ++i) {
+                            std::fprintf(stderr, "  [%3zu] %llu %llu%s\n", i, static_cast<unsigned long long>(ref.trace[i]),
+                                         static_cast<unsigned long long>(got.trace[i]),
+                                         ref.trace[i] == got.trace[i] ? "" : "   <<<");
+                        }
+                    }
+                    minitest::reportFailure(__FILE__, __LINE__,
+                                            "W=" + std::to_string(w) + " semente " + std::to_string(seed) + " (" +
+                                                v.name + "): " + d);
+                    return;
+                }
+                ++checks;
+            }
+            if (w != 0 && seed <= 4) {
+                Cfg zero;
+                anyDifferentFromZero |= !firstDiff(runScenario(zero, seed, kOps), ref).empty();
+            }
+        }
+    }
+    CHECK_EQ(checks, std::uint64_t{kSeeds} * 4 * 4);
+    // O horizonte tem de mudar de fato o que o EE observa (senão o diferencial não prova nada).
+    CHECK(anyDifferentFromZero);
+}
+
+namespace {
+
+// SIGNAL + LABEL + FINISH pelo PATH3.
+Qw signalPacket() {
+    Packet p;
+    p.ad(0x1234ull | (0xFFFFull << 32), SIGNAL);
+    p.ad(0xBEEF0000ull | (0xFFFF0000ull << 32), LABEL);
+    p.ad(0, FINISH);
+    return p.finish();
+}
+
+}  // namespace
+
+// A semântica do horizonte, nos três modos (inline, adiado e thread): as respostas só valem em
+// carimbo + W; o FINISH dispara em max(fim do trabalho, carimbo + W); o orçamento do safepoint não
+// cruza o horizonte; antes dele o EE não espera o consumidor.
+TEST_CASE(vu1_horizon, responses_are_applied_at_stamp_plus_w_in_every_mode) {
+    constexpr std::uint64_t kW = 50000;
+    for (unsigned mode = 0; mode < 3; ++mode) {  // 0 inline, 1 adiado, 2 thread
+        Cfg cfg;
+        cfg.thread = mode == 2;
+        cfg.jitter = mode == 2 ? 5 : 0;
+        cfg.horizon = kW;
+        Rig r(cfg);
+        Vu1Stream& s = r.rt.vu1Stream();
+        if (mode == 1) s.setDeferred(true);
+        CHECK(s.horizonActive());
+        CHECK_EQ(s.horizon(), kW);
+        s.setImr(0);
+        r.rt.timing().consume(12345);
+        const std::uint64_t t = r.rt.timing().now();
+
+        // O oráculo: o Gs isolado, que aplica na hora, no relógio do carimbo.
+        Gs ref(nullptr);
+        ref.setHsyncSource(Timing::kCyclesPerLine);
+        ref.setRealTimeClock(false);
+        ref.setItemClock(t);
+        const Qw q = signalPacket();
+        s.pushPath3(reinterpret_cast<const std::uint8_t*>(q.data()), q.size() / 2, 0x100);
+        ref.writeRegister(SIGNAL, 0x1234ull | (0xFFFFull << 32), 0);
+        ref.writeRegister(LABEL, 0xBEEF0000ull | (0xFFFF0000ull << 32), 0);
+        ref.writeRegister(FINISH, 0, 0);
+
+        // Antes do horizonte: nada chegou ao EE, e o EE não esperou o consumidor.
+        CHECK_EQ(s.csr(t) & 0xBull, 0u);
+        CHECK_EQ(s.eeState().siglblid(), 0u);
+        CHECK_EQ(r.rt.kernel().intcStat() & 1u, 0u);
+        CHECK_EQ(s.stats().horizonWaits, 0u);
+        CHECK_EQ(s.stats().fenceWaits, 0u);
+        if (mode == 1) CHECK_EQ(s.queued(), 1u);  // adiado: nem foi consumido
+        // O orçamento do safepoint para no horizonte.
+        CHECK_EQ(s.nextEventTime(), t + kW);
+        CHECK_EQ(r.rt.timing().cyclesUntilNextEvent(), kW);
+        r.rt.timing().consume(static_cast<std::int64_t>(kW - 1));
+        CHECK_EQ(s.csr(r.rt.timing().now()) & 0xBull, 0u);
+        CHECK_EQ(s.nextEventTime(), t + kW);
+
+        // No horizonte: o SIGNAL, o SIGLBLID e o INTC_GS chegam; o FINISH fica pendente, vencendo em
+        // max(fim do trabalho do GS, carimbo + W).
+        r.rt.timing().consume(1);
+        CHECK_EQ(r.rt.timing().now(), t + kW);
+        CHECK_EQ(s.csr(t + kW) & 1u, 1u);
+        CHECK_EQ(s.csr(t + kW) & 2u, 0u);
+        CHECK_EQ(s.eeState().siglblid(), ref.eeState().siglblid());
+        CHECK_EQ(r.rt.kernel().intcStat() & 1u, 1u);
+        CHECK_EQ(s.queued(), 0u);
+        const std::uint64_t finishAt = std::max(ref.nextEventTime(), t + kW);
+        CHECK_EQ(s.nextEventTime(), finishAt);
+        CHECK_EQ(s.eeState().pendingFinishes(), 1u);
+        r.rt.timing().consume(static_cast<std::int64_t>(finishAt - r.rt.timing().now()));
+        s.processEvents(r.rt.timing().now());
+        CHECK_EQ(s.csr(r.rt.timing().now()) & 2u, 2u);
+        CHECK_EQ(s.nextEventTime(), ~std::uint64_t{0});
+        if (mode == 2) CHECK(s.stats().horizonWaits <= 1u);
+    }
+}
+
+// A leitura de estado do próprio consumidor (GIF) continua em fence completo: espera TODOS os
+// itens, mas aplica só as respostas devidas.
+TEST_CASE(vu1_horizon, full_fence_waits_for_every_item_but_applies_only_due_responses) {
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        Cfg cfg;
+        cfg.thread = mode == 1;
+        cfg.horizon = 80000;
+        Rig r(cfg);
+        Vu1Stream& s = r.rt.vu1Stream();
+        s.setImr(0);
+        const Qw q = signalPacket();
+        s.pushPath3(reinterpret_cast<const std::uint8_t*>(q.data()), q.size() / 2, 0x100);
+        s.pushGifWrite(0x10003010u, 5, 0);  // GIF_MODE
+        CHECK_EQ(s.readGif(0x10003010u, 0), 5u);  // o consumidor processou tudo
+        CHECK_EQ(s.processedSeq(), s.pushedSeq());
+        CHECK_EQ(s.queued(), 0u);
+        CHECK_EQ(s.eeState().siglblid(), 0u);  // mas a resposta ainda não vale
+        CHECK(s.pendingResponses() > 0u);
+        CHECK_EQ(r.rt.kernel().intcStat() & 1u, 0u);
+        r.rt.timing().consume(80000);
+        CHECK_EQ(s.csr(r.rt.timing().now()) & 1u, 1u);
+        s.fence();
+        CHECK_EQ(s.eeState().siglblid() & 0xFFFF, 0x1234u);
+    }
+}
+
+// No relógio real não há horizonte: W pedido não vale, as respostas entram no primeiro sincronismo
+// depois de publicadas.
+TEST_CASE(vu1_horizon, real_clock_has_no_horizon) {
+    ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = false;
+    Runtime rt{info, o};
+    Vu1Stream& s = rt.vu1Stream();
+    s.setThreaded(false);
+    s.setHorizon(123456);
+    CHECK_EQ(s.horizon(), 123456u);
+    CHECK(!s.horizonActive());
+    s.setImr(0);
+    const Qw q = signalPacket();
+    s.pushPath3(reinterpret_cast<const std::uint8_t*>(q.data()), q.size() / 2, 0x100);
+    CHECK_EQ(s.csr(rt.timing().now()) & 1u, 1u);
+    CHECK_EQ(rt.kernel().intcStat() & 1u, 1u);
+    // Thread: o safepoint (poll) não espera o consumidor.
+    s.setThreaded(true);
+    s.setJitterSeed(7);
+    for (unsigned i = 0; i < 20; ++i) s.pushPath3(reinterpret_cast<const std::uint8_t*>(q.data()), q.size() / 2, 0x100);
+    s.poll();
+    CHECK_EQ(s.stats().horizonWaits, 0u);
+    s.fence();
+    CHECK_EQ(s.processedSeq(), s.pushedSeq());
+}
+
+// Com a thread viva e W grande, o safepoint dentro do horizonte não espera o consumidor; quando o
+// relógio cruza stamp + W, ele espera o item e aplica as respostas.
+TEST_CASE(vu1_horizon, safepoints_inside_the_horizon_do_not_wait) {
+    Cfg cfg;
+    cfg.thread = true;
+    cfg.jitter = 9;
+    cfg.horizon = Timing::kCyclesPerField;
+    Rig r(cfg);
+    Vu1Stream& s = r.rt.vu1Stream();
+    s.setImr(0);
+    r.rt.timing().consume(1000);
+    Rng g(3);
+    for (unsigned i = 0; i < 200; ++i) {
+        const Qw q = drawPacket(g, 2);
+        s.pushPath3(reinterpret_cast<const std::uint8_t*>(q.data()), q.size() / 2, 0x100);
+    }
+    const Qw ev = signalPacket();
+    s.pushPath3(reinterpret_cast<const std::uint8_t*>(ev.data()), ev.size() / 2, 0x100);
+    // Vários safepoints dentro de W: nenhuma espera (nem de leitura nem do horizonte).
+    for (unsigned i = 0; i < 6; ++i) {
+        r.rt.safepoint(&r.c, 0x1000, 20000);
+        CHECK_EQ(r.rt.kernel().intcStat() & 1u, 0u);
+    }
+    CHECK_EQ(s.stats().horizonWaits + s.stats().fenceWaits, 0u);
+    // Cruza o horizonte: o consumidor tem de ter processado tudo até o item e o INTC_GS chegou.
+    r.rt.safepoint(&r.c, 0x1000, static_cast<std::int64_t>(Timing::kCyclesPerField));
+    CHECK_EQ(r.rt.kernel().intcStat() & 1u, 1u);
+    CHECK_EQ(s.eeState().siglblid() & 0xFFFF, 0x1234u);
+    CHECK(s.processedSeq() >= 201u);
+}
+
+// ANYPS2_VU1_HORIZON: o valor pedido vale; sem a chave o padrão é 1/4 de quadro.
+TEST_CASE(vu1_horizon, environment_key_and_default) {
+    const EnvGuard key("ANYPS2_VU1_HORIZON");
+    CHECK_EQ(Vu1Stream::defaultHorizon(), Timing::kCyclesPerField / 4);
+    ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+    RuntimeOptions o;
+    o.virtualClock = true;
+    setEnv("ANYPS2_VU1_HORIZON", "12345");
+    {
+        Runtime rt{info, o};
+        CHECK_EQ(rt.vu1Stream().horizon(), 12345u);
+        CHECK(rt.vu1Stream().horizonActive());
+    }
+    setEnv("ANYPS2_VU1_HORIZON", "0");
+    {
+        Runtime rt{info, o};
+        CHECK_EQ(rt.vu1Stream().horizon(), 0u);
+        CHECK(!rt.vu1Stream().horizonActive());
+    }
 }

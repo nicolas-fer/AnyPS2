@@ -40,7 +40,7 @@ if(MSVC)
 endif()
 
 # Uma entrada do CTest por suíte.
-foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_texel gs_texcache gs_trace ipu vu_isa vu vu_trace iop disc config gsplay vu1_sync vu1_mem vif_split vu1_stream vu1_thread)
+foreach(suite elf decoder decoder_coverage disasm golden fixture runtime_ops codegen timing gs gs_coverage gs_bands gs_texel gs_texcache gs_trace ipu vu_isa vu vu_trace iop disc config gsplay vu1_sync vu1_mem vif_split vu1_stream vu1_thread vu1_horizon)
     add_test(NAME ${suite} COMMAND anyps2_tests ${suite})
 endforeach()
 
@@ -189,7 +189,10 @@ if(ANYPS2_E2E_TESTS)
     anyps2_e2e(vu1draw ENV ANYPS2_VU=compiled)
     anyps2_e2e(vu1draw NAME vu1draw_interp ENV ANYPS2_VU=interp)
     anyps2_e2e(sdk_cube ENV ANYPS2_FRAMES=60)
-    anyps2_e2e(sdk_teapot ENV ANYPS2_FRAMES=8 ANYPS2_SCREENSHOT_EVERY=4)
+    # O teapot desenha um quadro por FINISH (polling do CSR): com o horizonte W > 0 o FINISH chega W
+    # depois e o programa faz menos quadros em 8 VBlanks (11 em vez de 16 com W = 1/4 de quadro), então
+    # a fase da rotação na imagem de referência muda. Com W = 0 a imagem é a de sempre.
+    anyps2_e2e(sdk_teapot ENV ANYPS2_FRAMES=8 ANYPS2_SCREENSHOT_EVERY=4 ANYPS2_VU1_HORIZON=0)
     anyps2_e2e(sdk_texture ENV ANYPS2_FRAMES=8)
     anyps2_e2e(sdk_vu1 ENV ANYPS2_FRAMES=8 ANYPS2_VU=compiled)
     # Fase 6: IOP em HLE. Módulos (rom0: e IRX embutido; sem HLE = erro

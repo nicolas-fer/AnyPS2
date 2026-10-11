@@ -70,7 +70,32 @@ class Gs;
 // cada <= 20000 ciclos: o relógio virtual não passa do carimbo de um item não processado sem
 // esperá-lo), a entrega de interrupções (Kernel::serviceInterrupts) e a leitura/escrita do
 // INTC_STAT, porque a interrupção do GS vem de uma resposta. Com W = 0 o ganho é só a
-// sobreposição do consumidor com o EE entre dois safepoints; o horizonte W (fatia 6) o amplia.
+// sobreposição do consumidor com o EE entre dois safepoints; o horizonte W o amplia.
+//
+// HORIZONTE W (fatia 6, ANYPS2_VU1_HORIZON, em ciclos do EE; padrão 1/4 de quadro; 0 = o
+// comportamento das fatias 4 e 5). W é a única mudança temporal observável: o que o consumidor
+// gera chega ao EE até W ciclos mais tarde, e em troca o EE só espera o consumidor quando o relógio
+// virtual dele passa de stamp + W de um item ainda não processado.
+//   - O VSINT e o campo são do EE (pushVblank os aplica no espelho na hora, sem W). Toda
+//     resposta do consumidor (SIGNAL, LABEL, FINISH, reset) ganha `at` = carimbo do item + W. O
+//     espelho do EE (CSR, IMR, SIGLBLID, INTC_GS, FINISH pendentes) só reflete as respostas com
+//     at <= agora, aplicadas na ordem da fila. O FINISH dispara em max(fim do trabalho, at).
+//   - O EE sabe o que o espelho vale em `agora` sem depender do escalonamento: antes de olhar o
+//     espelho (leitura/escrita do CSR, IMR, SIGLBLID, INTC_STAT, safepoint, entrega de
+//     interrupções) ele espera o consumidor processar os itens com carimbo + W <= agora (a
+//     "espera do horizonte", syncMirror/poll) e aplica as respostas com at <= agora. Uma resposta
+//     de item posterior tem at > agora e não entra. Por isso o resultado só depende do seq, do
+//     carimbo e de W, nunca do escalonamento: o modo inline com o mesmo W dá o resultado bit a bit
+//     igual ao da thread. W = 0 recai no fence completo de antes (todo item tem carimbo <= agora).
+//   - Timing::cyclesUntilNextEvent considera o carimbo + W do item mais antigo ainda não
+//     "vencido" (lista própria do EE, igual nos dois modos): o orçamento do safepoint não cruza o
+//     horizonte, e a resposta é aplicada em stamp + W em vez de até um chunk depois.
+//   - Leituras de estado do próprio consumidor (GIF, VPU_STAT, memória do VU1, vídeo e BUSDIR do
+//     GS, downloads, apresentação do quadro) continuam em fence() completo, que espera TODOS os
+//     itens enfileirados mas aplica só as respostas com at <= agora.
+//   - No relógio real não há horizonte (W efetivo 0): as respostas valem no primeiro safepoint
+//     depois de o consumidor publicá-las (o safepoint não espera). As leituras e escritas do
+//     espelho (CSR, IMR, SIGLBLID, INTC_STAT) seguem com fence completo.
 //
 // ERROS: GuestError/Unimplemented (e qualquer outra exceção) do consumidor são guardados com a
 // exceção original e relançados no EE no próximo fence ou enfileiramento; os itens depois do que
@@ -148,19 +173,36 @@ public:
     // ---- Lado do EE: ler estado do consumidor (todas passam pelo fence) -----------------
     // Espera o consumidor chegar ao último item enfileirado, aplica as respostas no espelho e
     // relança o erro guardado. Inline: só relança. Adiado: consome o que estiver na fila.
+    // As respostas aplicadas são as devidas (at <= agora); com W = 0 são todas.
     void fence() {
         if (needsFence()) fenceSlow();
+    }
+    // Sincroniza o espelho do EE (CSR, IMR, SIGLBLID, INTC_GS, FINISH pendentes) com o relógio de
+    // agora: espera o consumidor processar os itens com carimbo + W <= agora e aplica as respostas
+    // com at <= agora. Menos espera que fence() quando W > 0. Sem horizonte (W = 0, ou relógio
+    // real) é o fence completo.
+    void syncMirror() {
+        if (needsMirrorSync(true)) syncSlow(true);
+    }
+    // O mesmo no safepoint (Timing::process, nextEventTime, entrega de interrupções). No relógio
+    // real não espera: aplica o que o consumidor já publicou.
+    void poll() {
+        if (needsMirrorSync(false)) syncSlow(false);
     }
     // Há o que um fence faria: itens não processados, respostas não aplicadas ou erro guardado.
     bool needsFence() const {
         return processedSeq_.load(std::memory_order_acquire) + 1 != nextSeq_ ||
-               respCount_.load(std::memory_order_acquire) != 0 || failed_.load(std::memory_order_acquire);
+               respCount_.load(std::memory_order_acquire) != 0 || failed_.load(std::memory_order_acquire) ||
+               responseDue();
     }
     std::uint64_t readGsPrivileged(std::uint32_t addr, std::uint32_t pc);
     // CSR como o EE o lê em `now` (sem contar como leitura privilegiada).
     std::uint64_t csr(std::uint64_t now);
     std::uint64_t imr();
-    void setImr(std::uint64_t v) { fence(); eeState().setImr(v); }
+    void setImr(std::uint64_t v) {
+        syncMirror();
+        eeState().setImr(v);
+    }
     std::uint32_t readGif(std::uint32_t addr, std::uint32_t pc);
     // PATH3 mascarado (MSKPATH3): espelho do EE, sem fence (ver push).
     bool path3Masked();
@@ -168,6 +210,19 @@ public:
     gs::GsEeState& eeState();
     std::uint64_t nextEventTime();
     void processEvents(std::uint64_t now);
+
+    // ---- Horizonte W --------------------------------------------------------------------
+    // Padrão (sem ANYPS2_VU1_HORIZON): 1/4 de quadro, em ciclos do EE.
+    static std::uint64_t defaultHorizon();
+    // W pedido (ciclos do EE; ANYPS2_VU1_HORIZON). Só vale no relógio virtual: horizonActive().
+    std::uint64_t horizon() const { return horizon_; }
+    // W > 0 e relógio virtual: respostas com atraso e esperas só no horizonte.
+    bool horizonActive() const { return w_ != 0; }
+    // Troca W (testes e configuração): esvazia a fila antes e só deve ser chamada antes de o
+    // programa enfileirar de verdade.
+    void setHorizon(std::uint64_t cycles);
+    // Respostas ainda não aplicadas no espelho (at no futuro, ou publicadas e não coletadas).
+    std::size_t pendingResponses() const;
 
     // ---- Modo e diagnóstico -------------------------------------------------------------
     // ANYPS2_VU1_THREAD pedido pelo ambiente (0 ou ausente = inline, senão 1).
@@ -203,7 +258,8 @@ public:
     // Troca o número de slots do anel (potência de 2, >= 2; ANYPS2_VU1_RING). Só com a fila vazia.
     void setRingSlots(std::size_t slots);
     struct Stats {
-        std::uint64_t fenceWaits = 0;  // fences que tiveram de esperar o consumidor
+        std::uint64_t fenceWaits = 0;  // fences de leitura que tiveram de esperar o consumidor
+        std::uint64_t horizonWaits = 0;  // esperas do horizonte (itens com carimbo + W vencido)
         std::uint64_t ringFull = 0;    // vezes em que o EE esperou espaço no anel
         std::uint64_t publishes = 0;   // stores release de publicação (lotes)
     };
@@ -228,8 +284,19 @@ private:
     // o seq é publicado como processado, porque daí o EE pode reaproveitar o slot.
     void consume(const Item& item, Queued* q = nullptr);
     void apply(const Item& item);
-    void applyResponses();
+    // Coleta as respostas publicadas e aplica no espelho as que valem em `now` (at <= now).
+    void applyResponses(std::uint64_t now);
     void fenceSlow();
+    // Há resposta já coletada cujo `at` chegou (só do EE; sem respostas futuras não lê o relógio).
+    bool responseDue() const;
+    // true se syncMirror (wait) ou poll (!wait) teriam o que fazer.
+    bool needsMirrorSync(bool wait) const;
+    void syncSlow(bool wait);
+    // Espera o consumidor processar os itens com carimbo + W <= now (e desconta da lista do EE).
+    void waitHorizon(std::uint64_t now);
+    void noteHorizon(const Item& item);  // EE: item enfileirado entra na lista do horizonte
+    // Processa (adiado) ou espera (thread) até processedSeq_ >= target. Inline: nada a fazer.
+    void drainTo(std::uint64_t target, unsigned part);
     void rethrowPending();
     void fillSlot(Queued& q, const Item& item);
     void trimSlot(Queued& q);
@@ -257,6 +324,20 @@ private:
     bool threaded_ = false;
     bool forceFence_ = false;
     bool path3MaskedEe_ = false;  // espelho do Gif::path3Masked, na ordem de emissão do EE
+    bool virtual_ = false;        // relógio virtual (só nele há horizonte)
+    std::uint64_t horizon_ = 0;   // W pedido
+    std::uint64_t w_ = 0;         // W efetivo: horizon_ no relógio virtual, 0 no real
+    // Lista do horizonte (só do EE, igual em todos os modos): carimbo (máximo até o item) e último
+    // seq com esse carimbo, dos itens ainda não "vencidos" (carimbo + W > último agora visto).
+    struct HorizonEntry {
+        std::uint64_t stamp;
+        std::uint64_t seq;
+    };
+    std::deque<HorizonEntry> horizonQ_;
+    // Respostas já coletadas da fila do consumidor e ainda não aplicadas (at > agora). Só do EE.
+    std::deque<gs::GsEvent> due_;
+    // Máximo dos carimbos até o item atual do consumidor (só do consumidor): o `at` das respostas.
+    std::uint64_t consStamp_ = 0;
     // EE: numeração. O seq do item é o índice (1-based) do slot no anel.
     std::uint64_t nextSeq_ = 1;
     // Último seq consumido: escrito pelo consumidor (a thread, ou o EE em inline/adiado).
