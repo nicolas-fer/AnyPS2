@@ -332,19 +332,17 @@ void Gs::draw(std::uint32_t pc) {
         }
         // Para quem acessa a VRAM direto do produtor (trackOutstanding): a barreira
         // do próprio desenho conclui estes acessos.
-        flushHost();
         for (unsigned i = 0; i < nw; ++i) noteOutstanding(writes[i]);
         for (unsigned j = 0; j < nr; ++j) noteOutstanding(reads[j]);
         submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); }, BandStats::SubmitDraw);
-        demoteIfOverlaps(writes, nw);
-        demoteIfOverlaps(reads, nr);
+        noteHostHazard(writes, nw);
+        noteHostHazard(reads, nr);
         if (traced) trace_->endDraw(*this);
         return;
     }
 
     // Colisão com o que está pendente: barreira antes do desenho (as faixas
     // terminam o que já têm). Depois, o desenho entra como pendente.
-    flushHost();  // HOST→LOCAL anterior precisa vir antes deste desenho
     bool conflict = false;
     if (pending_.full()) {
         conflict = true;
@@ -390,8 +388,8 @@ void Gs::draw(std::uint32_t pc) {
             worker_->push(lane, task);
         }
     }
-    demoteIfOverlaps(writes, nw);
-    demoteIfOverlaps(reads, nr);
+    noteHostHazard(writes, nw);
+    noteHostHazard(reads, nr);
     if (traced) trace_->endDraw(*this);
 }
 

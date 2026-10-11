@@ -125,47 +125,31 @@ void Gs::noteOutstanding(VramAccess a) {
 
 bool Gs::outstandingConflicts(const VramAccess& a) {
     if (!trackOutstanding()) return true;
-    // Transferência direta: o próprio produtor escreve, na ordem do programa, então
-    // não colide com o que ele mesmo faz; só a em lotes (worker) conta.
-    if (hostOpenValid_ && !hostDirect_ && accessesOverlap(hostOpen_, a)) return true;
+    // A transferência aberta é escrita pelo próprio produtor, na ordem do programa,
+    // então não colide com o que ele mesmo faz: só o que está nas faixas conta.
     return outstanding_.conflictsWith(a);
 }
 
-void Gs::demoteHostTransfer() {
-    if (!hostOpenValid_ || !hostDirect_) return;
-    hostDirect_ = false;
-    const Transfer st = xferDirect_;
-    xferDirect_.active = false;
-    submit([this, st] { xfer_ = st; }, BandStats::SubmitHostStart);
-}
-
-void Gs::demoteIfOverlaps(const VramAccess* acc, unsigned n) {
-    if (!hostOpenValid_ || !hostDirect_) return;
+void Gs::noteHostHazard(const VramAccess* acc, unsigned n) {
+    if (!hostOpenValid_ || hostDrain_) return;
     for (unsigned i = 0; i < n; ++i) {
         if (accessesOverlap(hostOpen_, acc[i])) {
-            demoteHostTransfer();
+            // A operação já está nas faixas e as palavras que faltam ainda não foram
+            // escritas: uma leitura (textura, CLUT, cópia) tem de ver só as que já foram, e
+            // uma escrita não pode ser sobrescrita fora de ordem. A próxima palavra espera
+            // as faixas terminarem (writeTransferData); uma espera cobre todas as operações
+            // enfileiradas até lá. Não dá para saber, sem refazer o endereçamento da
+            // palavra, se ela cai na área da operação: a espera é feita por garantia.
+            hostDrain_ = true;
             return;
         }
     }
 }
 
 void Gs::closeHostTransfer() {
-    if (!hostOpenValid_) return;
+    // Tudo o que foi enviado já está na VRAM (modo direto): não há nada a concluir.
     hostOpenValid_ = false;
-    if (hostDirect_) {
-        hostDirect_ = false;  // tudo o que foi escrito já está na VRAM
-        return;
-    }
-    flushHost();
-    // Os dados todos já estão em barreiras enfileiradas; a última conclui a escrita.
-    VramAccess a = hostOpen_;
-    a.seq = worker_->barriersIssued();
-    if (a.seq <= worker_->barriersDone()) return;
-    if (outstanding_.full()) {
-        outstandingLostNeed_ = std::max(outstandingLostNeed_, a.seq);
-        return;
-    }
-    outstanding_.add(a);
+    hostDrain_ = false;
 }
 
 // Retângulo de pixels de uma transferência como acesso. Fora de 0..2047 o
@@ -189,7 +173,10 @@ VramAccess Gs::rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::
 }
 
 void Gs::waitIdle(BandStats::WaitReason why) {
-    flushHost();
+    // Depois da espera nada está pendente nas faixas: os acessos de desenhos já
+    // enfileirados não podem mais colidir com a ordem de uma transferência aberta.
+    hostDrain_ = false;
+    pending_.clear();
     if (!worker_->threaded()) {
         trackOutstanding();
         return;
@@ -218,22 +205,9 @@ std::uint64_t Gs::pixelsShaded() const {
 
 void Gs::submit(GsWorker::Op op, BandStats::SubmitKind kind) {
     ++bandStats_.submit[kind];
-    // Dados HOST→LOCAL acumulados vêm antes desta operação na ordem do GIF.
-    flushHost();
     // A operação global espera as faixas, então nada pendente sobrevive a ela.
     pending_.clear();
     worker_->barrier(std::move(op));
-}
-
-void Gs::flushHost() {
-    if (hostBatch_.empty()) return;
-    // Escrita na VRAM de largura desconhecida: é uma barreira (ver submit).
-    ++bandStats_.hostBatches;
-    pending_.clear();
-    worker_->barrier([this, words = std::move(hostBatch_)] {
-        for (const std::uint64_t d : words) hostWord(xfer_, d);
-    });
-    hostBatch_.clear();  // o que sobrou do movimento (vazio, mas o estado fica definido)
 }
 
 void Gs::unsupported(const std::string& what, std::uint32_t pc) const {
@@ -342,7 +316,7 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 // transferência é zerado, pela própria fila, na mesma ordem.
                 closeHostTransfer();
                 xferDirect_ = {};
-                submit([this] { xfer_ = {}; }, BandStats::SubmitReset);
+                submit([] {}, BandStats::SubmitReset);
                 waitIdle();
                 queued_ = 0;
                 csr_ &= kCsrField;
@@ -529,7 +503,6 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
     // ler a área da CLUT na VRAM agora: nenhum acesso ainda não concluído das faixas
     // (desenho ou transferência) a escreve. Senão a carga vira uma operação global.
     const std::uint64_t texclut = regs_[TEXCLUT];
-    flushHost();  // HOST→LOCAL anterior vem antes (e entra em outstanding_)
     const VramAccess src = clutSource(tex0, texclut);
     auto next = std::make_shared<ClutBuffer>();
     if (clut_->ready.load(std::memory_order_acquire) && !outstandingConflicts(src)) {
@@ -546,7 +519,7 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
         loadClutCells(*next, tex0, texclut);
         next->ready.store(true, std::memory_order_release);
     }, BandStats::SubmitClut);
-    demoteIfOverlaps(&src, 1);
+    noteHostHazard(&src, 1);
     clut_ = std::move(next);
 }
 
@@ -657,32 +630,32 @@ void Gs::startTransfer(std::uint32_t pc) {
             if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
             if (t.w == 0 || t.h == 0) t.active = false;
             if (trace_ && t.active) trace_->vramHostStart(*this, t, pc);
-            // O destino inteiro será escrito pelas faixas, nos lotes que o produtor
-            // ainda vai enviar: aberta até a última palavra (writeTransferData).
+            // O produtor escreve as palavras direto na VRAM, na hora (writeTransferData),
+            // sem passar pelas faixas. Isso só vale se nenhum acesso ainda não concluído das
+            // faixas (desenho que lê ou escreve, cópia, CLUT) toca o destino: se toca, uma
+            // única espera (waitIdle) termina o que está pendente e a transferência segue
+            // direta do mesmo jeito, em vez de ir em lotes pelas faixas, o que deixava o
+            // destino como escrita pendente e fazia cada carga de CLUT seguinte esperar.
             //
-            // Sem barreira quando nenhum acesso ainda não concluído das faixas (desenho
-            // que lê ou escreve, cópia, outra transferência) toca o destino: o produtor
-            // escreve as palavras direto na VRAM, na hora, e as faixas seguem desenhando
-            // em outras páginas. Desenhos enfileirados depois que tocam o destino aberto
-            // rebaixam a transferência para o modo em lotes (demoteHostTransfer).
-            const bool workerOpen = hostOpenValid_ && !hostDirect_;  // outra em lotes, ainda aberta
+            // Desenhos enfileirados depois que tocam o destino aberto veem só as palavras já
+            // escritas se as faixas terminarem antes da palavra seguinte (noteHostHazard).
+            // O modo em lotes não existe mais: o produtor sempre pode esperar, então não há
+            // caso (nem transferência partida) que precise dele.
             closeHostTransfer();
             xferDirect_.active = false;  // a anterior, se ainda aberta, é substituída
-            bool direct = false;
             if (t.active) {
                 const VramAccess dest = rectAccess(true, t.psm, t.dbp, t.dbw, t.x0, t.y0, t.w, t.h);
-                direct = !workerOpen && !outstandingConflicts(dest);
+                if (outstandingConflicts(dest)) {
+                    ++bandStats_.hostBarrier;
+                    waitIdle(BandStats::WaitHost);
+                } else {
+                    ++bandStats_.hostDirect;
+                }
                 hostOpen_ = dest;
                 hostWordsLeft_ = (std::uint64_t{t.w} * t.h * psmTransferBits(t.psm) + 63) / 64;
                 hostOpenValid_ = true;
-                hostDirect_ = direct;
             }
-            if (direct) {
-                xferDirect_ = t;
-                ++bandStats_.hostDirect;
-            } else {
-                submit([this, t] { xfer_ = t; }, BandStats::SubmitHostStart);
-            }
+            xferDirect_ = t;
             return;
         }
         case 1:
@@ -694,7 +667,6 @@ void Gs::startTransfer(std::uint32_t pc) {
         default:
             closeHostTransfer();
             xferDirect_.active = false;
-            submit([this] { xfer_.active = false; }, BandStats::SubmitHostEnd);
             return;
     }
 }
@@ -703,14 +675,16 @@ void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
     (void)pc;
     addWork(1);  // 64 bits: meio ciclo do barramento
     if (trace_) trace_->vramHostWord(*this);
-    if (xferDirect_.active) {
-        hostWord(xferDirect_, data);  // modo direto: na VRAM agora
-    } else {
-        // Em lotes: quem sabe se a transferência ainda está ativa é o worker; aqui só
-        // se junta a palavra. Palavras depois do fim são descartadas lá.
-        hostBatch_.push_back(data);
-        if (hostBatch_.size() >= kHostBatch) flushHost();
+    if (hostDrain_) {
+        // Há um desenho (ou cópia, CLUT) nas faixas que toca o destino: ele vê só as
+        // palavras anteriores a esta se as faixas terminarem antes de ela ser escrita.
+        hostDrain_ = false;
+        if (!worker_->idle()) {
+            ++bandStats_.hostOrder;
+            waitIdle(BandStats::WaitHost);
+        }
     }
+    hostWord(xferDirect_, data);  // na VRAM agora
     if (hostOpenValid_ && --hostWordsLeft_ == 0) closeHostTransfer();
 }
 
@@ -768,13 +742,12 @@ void Gs::localToLocal(std::uint32_t pc) {
                     pc);
     }
     if (trace_) trace_->vramLocalCopy(*this, c, pc);
-    flushHost();  // os lotes anteriores são barreiras que vêm antes desta cópia
     const VramAccess touched[2] = {rectAccess(false, c.spsm, c.sbp, c.sbw, c.sx, c.sy, c.w, c.h),
                                    rectAccess(true, c.dpsm, c.dbp, c.dbw, c.dx, c.dy, c.w, c.h)};
     noteOutstanding(touched[0]);
     noteOutstanding(touched[1]);
     submit([this, c] { copyLocal(c); }, BandStats::SubmitLocal);
-    demoteIfOverlaps(touched, 2);
+    noteHostHazard(touched, 2);
 }
 
 void Gs::copyLocal(const LocalCopy& c) {

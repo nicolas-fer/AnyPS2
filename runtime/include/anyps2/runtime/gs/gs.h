@@ -85,8 +85,6 @@ struct BandStats {
     };
     // Operações globais (Gs::submit).
     enum SubmitKind : unsigned {
-        SubmitHostStart,  // início de transferência HOST→LOCAL
-        SubmitHostEnd,    // fim (TRXDIR = 3) de transferência
         SubmitLocal,      // LOCAL→LOCAL
         SubmitClut,       // carga de CLUT
         SubmitReset,      // reset do GS
@@ -100,6 +98,7 @@ struct BandStats {
         WaitDownload,  // LOCAL→HOST
         WaitSignal,    // SIGNAL
         WaitFinish,    // FINISH no relógio real
+        WaitHost,      // HOST→LOCAL: destino com acesso não concluído, ou ordem com um desenho que o lê
         WaitOther,
         WaitCount
     };
@@ -141,9 +140,10 @@ struct BandStats {
     std::uint64_t self[SelfCount] = {};
     std::uint64_t conflict[ConflictCount] = {};
     std::uint64_t submit[SubmitCount] = {};
-    std::uint64_t hostBatches = 0;  // lotes HOST→LOCAL (flushHost)
     std::uint64_t clutDirect = 0;   // cargas de CLUT feitas no produtor, sem barreira
-    std::uint64_t hostDirect = 0;   // transferências HOST→LOCAL escritas direto pelo produtor
+    std::uint64_t hostDirect = 0;   // transferências HOST→LOCAL escritas direto pelo produtor, sem esperar
+    std::uint64_t hostBarrier = 0;  // ...que esperaram as faixas no início (destino com acesso não concluído)
+    std::uint64_t hostOrder = 0;    // esperas no meio: palavra nova depois de um desenho que lê/escreve o destino aberto
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -288,7 +288,6 @@ private:
     }
     // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
     void submit(GsWorker::Op op, BandStats::SubmitKind kind);
-    void flushHost();
     // Acessos diretos do produtor à VRAM (CLUT): vê se o que as faixas ainda podem
     // estar fazendo não toca as páginas. outstanding_ guarda os acessos de tudo o que
     // foi enfileirado desde que as faixas foram vistas ociosas (diferente de pending_,
@@ -299,17 +298,15 @@ private:
     void noteOutstanding(VramAccess a);
     // Há acesso não concluído que colide com `a` (ou a lista perdeu o rastro).
     bool outstandingConflicts(const VramAccess& a);
-    // Fim da transferência HOST→LOCAL aberta: descarrega o lote e passa o destino
-    // para outstanding_, concluído pela última barreira enfileirada.
+    // Fim da transferência HOST→LOCAL aberta (o produtor já escreveu tudo na VRAM).
     void closeHostTransfer();
     VramAccess rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x0,
                           std::uint32_t y0, std::uint32_t w, std::uint32_t h) const;
     VramAccess clutSource(std::uint64_t tex0, std::uint64_t texclut) const;
     void hostWord(Transfer& x, std::uint64_t data);
-    // Uma operação das faixas tocou o destino de uma transferência direta aberta: as
-    // palavras que faltam passam a ir em lotes, depois da operação (modo do worker).
-    void demoteHostTransfer();
-    void demoteIfOverlaps(const VramAccess* acc, unsigned n);
+    // Uma operação enfileirada nas faixas toca o destino da transferência HOST→LOCAL
+    // aberta: a próxima palavra só é escrita depois de as faixas terminarem (hostDrain_).
+    void noteHostHazard(const VramAccess* acc, unsigned n);
     void copyLocal(const LocalCopy& c);
     void loadClutCells(ClutBuffer& dst, std::uint64_t tex0, std::uint64_t texclut) const;
 
@@ -328,9 +325,7 @@ private:
 
     // Faixas do GS. Tudo que está abaixo de "faixas" é delas: o EE só mexe nesses
     // campos depois de waitIdle() ou dentro de uma operação global (barreira).
-    static constexpr std::size_t kHostBatch = 4096;  // palavras HOST→LOCAL por tarefa
     std::unique_ptr<GsWorker> worker_;
-    std::vector<std::uint64_t> hostBatch_;  // palavras HOST→LOCAL ainda não enfileiradas
     // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
     PendingAccess pending_;
     PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()
@@ -338,7 +333,7 @@ private:
     // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita
     // em andamento enquanto o produtor ainda pode enviar dados.
     bool hostOpenValid_ = false;
-    bool hostDirect_ = false;  // aberta no modo direto (o produtor escreve na VRAM)
+    bool hostDrain_ = false;  // há operação enfileirada que toca o destino aberto: esperar antes da próxima palavra
     VramAccess hostOpen_;
     std::uint64_t hostWordsLeft_ = 0;
 
@@ -356,11 +351,9 @@ private:
     unsigned queued_ = 0;
     unsigned fanFirst_ = 0;
 
-    // Transferência HOST→LOCAL em andamento. Duas cópias do estado, uma por modo:
-    // xfer_ é do worker (palavras em lotes por barreira) e xferDirect_ é do produtor
-    // (palavras escritas na hora; ver startTransfer). Uma transferência usa uma só.
-    Transfer xfer_;        // worker
-    Transfer xferDirect_;  // produtor
+    // Transferência HOST→LOCAL em andamento: o produtor escreve as palavras na VRAM na
+    // hora (ver startTransfer), depois de esperar as faixas se o destino estava em uso.
+    Transfer xferDirect_;
 
     // Transferência LOCAL→HOST: dados prontos para o VIF1 e quanto já saiu
     // (produtor: sai de uma leitura da VRAM feita depois de waitIdle()).

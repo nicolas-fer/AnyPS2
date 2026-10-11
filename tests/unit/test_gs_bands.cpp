@@ -701,15 +701,92 @@ TEST_CASE(gs_bands, host_uploads_are_identical_for_any_lane_count) {
     bool any = false;
     for (std::uint8_t b : ref.img.vram) any = any || b != 0;
     CHECK(any);
-    // Sem thread tudo é direto; só o upload partido, com um desenho que lê o destino no
-    // meio, passa para lotes (uma vez por volta).
+    // Todo upload é direto (o produtor escreve na VRAM), com ou sem espera das faixas.
     CHECK_EQ(ref.stats.hostDirect, 12u * 5 + 1);
-    CHECK_EQ(ref.stats.submit[BandStats::SubmitHostStart], 12u);
+    CHECK_EQ(ref.stats.hostBarrier + ref.stats.hostOrder, 0u);  // sem thread não há o que esperar
     for (unsigned rep = 0; rep < 5; ++rep) {
         for (unsigned lanes : {2u, 3u, 4u}) {
             const UploadRender got = renderUploads(true, lanes);
             CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.stats.hostDirect + got.stats.hostBarrier, ref.stats.hostDirect);
             CHECK_EQ(got.img.shaded, got.img.covered);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cache de texturas: transferência grande sobre uma área que desenhos pendentes lêem
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Textura PSMT8 na página 40 e CLUTs nas páginas 44 e 45, todas dentro de uma área de
+// 64x256 PSMCT32 (páginas 40..47) que é reescrita a cada volta por um upload grande,
+// partido ao meio por um desenho que lê a textura (e vê só a primeira metade). Antes e
+// depois do upload há desenhos pendentes que lêem a área, e cargas de CLUT dela.
+UploadRender renderTextureCache(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0x7E27CAC};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    auto drawIndexed = [&g](unsigned cbp, unsigned k) {
+        g.writeRegister(TEX0_1, tex0(40 * 32, 1, PSMT8, 6, 6, cbp * 32, PSMCT32, 1), 0);  // CLD = 1: carrega
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        vertex(g, 1 + k, 4 + k, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 90 + k, 100 + k, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+    };
+    auto split = [&](unsigned k) {
+        g.writeRegister(BITBLTBUF, (std::uint64_t{40 * 32} << 32) | (1ull << 48) | (std::uint64_t{PSMCT32} << 56), 0);
+        g.writeRegister(TRXPOS, 0, 0);
+        g.writeRegister(TRXREG, 64 | (std::uint64_t{256} << 32), 0);
+        g.writeRegister(TRXDIR, 0, 0);
+        for (std::uint64_t d : words(4096)) g.writeRegister(HWREG, d, 0);
+        drawIndexed(44, k + 3);  // lê a textura e a CLUT com só metade do upload feita
+        for (std::uint64_t d : words(4096)) g.writeRegister(HWREG, d, 0);
+    };
+    hostToLocal(g, 40 * 32, 1, PSMCT32, 0, 0, 64, 256, words(8192));
+    for (unsigned k = 0; k < 10; ++k) {
+        drawIndexed(44, k);      // leitores pendentes da área
+        drawIndexed(45, k + 1);
+        split(k);                // a transferência colide com eles
+        for (unsigned c = 0; c < 4; ++c) drawIndexed(44 + (c & 1), k + c);  // CLUT e textura da área
+    }
+    UploadRender out;
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, texture_cache_upload_keeps_clut_loads_barrier_free) {
+    const UploadRender ref = renderTextureCache(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    CHECK_EQ(ref.stats.hostDirect, 11u);
+    CHECK_EQ(ref.stats.clutDirect, 10u * 7);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const UploadRender got = renderTextureCache(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+            // Direta, com ou sem espera pelas faixas no início (depende do tempo).
+            CHECK_EQ(got.stats.hostDirect + got.stats.hostBarrier, 11u);
+            // O upload não fica pendente nas faixas: nenhuma carga de CLUT precisa de barreira.
+            CHECK_EQ(got.stats.submit[BandStats::SubmitClut], 0u);
+            CHECK_EQ(got.stats.clutDirect, ref.stats.clutDirect);
         }
     }
 }
@@ -843,7 +920,7 @@ TEST_CASE(gs_bands, stats_conflict_full) {
     CHECK_EQ(s.bandDraws, 70u);
 }
 
-TEST_CASE(gs_bands, stats_submits_and_host_batches) {
+TEST_CASE(gs_bands, stats_submits_and_host_direct) {
     StatsGs t;
     Gs& g = *t.gs;
     hostToLocal(g, 0, 1, PSMCT32, 0, 0, 8, 8, std::vector<std::uint64_t>(32, 0x1234));
@@ -860,17 +937,15 @@ TEST_CASE(gs_bands, stats_submits_and_host_batches) {
     // Reset do GS
     g.writePrivileged(0x12001000u, 1ull << 9, 0);
     const BandStats& s = g.bandStats();
-    // Nada pendente toca o destino: o produtor escreveu direto, sem barreira.
-    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
+    // Nada pendente toca o destino: o produtor escreveu direto, sem esperar as faixas.
     CHECK_EQ(s.hostDirect, 1u);
-    CHECK_EQ(s.submit[BandStats::SubmitHostEnd], 1u);
+    CHECK_EQ(s.hostBarrier, 0u);
     CHECK_EQ(s.submit[BandStats::SubmitLocal], 1u);
     // A área da CLUT (página 48) não é tocada por nada pendente: carga no produtor.
     CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
     CHECK_EQ(s.clutDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitReset], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitDraw], 0u);
-    CHECK_EQ(s.hostBatches, 0u);
 }
 
 TEST_CASE(gs_bands, stats_waits_by_reason) {
@@ -923,7 +998,20 @@ TEST_CASE(gs_bands, host_upload_away_from_pending_pages_has_no_barrier) {
     hostToLocal(g, 41 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
     const BandStats& s = g.bandStats();
     CHECK_EQ(s.hostDirect, 2u);
-    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
-    CHECK_EQ(s.hostBatches, 0u);
+    CHECK_EQ(s.hostBarrier, 0u);
+    CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
+}
+
+TEST_CASE(gs_bands, upload_over_pending_readers_waits_once_then_writes_direct) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    // Leitores pendentes da área (textura da página 40), todos grandes para seguirem nas faixas.
+    g.writeRegister(TEX0_1, tex0(40 * 32, 1, PSMCT32, 6, 6), 0);
+    for (unsigned i = 0; i < 20; ++i) sprite(g, 0, 0, 100, 63, true);
+    hostToLocal(g, 40 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
+    const BandStats& s = g.bandStats();
+    // Uma espera no início (ou nenhuma, se as faixas já tinham terminado), nunca lotes.
+    CHECK_EQ(s.hostDirect + s.hostBarrier, 1u);
+    CHECK(s.hostOrder == 0u);
     CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
 }
