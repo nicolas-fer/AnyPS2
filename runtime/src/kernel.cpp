@@ -294,6 +294,10 @@ void Kernel::queueAlarm(const Timing::Alarm& a) {
 
 void Kernel::serviceInterrupts(std::uint32_t pc, bool allowReschedule, bool idle) {
     if (interruptDepth_ == 0 && (idle || (rt_.context().cop0[cop0::Status] & ops::kStatusEIE))) {
+        // O INTC_GS (SIGNAL/FINISH/VSINT) vem das respostas do consumidor do VU1/GS: com o consumidor
+        // em outra thread, a entrega só vale depois de um fence, senão o instante dela dependeria
+        // do escalonamento (mesmo ponto lógico do modo inline, W = 0).
+        rt_.vu1Stream().fence();
         // Um handler pode gerar novas causas; limita as voltas por segurança.
         for (int round = 0; round < 8; ++round) {
             // INTC_DMAC (1) pertence ao kernel: despacha para os handlers de

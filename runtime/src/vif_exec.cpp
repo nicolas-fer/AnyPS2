@@ -15,6 +15,7 @@ VifExec::VifExec(Runtime* rt, unsigned unit, VuMemory& vu, Gif* gif) : rt_(rt), 
 void VifExec::apply(const VifItem& item) {
     switch (item.kind) {
         case VifItem::Kind::Unpack: {
+            const HostProfile::Scope prof(HostProfile::Vif);  // no consumidor do VU1 isto não está dentro do parse do EE
             std::uint8_t* mem = unit_ == 0 ? vu_.data0.get() : vu_.data1.get();
             for (std::size_t i = 0; i < item.count; ++i) {
                 const VifQwWrite& w = item.writes[i];
@@ -26,6 +27,7 @@ void VifExec::apply(const VifItem& item) {
             break;
         }
         case VifItem::Kind::Mpg: {
+            const HostProfile::Scope prof(HostProfile::Vif);
             std::uint8_t* mem = unit_ == 0 ? vu_.micro0.get() : vu_.micro1.get();
             const std::uint32_t size = unit_ == 0 ? VuMemory::kVu0Size : VuMemory::kVu1Size;
             std::uint32_t addr = item.addr;

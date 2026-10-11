@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <utility>
@@ -21,6 +22,7 @@
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "minitest.h"
 #include "vif_frozen.h"
 
@@ -283,7 +285,13 @@ template <typename Old>
 struct Pair {
     Side a, b;  // a: Vif novo (rt.vif0/vif1); b: Vif congelado
     Old old0, old1;
-    Pair() : old0(&b.rt, 0, b.rt.vu(), &b.rt.gif()), old1(&b.rt, 1, b.rt.vu(), &b.rt.gif()) {}
+    Pair() : old0(&b.rt, 0, b.rt.vu(), &b.rt.gif()), old1(&b.rt, 1, b.rt.vu(), &b.rt.gif()) {
+        // Com o VU1 em outra thread (ANYPS2_VU1_THREAD=1) o erro do consumidor sobe no próximo
+        // fence ou enfileiramento; com o fence forçado a cada item ele sobe no mesmo item que o
+        // lado síncrono, que é o que este diferencial compara. A thread sem o fence forçado (e os
+        // erros que sobem depois) tem o seu diferencial em test_vu1_thread.cpp.
+        a.rt.vu1Stream().setForceFence(true);
+    }
     Vif& nv(unsigned u) { return u == 0 ? a.rt.vif0() : a.rt.vif1(); }
     Old& ov(unsigned u) { return u == 0 ? old0 : old1; }
 };
@@ -310,7 +318,11 @@ std::string diff(P& p, unsigned unit, bool deep) {
     if (p.a.rt.gif().path3Masked() != p.b.rt.gif().path3Masked()) return "PATH3 mascarado";
     const VuMemory& x = p.a.rt.vu();
     const VuMemory& y = p.b.rt.vu();
-    if (std::memcmp(x.data1.get(), y.data1.get(), VuMemory::kVu1Size) != 0) return "memória de dados do VU1";
+    if (std::memcmp(x.data1.get(), y.data1.get(), VuMemory::kVu1Size) != 0) {
+        std::uint32_t o = 0;
+        while (x.data1[o] == y.data1[o]) ++o;
+        return "memória de dados do VU1 em " + hexs(o) + ": " + hexs(x.data1[o]) + " != " + hexs(y.data1[o]);
+    }
     if (std::memcmp(x.micro1.get(), y.micro1.get(), VuMemory::kVu1Size) != 0) return "micro memória do VU1";
     if (std::memcmp(x.data0.get(), y.data0.get(), VuMemory::kVu0Size) != 0) return "memória de dados do VU0";
     if (std::memcmp(x.micro0.get(), y.micro0.get(), VuMemory::kVu0Size) != 0) {
@@ -379,7 +391,26 @@ std::string runCase(Pair<T>& p, Rng& r, unsigned unit, const Stream& st, std::ui
     bool threw = false;
     // Aplica f aos dois lados e compara retorno, exceção e todo o estado.
     auto step = [&](auto&& f) -> std::string {
-        const Outcome oa = call(p.nv(unit), f), ob = call(p.ov(unit), f);
+        // Com ANYPS2_VU1_THREAD=1 o Vif novo entrega ao consumidor em outra thread: o fence logo
+        // depois da chamada (na mesma tentativa) traz o erro dele ao mesmo ponto do lado congelado,
+        // e deixa o consumidor ocioso para as leituras do diff.
+        auto fa = [&](auto& vif) {
+            std::exception_ptr ep;
+            std::size_t ret = 0;
+            try {
+                ret = f(vif);
+            } catch (...) {
+                ep = std::current_exception();
+            }
+            try {
+                p.a.rt.vu1Stream().fence();
+            } catch (...) {
+                ep = std::current_exception();  // o erro do consumidor veio antes, no fluxo
+            }
+            if (ep) std::rethrow_exception(ep);
+            return ret;
+        };
+        const Outcome oa = call(p.nv(unit), fa), ob = call(p.ov(unit), f);
         ++tally.calls;
         if (oa.err != ob.err) return "exceção: [" + oa.err + "] != [" + ob.err + "]";
         if (oa.ret != ob.ret) return "retorno " + hexs(oa.ret) + " != " + hexs(ob.ret);
@@ -387,7 +418,9 @@ std::string runCase(Pair<T>& p, Rng& r, unsigned unit, const Stream& st, std::ui
             threw = true;
             ++tally.throws;
         }
-        return diff(p, unit, (tally.calls % 8) == 0 || threw);
+        const std::string dd = diff(p, unit, (tally.calls % 8) == 0 || threw);
+        if (!dd.empty()) return dd + " [erro=" + oa.err + "; ret=" + hexs(oa.ret) + "; chamada=" + hexs(tally.calls) + "]";
+        return dd;
     };
     auto reg = [&](std::uint32_t off, std::uint32_t v) {
         return step([&](auto& vif) {

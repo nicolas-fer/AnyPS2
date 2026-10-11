@@ -115,7 +115,9 @@ std::uint64_t Hardware::read64(std::uint32_t addr, unsigned size, std::uint32_t 
                             pc);
     }
     switch (reg) {
-        case 0x1000F000: return rt_.kernel().intcStat();
+        case 0x1000F000:  // o INTC_GS vem de uma resposta do consumidor do VU1/GS
+            rt_.vu1Stream().fence();
+            return rt_.kernel().intcStat();
         case 0x1000F010: return rt_.kernel().intcMask();
         case 0x1000F110: return 0x60;  // SIO_LSR: transmissor vazio
         default: break;
@@ -162,7 +164,10 @@ void Hardware::write64(std::uint32_t addr, std::uint64_t value, unsigned size, s
         return;
     }
     switch (reg) {
-        case 0x1000F000: rt_.kernel().clearIntcStat(static_cast<std::uint32_t>(value)); return;  // 1 limpa
+        case 0x1000F000:  // 1 limpa; antes, as respostas do consumidor (INTC_GS) que já valiam entram
+            rt_.vu1Stream().fence();
+            rt_.kernel().clearIntcStat(static_cast<std::uint32_t>(value));
+            return;
         case 0x1000F010: rt_.kernel().toggleIntcMask(static_cast<std::uint32_t>(value)); return;  // 1 inverte
         case 0x1000F180: {  // SIO_TXFIFO: saída de debug do kernel/EE
             const char ch = static_cast<char>(value & 0xFF);

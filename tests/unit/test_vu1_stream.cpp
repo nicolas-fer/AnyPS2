@@ -56,6 +56,11 @@ struct Env {
         return o;
     }();
     Runtime rt{info, options};
+    // Estes testes tratam do modo inline e do adiado (a ordem, a cópia, os erros no ponto exato):
+    // valem com qualquer ANYPS2_VU1_THREAD no ambiente. A thread tem o seu arquivo (test_vu1_thread.cpp).
+    explicit Env(bool forceInline = true) {
+        if (forceInline) rt.vu1Stream().setThreaded(false);
+    }
 };
 
 constexpr std::uint32_t kLNop = 0x8000033Cu, kUNop = 0x000002FFu, kEnd = 1u << 30;
@@ -408,42 +413,58 @@ TEST_CASE(vu1_stream, gif_registers_through_the_queue) {
     m.masked = true;
     s.pushVif(m);
     CHECK_EQ(s.queued(), 2u);
-    CHECK(s.path3Masked());  // fence
+    CHECK(s.path3Masked());  // espelho do EE, na ordem de emissão: não precisa de fence
+    CHECK_EQ(s.queued(), 2u);
+    s.fence();
     CHECK_EQ(s.queued(), 0u);
+    CHECK(e.rt.gif().path3Masked());  // o do consumidor chegou ao mesmo valor
     CHECK_EQ(s.readGif(0x10003010u, 0), 5u);
     CHECK_EQ(s.readGif(0x10003020u, 0) & 2u, 2u);  // GIF_STAT.M3P
     s.pushGifReset();
     CHECK(!s.path3Masked());
 }
 
-// ANYPS2_VU1_THREAD: 0 (ou ausente) = inline; 1 ainda não existe: avisa e cai no inline.
-TEST_CASE(vu1_stream, thread_key_is_read_and_falls_back_to_inline) {
+// ANYPS2_VU1_THREAD: 0 (ou ausente) = inline; 1 = thread consumidora (a fatia 5), que dá o mesmo
+// resultado depois de um fence. ANYPS2_TRACE=gs força o inline, com aviso.
+TEST_CASE(vu1_stream, thread_key_is_read) {
+    const char* before = std::getenv("ANYPS2_VU1_THREAD");
+    const std::string saved = before ? before : "";
+    auto setKey = [](const char* v) {
+#ifdef _WIN32
+        _putenv_s("ANYPS2_VU1_THREAD", v);
+#else
+        setenv("ANYPS2_VU1_THREAD", v, 1);
+#endif
+    };
+    setKey("0");
     {
-        Env e;
+        Env e(false);
         CHECK_EQ(e.rt.vu1Stream().requestedThread(), 0u);
         CHECK(e.rt.vu1Stream().inlineMode());
+        CHECK(!e.rt.vu1Stream().threaded());
     }
-#ifdef _WIN32
-    _putenv_s("ANYPS2_VU1_THREAD", "1");
-#else
-    setenv("ANYPS2_VU1_THREAD", "1", 1);
-#endif
+    setKey("1");
     {
-        Env e;
+        Env e(false);
         CHECK_EQ(e.rt.vu1Stream().requestedThread(), 1u);
-        CHECK(e.rt.vu1Stream().inlineMode());
+        CHECK(e.rt.vu1Stream().threaded());
+        CHECK(!e.rt.vu1Stream().inlineMode());
         Pkt p(1);
         p.ad(TEST_1, 4);
-        e.rt.vu1Stream().pushPath3(p.data(), p.qwords(), 0);  // funciona, na hora
+        e.rt.vu1Stream().pushPath3(p.data(), p.qwords(), 0);
+        e.rt.vu1Stream().fence();  // o consumidor roda em outra thread: o resultado vale depois do fence
         CHECK_EQ(e.rt.gs().reg(TEST_1), 4u);
     }
-#ifdef _WIN32
-    _putenv_s("ANYPS2_VU1_THREAD", "0");
-#else
-    setenv("ANYPS2_VU1_THREAD", "0", 1);
-#endif
+    // Com o rastreio do GS ligado a thread não liga: as linhas do EE e do consumidor se misturariam.
     {
-        Env e;
-        CHECK_EQ(e.rt.vu1Stream().requestedThread(), 0u);
+        ProgramInfo info{"teste", 0, nullptr, 0, "nenhum.image"};
+        RuntimeOptions o;
+        o.virtualClock = true;
+        o.traceGs = true;
+        Runtime rt{info, o};
+        CHECK_EQ(rt.vu1Stream().requestedThread(), 1u);
+        CHECK(!rt.vu1Stream().threaded());
+        CHECK(rt.vu1Stream().inlineMode());
     }
+    setKey(saved.empty() ? "0" : saved.c_str());
 }

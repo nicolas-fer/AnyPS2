@@ -126,6 +126,9 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
 }
 
 Runtime::~Runtime() {
+    // A thread do VU1 usa o Gs, o GIF e os VUs: para antes de qualquer relatório que os leia (e
+    // antes de eles serem destruídos), também no caminho de erro.
+    if (vu1Stream_) vu1Stream_->shutdown();
     printProfile();
     if (options_.profile) {
         std::fputs(HostProfile::report().c_str(), stderr);
@@ -343,6 +346,9 @@ int Runtime::run(const std::vector<std::string>& args, const std::string& imageP
     audio_ = std::make_unique<Audio>(options_);
     video_ = createVideo(options_, program_.name, input_.get());
     const int code = kernel_->runMain(program_.entry);
+    // O que ainda estiver no anel do VU1 roda antes do screenshot (e um erro guardado do
+    // consumidor sai como saía do enfileiramento).
+    vu1Stream_->fence();
     std::fflush(stdout);
     iop_->flushAudio(0);
     saveScreenshot();

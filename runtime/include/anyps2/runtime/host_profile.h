@@ -17,8 +17,10 @@ struct TexCacheReport;
 // Contadores da medição "vu1 sync" (ANYPS2_PROFILE=1): quantas vezes por quadro o EE
 // teria de esperar uma thread dona do VU1/GIF/GS (cada contador é um ponto de sincronia
 // potencial), como os lotes do VIF1 se espaçam e como os eventos do GS são entregues.
-// Só observam: nada aqui altera o estado emulado. Tudo roda na thread do EE (o produtor
-// do GS também), então os campos são simples, sem atômicos.
+// Só observam: nada aqui altera o estado emulado. Os campos são simples, sem atômicos: com o
+// VU1 em outra thread (ANYPS2_VU1_THREAD=1), os contadores que o consumidor incrementa (eventos
+// do GS escritos, MSCAL e XGKICK) vão para uma cópia própria dele (consSync_) e só são somados
+// na hora do relatório, depois de um fence do EE.
 struct SyncStats {
     static constexpr unsigned kBuckets = 48;  // histogramas em potências de 2
     // Eventos do GS: SIGNAL, FINISH, LABEL; origem 0 = escrita direta/privilegiada,
@@ -56,7 +58,10 @@ struct SyncStats {
 // gasta o tempo de cada quadro. A contagem é exclusiva — um desenho do GS
 // disparado pelo VU1 (XGKICK) conta para o GS, não para o VU1. O que não
 // está em nenhuma parte (código do EE, HLE do kernel e do IOP) fica em "EE".
-// Só uma thread do EE roda por vez (bastão do kernel), então a pilha é única.
+// Só uma thread do EE roda por vez (bastão do kernel), então a pilha do EE é única. Com o VU1 em
+// outra thread (Vu1Stream), o consumidor tem a SUA pilha e os seus tempos (bindConsumerThread):
+// o que ele mede (VU1, GIF, GS produtor, UNPACK/MPG) deixa de entrar nos baldes do EE, e o
+// relatório mostra as duas trilhas. As trilhas só trocam dados por atômicos relaxados.
 class HostProfile {
     using Clock = std::chrono::steady_clock;
 
@@ -64,10 +69,20 @@ public:
     // GsWait: o EE parado esperando o worker do GS (leitura da VRAM, FINISH,
     // VBlank). O desenho em si roda na thread do worker e é medido à parte
     // (addWorker), como fração do tempo de parede.
-    enum Part : unsigned { Ee, Gif, Gs, GsWait, Vu0, Vu1, Ipu, Vif, Count };
+    //
+    // Só na trilha do EE: VuWait (o EE parado em fence, esperando o consumidor do VU1) e RingFull
+    // (parado porque o anel de itens encheu). Só na trilha do consumidor: Idle (sem itens) e Item
+    // (aplicando um item fora das demais partes).
+    enum Part : unsigned { Ee, Gif, Gs, GsWait, Vu0, Vu1, Ipu, Vif, VuWait, RingFull, Idle, Item, Count };
 
     static void enable();
     static bool enabled() { return enabled_; }
+    // O Vu1Stream com thread liga o relatório das duas trilhas.
+    static void setThreaded(bool on) { threaded_ = on; }
+    static bool threaded() { return threaded_; }
+    // Chamada pela thread consumidora no começo: a partir daí os Scope e as contagens dela são
+    // da trilha do consumidor (começa em Idle).
+    static void bindConsumerThread();
     // Relatório (percentual e segundos de cada parte desde enable()).
     static std::string report();
     // Relatório do trecho desde a última chamada (ou desde enable()), com a
@@ -96,12 +111,15 @@ public:
     static std::string syncInterval(std::uint64_t vblank);
     static std::string syncReport(std::uint64_t vblank);
     static SyncStats& sync() { return sync_; }
+    // Os contadores do EE somados aos do consumidor do VU1 (só com o consumidor ocioso: depois de
+    // um fence). Sem thread é igual a sync().
+    static SyncStats syncTotals() { return merged(); }
     // Soma 1 a um contador (um teste de bool com o perfil desligado).
     static void count(std::uint64_t SyncStats::* field) {
         if (enabled_) ++(sync_.*field);
     }
     static void gsEvent(SyncStats::Ev ev, unsigned source) {
-        if (enabled_) ++sync_.evWrites[ev][source < 4 ? source : 4];
+        if (enabled_) ++(onConsumer() ? consSync_ : sync_).evWrites[ev][source < 4 ? source : 4];
     }
     // Entrega de um evento do GS ao CSR (bit do CSR: 0 SIGNAL, 1 FINISH, 3 VSINT).
     static void gsRaise(unsigned csrBit, SyncStats::Outcome outcome) {
@@ -111,7 +129,13 @@ public:
         if (k != SyncStats::RaiseCount) ++sync_.evRaises[k][outcome];
     }
     // MSCAL/MSCALF/MSCNT do VIF1 e XGKICK: contam no total e no lote aberto, se houver.
+    // Com o VU1 em outra thread o consumidor só conta os totais (consSync_); o lote do VIF1 é do
+    // EE, que conta no enfileiramento o MSCAL que entra nele (noteMscalEnqueued). O XGKICK
+    // acontece no consumidor, então batchXgkick fica em 0 nesse modo.
     static void noteMscal(bool isMscnt);
+    static void noteMscalEnqueued() {
+        if (enabled_ && batchOpen_) ++batchMscal_;
+    }
     static void noteXgkick();
     // Para os testes: desliga o perfil de novo (enable() zera os contadores).
     static void disable() { enabled_ = false; }
@@ -161,19 +185,36 @@ public:
     };
 
 private:
-    static void charge(Clock::time_point now);
+    // Uma trilha de tempo: a parte corrente e os ns acumulados por parte. Só o dono (a thread do
+    // EE, ou o consumidor) a altera; a outra thread lê por atômicos relaxados (relatório).
+    struct Track {
+        std::atomic<unsigned> current{Ee};
+        std::atomic<std::int64_t> sinceNs{0};  // steady_clock, desde a época dele
+        std::atomic<std::int64_t> ns[Count] = {};
+        std::int64_t mark[Count] = {};  // só o relatório (thread do EE)
+    };
+    static std::int64_t nowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    }
+    static void charge(Track& t, std::int64_t now);
+    // ns por parte da trilha, com o trecho aberto da parte corrente somado.
+    static void snapshot(const Track& t, std::int64_t (&out)[Count]);
+    static bool onConsumer() { return track_ != &tracks_[0]; }
+    static std::string trackLine(const char* const (&names)[Count], const Track& t, const char* head, bool interval,
+                                 std::uint64_t vblank);
+    static SyncStats merged();
     static inline bool enabled_ = false;
-    static inline Part current_ = Ee;
-    static inline Clock::time_point since_{};
+    static inline bool threaded_ = false;
+    static inline Track tracks_[2];  // 0 = EE, 1 = consumidor do VU1
+    static inline thread_local Track* track_ = &tracks_[0];
     static inline Clock::time_point start_{};
-    static inline std::int64_t ns_[Count] = {};
-    static inline std::int64_t mark_[Count] = {};
     static inline std::uint64_t markVblank_ = 0;
     static inline std::atomic<std::int64_t> workerNs_{0};
     static inline std::atomic<unsigned> workerLanes_{1};
     static inline std::int64_t workerMark_ = 0;
     static inline std::uint64_t bandsMarkVblank_ = 0;
     static inline SyncStats sync_{};
+    static inline SyncStats consSync_{};  // o que o consumidor conta (evWrites, mscalTotal, mscnt, xgkickTotal)
     static inline std::uint64_t syncMarkVblank_ = 0;
     // Lote do VIF1 aberto: o que aconteceu dentro dele até agora.
     static inline bool batchOpen_ = false;

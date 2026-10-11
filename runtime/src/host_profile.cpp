@@ -11,10 +11,16 @@ namespace anyps2::rt {
 
 void HostProfile::enable() {
     enabled_ = true;
-    current_ = Ee;
-    start_ = since_ = Clock::now();
-    for (auto& n : ns_) n = 0;
-    for (auto& n : mark_) n = 0;
+    const std::int64_t now = nowNs();
+    start_ = Clock::now();
+    for (Track& t : tracks_) {
+        t.current = Ee;
+        t.sinceNs = now;
+        for (auto& n : t.ns) n = 0;
+        for (auto& n : t.mark) n = 0;
+    }
+    // O consumidor (se já houver) começa de novo em Idle.
+    tracks_[1].current = Idle;
     markVblank_ = 0;
     workerNs_ = 0;
     workerMark_ = 0;
@@ -23,45 +29,97 @@ void HostProfile::enable() {
     const bool memCounted = sync_.vu1MemCounted;
     sync_ = SyncStats{};
     sync_.vu1MemCounted = memCounted;
+    consSync_ = SyncStats{};
     syncMarkVblank_ = 0;
     batchOpen_ = false;
     batchMscal_ = batchXgkick_ = 0;
     lastStartValid_ = false;
 }
 
-void HostProfile::charge(Clock::time_point now) {
-    ns_[current_] += std::chrono::duration_cast<std::chrono::nanoseconds>(now - since_).count();
-    since_ = now;
+void HostProfile::bindConsumerThread() {
+    track_ = &tracks_[1];
+    tracks_[1].current = Idle;
+    tracks_[1].sinceNs = nowNs();
+}
+
+void HostProfile::charge(Track& t, std::int64_t now) {
+    const std::int64_t since = t.sinceNs.load(std::memory_order_relaxed);
+    const unsigned cur = t.current.load(std::memory_order_relaxed);
+    t.ns[cur].store(t.ns[cur].load(std::memory_order_relaxed) + (now - since), std::memory_order_relaxed);
+    t.sinceNs.store(now, std::memory_order_relaxed);
+}
+
+void HostProfile::snapshot(const Track& t, std::int64_t (&out)[Count]) {
+    const std::int64_t since = t.sinceNs.load(std::memory_order_relaxed);
+    const unsigned cur = t.current.load(std::memory_order_relaxed);
+    const std::int64_t open = nowNs() - since;
+    for (unsigned i = 0; i < Count; ++i) {
+        out[i] = t.ns[i].load(std::memory_order_relaxed) + (i == cur && open > 0 ? open : 0);
+    }
 }
 
 void HostProfile::Scope::enter(Part p) {
-    charge(Clock::now());
-    previous_ = current_;
-    current_ = p;
+    Track& t = *track_;
+    charge(t, nowNs());
+    previous_ = static_cast<Part>(t.current.load(std::memory_order_relaxed));
+    t.current.store(p, std::memory_order_relaxed);
     active_ = true;
 }
 
 void HostProfile::Scope::leave() {
-    charge(Clock::now());
-    current_ = previous_;
+    Track& t = *track_;
+    charge(t, nowNs());
+    t.current.store(previous_, std::memory_order_relaxed);
 }
+
+namespace {
+// Partes da trilha do EE e da trilha do consumidor do VU1, na ordem do relatório.
+constexpr HostProfile::Part kEeParts[] = {HostProfile::Ee,    HostProfile::Gif,  HostProfile::Gs,
+                                          HostProfile::GsWait, HostProfile::Vu0, HostProfile::Vu1,
+                                          HostProfile::Ipu,   HostProfile::Vif,  HostProfile::VuWait,
+                                          HostProfile::RingFull};
+constexpr HostProfile::Part kConsParts[] = {HostProfile::Item, HostProfile::Gif, HostProfile::Gs,
+                                            HostProfile::GsWait, HostProfile::Vu1, HostProfile::Vif,
+                                            HostProfile::Idle};
+}  // namespace
 
 std::string HostProfile::report() {
     if (!enabled_) return "";
-    charge(Clock::now());
     static const char* kNames[Count] = {"EE (código e HLE)", "GIF", "GS (desenho no EE)", "GS (EE esperando o worker)",
-                                            "VU0", "VU1", "IPU", "VIF (parse e UNPACK)"};
+                                        "VU0", "VU1", "IPU", "VIF (parse e UNPACK)",
+                                        "espera pelo VU1 (fence)", "anel cheio",
+                                        "ocioso", "item (outros)"};
+    static const char* kConsNames[Count] = {"", "GIF", "GS (produtor)", "GS (esperando o worker)", "", "VU1", "",
+                                            "VIF (UNPACK e MPG)", "", "", "ocioso (anel vazio)", "item (outros)"};
+    std::int64_t ns[Count];
+    snapshot(tracks_[0], ns);
     std::int64_t total = 0;
-    for (auto n : ns_) total += n;
+    for (auto n : ns) total += n;
     std::string s;
-    char line[128];
-    std::snprintf(line, sizeof line, "[perfil] tempo do host: %.2f s\n", static_cast<double>(total) / 1e9);
+    char line[160];
+    std::snprintf(line, sizeof line, "[perfil] tempo do host: %.2f s%s\n", static_cast<double>(total) / 1e9,
+                  threaded_ ? " (thread do EE)" : "");
     s += line;
-    for (unsigned i = 0; i < Count; ++i) {
+    for (const Part i : kEeParts) {
+        if ((i == VuWait || i == RingFull) && !threaded_) continue;
         std::snprintf(line, sizeof line, "[perfil] %6.2f%%  %8.2f s  %s\n",
-                      total ? 100.0 * static_cast<double>(ns_[i]) / static_cast<double>(total) : 0.0,
-                      static_cast<double>(ns_[i]) / 1e9, kNames[i]);
+                      total ? 100.0 * static_cast<double>(ns[i]) / static_cast<double>(total) : 0.0,
+                      static_cast<double>(ns[i]) / 1e9, kNames[i]);
         s += line;
+    }
+    if (threaded_) {
+        std::int64_t cs[Count];
+        snapshot(tracks_[1], cs);
+        std::int64_t ctotal = 0;
+        for (auto n : cs) ctotal += n;
+        std::snprintf(line, sizeof line, "[perfil] thread do VU1: %.2f s\n", static_cast<double>(ctotal) / 1e9);
+        s += line;
+        for (const Part i : kConsParts) {
+            std::snprintf(line, sizeof line, "[perfil] %6.2f%%  %8.2f s  %s\n",
+                          ctotal ? 100.0 * static_cast<double>(cs[i]) / static_cast<double>(ctotal) : 0.0,
+                          static_cast<double>(cs[i]) / 1e9, kConsNames[i]);
+            s += line;
+        }
     }
     const unsigned lanes = workerLanes_.load();
     const double busy = static_cast<double>(workerNs_.load());
@@ -76,29 +134,48 @@ std::string HostProfile::report() {
 
 std::string HostProfile::interval(std::uint64_t vblank) {
     if (!enabled_) return "";
-    charge(Clock::now());
-    static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU", "VIF"};
+    static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU", "VIF",
+                                        "VUesp", "Anel", "ocioso", "item"};
+    Track& t0 = tracks_[0];
+    std::int64_t cur[Count];
+    snapshot(t0, cur);
     std::int64_t total = 0;
-    for (unsigned i = 0; i < Count; ++i) total += ns_[i] - mark_[i];
-    char line[96];
+    for (unsigned i = 0; i < Count; ++i) total += cur[i] - t0.mark[i];
+    char line[160];
     std::snprintf(line, sizeof line, "[perfil] VBlank %llu-%llu: %.1f VBlanks/s;",
                   static_cast<unsigned long long>(markVblank_), static_cast<unsigned long long>(vblank),
                   total ? static_cast<double>(vblank - markVblank_) * 1e9 / static_cast<double>(total) : 0.0);
     std::string s = line;
-    for (unsigned i = 0; i < Count; ++i) {
+    for (const Part i : kEeParts) {
+        if ((i == VuWait || i == RingFull) && !threaded_) continue;
         std::snprintf(line, sizeof line, " %s %.0f%%", kShort[i],
-                      total ? 100.0 * static_cast<double>(ns_[i] - mark_[i]) / static_cast<double>(total) : 0.0);
+                      total ? 100.0 * static_cast<double>(cur[i] - t0.mark[i]) / static_cast<double>(total) : 0.0);
         s += line;
-        mark_[i] = ns_[i];
     }
+    for (unsigned i = 0; i < Count; ++i) t0.mark[i] = cur[i];
     const std::int64_t worker = workerNs_.load() - workerMark_;
     workerMark_ += worker;
     const double lanes = static_cast<double>(workerLanes_.load());
     std::snprintf(line, sizeof line, "; GS por faixa %.0f%%",
                   total ? 100.0 * static_cast<double>(worker) / (lanes * static_cast<double>(total)) : 0.0);
     s += line;
+    s += "\n";
+    if (threaded_) {
+        // Thread do VU1: percentagem do tempo de parede do trecho (o mesmo `total` do EE).
+        Track& t1 = tracks_[1];
+        std::int64_t cs[Count];
+        snapshot(t1, cs);
+        s += "[perfil] thread do VU1:";
+        for (const Part i : kConsParts) {
+            std::snprintf(line, sizeof line, " %s %.0f%%", kShort[i],
+                          total ? 100.0 * static_cast<double>(cs[i] - t1.mark[i]) / static_cast<double>(total) : 0.0);
+            s += line;
+        }
+        for (unsigned i = 0; i < Count; ++i) t1.mark[i] = cs[i];
+        s += "\n";
+    }
     markVblank_ = vblank;
-    return s + "\n";
+    return s;
 }
 
 namespace {
@@ -550,8 +627,9 @@ std::string HostProfile::syncInterval(std::uint64_t vblank) {
     SyncStats& mark = syncMark();
     char unit[48];
     std::snprintf(unit, sizeof unit, "por VBlank (%llu VBlanks)", static_cast<unsigned long long>(n));
-    const std::string s = formatSync(sync_, mark, static_cast<double>(n), unit);
-    mark = sync_;
+    const SyncStats cur = merged();
+    const std::string s = formatSync(cur, mark, static_cast<double>(n), unit);
+    mark = cur;
     syncMarkVblank_ = vblank;
     return s;
 }
@@ -560,11 +638,30 @@ std::string HostProfile::syncReport(std::uint64_t vblank) {
     if (!enabled_) return "";
     char unit[48];
     std::snprintf(unit, sizeof unit, "total (%llu VBlanks)", static_cast<unsigned long long>(vblank));
-    return formatSync(sync_, SyncStats{}, 1.0, unit);
+    return formatSync(merged(), SyncStats{}, 1.0, unit);
+}
+
+// Os contadores do EE somados aos do consumidor (só chamado com o consumidor ocioso: depois de
+// um fence do EE, ou depois do join).
+SyncStats HostProfile::merged() {
+    SyncStats m = sync_;
+    m.mscalTotal += consSync_.mscalTotal;
+    m.mscnt += consSync_.mscnt;
+    m.xgkickTotal += consSync_.xgkickTotal;
+    for (unsigned e = 0; e < SyncStats::EvCount; ++e) {
+        for (unsigned k = 0; k < SyncStats::kSources; ++k) m.evWrites[e][k] += consSync_.evWrites[e][k];
+    }
+    return m;
 }
 
 void HostProfile::noteMscal(bool isMscnt) {
     if (!enabled_) return;
+    if (onConsumer()) {
+        // O lote do VIF1 é do EE: o consumidor só conta o total.
+        ++consSync_.mscalTotal;
+        if (isMscnt) ++consSync_.mscnt;
+        return;
+    }
     ++sync_.mscalTotal;
     if (isMscnt) ++sync_.mscnt;
     if (batchOpen_) ++batchMscal_;
@@ -572,6 +669,10 @@ void HostProfile::noteMscal(bool isMscnt) {
 
 void HostProfile::noteXgkick() {
     if (!enabled_) return;
+    if (onConsumer()) {
+        ++consSync_.xgkickTotal;
+        return;
+    }
     ++sync_.xgkickTotal;
     if (batchOpen_) ++batchXgkick_;
 }

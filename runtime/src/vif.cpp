@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <type_traits>
 
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/dmac.h"
@@ -121,31 +122,49 @@ bool Vif::stalled() const { return (stat_ & kStatStall) != 0; }
 namespace {
 // Entrega o lote pendente ao sair da transferência, por retorno ou por exceção (o que foi
 // decodificado antes do erro já tem de ter chegado à memória do VU, como quando era síncrono).
-// Só UNPACK e MPG ficam em lote, e nenhum dos dois falha.
-struct FlushOnExit {
-    explicit FlushOnExit(Vif& v) : vif(v) {}
-    ~FlushOnExit() { vif.flushBatches(); }
-    Vif& vif;
-};
+// Só UNPACK e MPG ficam em lote, e nenhum dos dois falha; mas a entrega pode relançar um erro que
+// o consumidor do VU1 (em outra thread) guardou de um item anterior. Por isso não é um destrutor
+// (que não pode lançar): no retorno normal o erro sobe; na exceção o lote vai e um erro
+// secundário é descartado (o original continua subindo, e o do consumidor já foi consumido).
+template <typename F>
+auto withFlush(Vif& vif, F&& body) {
+    try {
+        if constexpr (std::is_void_v<decltype(body())>) {
+            body();
+            vif.flushBatches();
+        } else {
+            auto r = body();
+            vif.flushBatches();
+            return r;
+        }
+    } catch (...) {
+        try {
+            vif.flushBatches();
+        } catch (...) {
+        }
+        throw;
+    }
+}
 }  // namespace
 
 std::size_t Vif::transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
     if (stalled()) return 0;
-    const FlushOnExit guard(*this);
-    // Parse e UNPACK saem do balde do EE; o VU e o GIF chamados daqui abrem escopos mais internos.
-    const HostProfile::Scope prof(HostProfile::Vif);
-    for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
-        std::uint32_t w;
-        std::memcpy(&w, data + off, 4);
-        word(w, pc);
-        if (stalled()) {
-            // O quadword em que parou já entrou no FIFO; o resto dele espera.
-            const std::size_t end = std::min(bytes, (off + 4 + 15) & ~std::size_t{15});
-            fifo_.insert(fifo_.end(), data + off + 4, data + end);
-            return end;
+    return withFlush(*this, [&]() -> std::size_t {
+        // Parse e UNPACK saem do balde do EE; o VU e o GIF chamados daqui abrem escopos mais internos.
+        const HostProfile::Scope prof(HostProfile::Vif);
+        for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
+            std::uint32_t w;
+            std::memcpy(&w, data + off, 4);
+            word(w, pc);
+            if (stalled()) {
+                // O quadword em que parou já entrou no FIFO; o resto dele espera.
+                const std::size_t end = std::min(bytes, (off + 4 + 15) & ~std::size_t{15});
+                fifo_.insert(fifo_.end(), data + off + 4, data + end);
+                return end;
+            }
         }
-    }
-    return bytes;
+        return bytes;
+    });
 }
 
 void Vif::fifoWrite(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
@@ -176,15 +195,14 @@ void Vif::resume(std::uint32_t pc) {
     std::vector<std::uint8_t> pending;
     pending.swap(fifo_);
     std::size_t off = 0;
-    {
-        const FlushOnExit guard(*this);
+    withFlush(*this, [&] {
         const HostProfile::Scope prof(HostProfile::Vif);
         for (; off + 4 <= pending.size() && !stalled(); off += 4) {
             std::uint32_t w;
             std::memcpy(&w, pending.data() + off, 4);
             word(w, pc);
         }
-    }
+    });
     if (stalled()) {
         fifo_.insert(fifo_.begin(), pending.begin() + static_cast<std::ptrdiff_t>(off), pending.end());
         return;

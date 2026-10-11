@@ -335,8 +335,9 @@ void Gs::rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const V
 // do desenho, o desenho inteiro roda como operação global, numa faixa só.
 // CLUT e transferências já são barreiras (submit), então não entram aqui.
 void Gs::draw(std::uint32_t pc) {
-    // Só o trabalho do EE entra no perfil: o HostProfile não é seguro entre
-    // threads, e o rasterizador roda nas faixas.
+    // Só o trabalho do produtor entra no perfil, na trilha da thread que o chama (a do EE, ou a
+    // do consumidor do VU1): o HostProfile não é seguro entre threads além das duas trilhas, e
+    // o rasterizador roda nas faixas.
     const HostProfile::Scope prof(HostProfile::Gs);
     DrawEnv e;
     setupEnv(e, pc);

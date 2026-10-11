@@ -16,6 +16,7 @@
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "minitest.h"
 
 using namespace anyps2::rt;
@@ -98,7 +99,9 @@ Observed runScenario(Rig& t) {
     t.ram(0x3000, row, sizeof(row));
     t.dma(0x10009000, 0x3000, 2);
     t.rt.vif1().readRegister(0x10003D00, 0);
-    // Pontos de fence do EE.
+    // Pontos de fence do EE. As chamadas diretas ao GIF e ao GS abaixo não passam pelo Vu1Stream:
+    // com o consumidor em outra thread (ANYPS2_VU1_THREAD=1) o teste faz o fence que o Hardware faria.
+    t.rt.vu1Stream().fence();
     t.rt.gif().readRegister(0x10003020, 0);
     std::uint64_t scratch = 0;
     t.rt.hardware().read(0x12001000, &scratch, 8, 0);  // CSR (o resultado não importa)
@@ -113,6 +116,7 @@ Observed runScenario(Rig& t) {
     ops::vu0Macro(&t.c, lo(0x00, XYZW, 1, 0, 0x400), kUNop, 0x100);
     t.rt.gs().processEvents(~std::uint64_t{0});
     ops::ctc2(&t.c, 31, 0, 0);  // CMSAR1 inicia o VU1 de novo
+    t.rt.vu1Stream().fence();
     t.rt.gs().processEvents(~std::uint64_t{0});
     o.csr = t.rt.gs().csr();
     std::memcpy(&o.topSeen, t.rt.vu().data1.get(), 4);
@@ -141,11 +145,14 @@ TEST_CASE(vu1_sync, counters_appear_and_change_nothing) {
     Observed on;
     SyncStats s;
     std::string line, report;
+    bool threaded = false;
     {
         ProfileOn profile;
         Rig t;
         on = runScenario(t);
-        s = HostProfile::sync();
+        threaded = t.rt.vu1Stream().threaded();
+        t.rt.vu1Stream().fence();
+        s = HostProfile::syncTotals();  // com o VU1 em outra thread, soma o que o consumidor contou
         line = HostProfile::syncInterval(1);
         report = HostProfile::syncReport(1);
     }
@@ -174,7 +181,9 @@ TEST_CASE(vu1_sync, counters_appear_and_change_nothing) {
     CHECK_EQ(s.mscalTotal, 2ull);  // MSCAL + MSCNT (o MSCNT conta como os dois)
     CHECK_EQ(s.batchMscal, 2ull);
     CHECK_EQ(s.batchMscalMax, 2ull);
-    CHECK_EQ(s.batchXgkick, 1ull);  // o XGKICK do MSCAL; o do CTC2 veio fora de lote
+    // O XGKICK do MSCAL; o do CTC2 veio fora de lote. Com o VU1 em outra thread o XGKICK é contado
+    // só no total (o lote é do EE).
+    if (!threaded) CHECK_EQ(s.batchXgkick, 1ull);
     CHECK_EQ(s.xgkickTotal, 2ull);
     std::uint64_t gaps = 0, hosts = 0;
     for (unsigned i = 0; i < SyncStats::kBuckets; ++i) {

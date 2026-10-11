@@ -867,6 +867,7 @@ TEST_CASE(gs, dmac_chain_to_gif) {
     // O FINISH chega depois do trabalho do GS (ver gs.finish_latency); aqui
     // só interessa que ele chegue.
     auto drainedCsr = [&] {
+        rt.vu1Stream().fence();  // ANYPS2_VU1_THREAD=1: as respostas do consumidor entram no fence
         rt.gs().processEvents(~std::uint64_t{0});
         return rt.gs().csr();
     };
@@ -983,6 +984,7 @@ TEST_CASE(gs, item_clock_replaces_the_ee_clock) {
     b.gs().writeRegister(XYZ2, 0, 0);
     b.gs().writeRegister(FINISH, 0, 0);
     b.vu1Stream().fence();  // chamada direta ao Gs, sem o stream: o EE aplica a resposta no fence
+    a.vu1Stream().fence();
     CHECK(a.gs().nextEventTime() != ~std::uint64_t{0});
     CHECK_EQ(a.gs().nextEventTime(), b.gs().nextEventTime());
 

@@ -16,6 +16,7 @@
 #include "anyps2/runtime/vif.h"
 #include "anyps2/runtime/vu/vu.h"
 #include "anyps2/vu/isa.h"
+#include "anyps2/runtime/vu1_stream.h"
 #include "minitest.h"
 
 using namespace anyps2::rt;
@@ -498,6 +499,7 @@ TEST_CASE(vu, xgkick_and_vif1_mscal_double_buffer) {
     // VIF1: BASE 0x100, OFFSET 0x80, MSCAL 0 duas vezes → TOP 0x100 e depois 0x180
     const std::uint32_t vifcodes[] = {0x03000100u, 0x02000080u, 0x14000000u};
     t.rt.vif1().transfer(reinterpret_cast<const std::uint8_t*>(vifcodes), sizeof(vifcodes), 0);
+    t.rt.vu1Stream().fence();  // com o VU1 em outra thread (ANYPS2_VU1_THREAD=1) o resultado vale depois do fence
     t.rt.gs().processEvents(~std::uint64_t{0});  // FINISH chega depois do trabalho do GS
     CHECK_EQ(t.rt.gs().csr() & 2, 2ull);
     std::uint32_t top;
@@ -505,11 +507,13 @@ TEST_CASE(vu, xgkick_and_vif1_mscal_double_buffer) {
     CHECK_EQ(top, 0x100u);
     const std::uint32_t again[] = {0x14000000u};
     t.rt.vif1().transfer(reinterpret_cast<const std::uint8_t*>(again), sizeof(again), 0);
+    t.rt.vu1Stream().fence();
     std::memcpy(&top, t.rt.vu().data1.get(), 4);
     CHECK_EQ(top, 0x180u);
     // CTC2 em CMSAR1 também inicia o VU1
     t.rt.gs().writePrivileged(0x12001000, 2, 0);
     ops::ctc2(&t.c, 31, 0, 0);
+    t.rt.vu1Stream().fence();
     t.rt.gs().processEvents(~std::uint64_t{0});
     CHECK_EQ(t.rt.gs().csr() & 2, 2ull);
     CHECK_EQ(t.rt.vu1().interpretedRuns(), 3u);
