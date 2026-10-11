@@ -19,6 +19,14 @@ void HostProfile::enable() {
     workerNs_ = 0;
     workerMark_ = 0;
     bandsMarkVblank_ = 0;
+    // Quem mapeou a memória do VU1 com contador (vu1MemCounted) o fez antes: preserva.
+    const bool memCounted = sync_.vu1MemCounted;
+    sync_ = SyncStats{};
+    sync_.vu1MemCounted = memCounted;
+    syncMarkVblank_ = 0;
+    batchOpen_ = false;
+    batchMscal_ = batchXgkick_ = 0;
+    lastStartValid_ = false;
 }
 
 void HostProfile::charge(Clock::time_point now) {
@@ -42,7 +50,7 @@ std::string HostProfile::report() {
     if (!enabled_) return "";
     charge(Clock::now());
     static const char* kNames[Count] = {"EE (código e HLE)", "GIF", "GS (desenho no EE)", "GS (EE esperando o worker)",
-                                            "VU0", "VU1", "IPU"};
+                                            "VU0", "VU1", "IPU", "VIF (parse e UNPACK)"};
     std::int64_t total = 0;
     for (auto n : ns_) total += n;
     std::string s;
@@ -69,7 +77,7 @@ std::string HostProfile::report() {
 std::string HostProfile::interval(std::uint64_t vblank) {
     if (!enabled_) return "";
     charge(Clock::now());
-    static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU"};
+    static const char* kShort[Count] = {"EE", "GIF", "GS", "GSesp", "VU0", "VU1", "IPU", "VIF"};
     std::int64_t total = 0;
     for (unsigned i = 0; i < Count; ++i) total += ns_[i] - mark_[i];
     char line[96];
@@ -410,6 +418,184 @@ std::string HostProfile::bandsReport(const gs::BandStats& total, std::uint64_t v
     char unit[48];
     std::snprintf(unit, sizeof unit, " (total, %llu VBlanks)", static_cast<unsigned long long>(vblank));
     return formatBands(total, BandStats{}, 1.0, unit);
+}
+
+}  // namespace anyps2::rt
+
+// ---------------------------------------------------------------------------
+// Medição "vu1 sync"
+// ---------------------------------------------------------------------------
+
+namespace anyps2::rt {
+
+namespace {
+
+unsigned log2Bucket(std::uint64_t v) {
+    unsigned b = 0;
+    while (v && b < SyncStats::kBuckets - 1) {
+        v >>= 1;
+        ++b;
+    }
+    return b;  // v < 2^b
+}
+
+std::string fmtNs(std::uint64_t ns) {
+    char b[32];
+    if (ns < 1000) std::snprintf(b, sizeof b, "%lluns", static_cast<unsigned long long>(ns));
+    else if (ns < 1000000) std::snprintf(b, sizeof b, "%lluµs", static_cast<unsigned long long>(ns / 1000));
+    else std::snprintf(b, sizeof b, "%llums", static_cast<unsigned long long>(ns / 1000000));
+    return b;
+}
+
+// Histograma em potências de 2 do trecho (cur − prev); `ns` formata o limite como tempo.
+std::string formatHist(const std::uint64_t (&cur)[SyncStats::kBuckets], const std::uint64_t (&prev)[SyncStats::kBuckets],
+                       double per, bool ns) {
+    std::string s;
+    char buf[48];
+    for (unsigned i = 0; i < SyncStats::kBuckets; ++i) {
+        const std::uint64_t n = diff(cur[i], prev[i]);
+        if (!n) continue;
+        const std::uint64_t bound = std::uint64_t{1} << i;
+        if (ns) {
+            std::snprintf(buf, sizeof buf, " <%s:%.2f", fmtNs(bound).c_str(), static_cast<double>(n) / per);
+        } else {
+            std::snprintf(buf, sizeof buf, " <%llu:%.2f", static_cast<unsigned long long>(bound),
+                          static_cast<double>(n) / per);
+        }
+        s += buf;
+    }
+    return s.empty() ? " -" : s;
+}
+
+std::string formatSync(const SyncStats& cur, const SyncStats& prev, double per, const char* unit) {
+    auto d = [&](std::uint64_t c, std::uint64_t p) { return static_cast<double>(diff(c, p)) / per; };
+    char buf[1024];
+    std::string s = "[perfil] vu1 sync: ";
+    s += unit;
+    // Pontos de sincronia potenciais.
+    std::snprintf(buf, sizeof buf,
+                  "; pontos de fence: leituras do GIF %.1f, leituras privilegiadas do GS: CSR %.1f SIGLBLID %.1f outras %.1f,",
+                  d(cur.gifReads, prev.gifReads), d(cur.gsCsrReads, prev.gsCsrReads),
+                  d(cur.gsSiglblidReads, prev.gsSiglblidReads), d(cur.gsOtherPrivReads, prev.gsOtherPrivReads));
+    s += buf;
+    if (cur.vu1MemCounted) {
+        std::snprintf(buf, sizeof buf, " memória do VU1 pelo EE: leituras %.1f escritas %.1f,",
+                      d(cur.vu1MemReads, prev.vu1MemReads), d(cur.vu1MemWrites, prev.vu1MemWrites));
+    } else {
+        std::snprintf(buf, sizeof buf, " memória do VU1 pelo EE: não contada (ANYPS2_VU1_MEMCOUNT=1),");
+    }
+    s += buf;
+    std::snprintf(buf, sizeof buf,
+                  " VU0 tocando o VU1 %.1f, CFC2 VPU_STAT %.1f FBRST %.1f CMSAR1 %.1f, CTC2 CMSAR1 %.1f FBRST %.1f,"
+                  " downloads do GS: DMA do VIF1 %.1f VIF1_FIFO %.1f LOCAL→HOST %.1f,"
+                  " ROW com MODE≠0 %.1f (de %.1f leituras), MSCNT %.1f;",
+                  d(cur.vu0Cross, prev.vu0Cross), d(cur.cfc2Vpustat, prev.cfc2Vpustat),
+                  d(cur.cfc2Fbrst, prev.cfc2Fbrst), d(cur.cfc2Cmsar1, prev.cfc2Cmsar1),
+                  d(cur.ctc2Cmsar1, prev.ctc2Cmsar1), d(cur.ctc2Fbrst, prev.ctc2Fbrst),
+                  d(cur.gsDownloadDma, prev.gsDownloadDma), d(cur.gsDownloadFifo, prev.gsDownloadFifo),
+                  d(cur.gsLocalToHost, prev.gsLocalToHost), d(cur.rowReadsMode, prev.rowReadsMode),
+                  d(cur.rowReads, prev.rowReads), d(cur.mscnt, prev.mscnt));
+    s += buf;
+    // Lotes.
+    const double batches = static_cast<double>(diff(cur.batches, prev.batches));
+    auto perBatch = [&](std::uint64_t c, std::uint64_t p) {
+        return batches > 0 ? static_cast<double>(diff(c, p)) / batches : 0.0;
+    };
+    std::snprintf(buf, sizeof buf,
+                  " lotes: inícios de DMA do VIF1 %.1f, do GIF (PATH3) %.1f (+%.1f quadwords no GIF_FIFO),"
+                  " lotes fechados %.1f, MSCAL/MSCALF/MSCNT por lote %.2f (máx %llu; %.1f no total),"
+                  " XGKICK por lote %.2f (máx %llu; %.1f no total);",
+                  d(cur.vif1Starts, prev.vif1Starts), d(cur.gifDmaStarts, prev.gifDmaStarts),
+                  d(cur.gifFifoWrites, prev.gifFifoWrites), d(cur.batches, prev.batches),
+                  perBatch(cur.batchMscal, prev.batchMscal), static_cast<unsigned long long>(cur.batchMscalMax),
+                  d(cur.mscalTotal, prev.mscalTotal), perBatch(cur.batchXgkick, prev.batchXgkick),
+                  static_cast<unsigned long long>(cur.batchXgkickMax), d(cur.xgkickTotal, prev.xgkickTotal));
+    s += buf;
+    s += " distância entre inícios do VIF1 (ciclos do EE, n por VBlank):" +
+         formatHist(cur.gapHist, prev.gapHist, per, false) + ";";
+    s += " tempo de host por lote (n por VBlank):" + formatHist(cur.hostHist, prev.hostHist, per, true) + ";";
+    // Eventos do GS: escritas por origem e entregas ao CSR.
+    static const char* kEv[SyncStats::EvCount] = {"SIGNAL", "FINISH", "LABEL"};
+    s += " eventos do GS (escritas por origem priv/PATH1/PATH2/PATH3/outra):";
+    for (unsigned e = 0; e < SyncStats::EvCount; ++e) {
+        s += " ";
+        s += kEv[e];
+        for (unsigned k = 0; k < SyncStats::kSources; ++k) {
+            std::snprintf(buf, sizeof buf, "%c%.1f", k ? '/' : ' ', d(cur.evWrites[e][k], prev.evWrites[e][k]));
+            s += buf;
+        }
+        s += e + 1 < SyncStats::EvCount ? "," : ";";
+    }
+    static const char* kRaise[SyncStats::RaiseCount] = {"SIGNAL", "FINISH", "VSINT"};
+    s += " entregues ao CSR (interrupção/só bit/já ligado):";
+    for (unsigned r = 0; r < SyncStats::RaiseCount; ++r) {
+        std::snprintf(buf, sizeof buf, " %s %.1f/%.1f/%.1f%s", kRaise[r], d(cur.evRaises[r][0], prev.evRaises[r][0]),
+                      d(cur.evRaises[r][1], prev.evRaises[r][1]), d(cur.evRaises[r][2], prev.evRaises[r][2]),
+                      r + 1 < SyncStats::RaiseCount ? "," : "");
+        s += buf;
+    }
+    return s + "\n";
+}
+
+SyncStats& syncMark() {
+    static SyncStats mark;
+    return mark;
+}
+
+}  // namespace
+
+std::string HostProfile::syncInterval(std::uint64_t vblank) {
+    if (!enabled_) return "";
+    const std::uint64_t n = vblank > syncMarkVblank_ ? vblank - syncMarkVblank_ : 1;
+    SyncStats& mark = syncMark();
+    char unit[48];
+    std::snprintf(unit, sizeof unit, "por VBlank (%llu VBlanks)", static_cast<unsigned long long>(n));
+    const std::string s = formatSync(sync_, mark, static_cast<double>(n), unit);
+    mark = sync_;
+    syncMarkVblank_ = vblank;
+    return s;
+}
+
+std::string HostProfile::syncReport(std::uint64_t vblank) {
+    if (!enabled_) return "";
+    char unit[48];
+    std::snprintf(unit, sizeof unit, "total (%llu VBlanks)", static_cast<unsigned long long>(vblank));
+    return formatSync(sync_, SyncStats{}, 1.0, unit);
+}
+
+void HostProfile::noteMscal(bool isMscnt) {
+    if (!enabled_) return;
+    ++sync_.mscalTotal;
+    if (isMscnt) ++sync_.mscnt;
+    if (batchOpen_) ++batchMscal_;
+}
+
+void HostProfile::noteXgkick() {
+    if (!enabled_) return;
+    ++sync_.xgkickTotal;
+    if (batchOpen_) ++batchXgkick_;
+}
+
+void HostProfile::Vif1Batch::begin(std::uint64_t eeCycles) {
+    ++sync_.vif1Starts;
+    if (lastStartValid_) ++sync_.gapHist[log2Bucket(eeCycles >= lastStart_ ? eeCycles - lastStart_ : 0)];
+    lastStartValid_ = true;
+    lastStart_ = eeCycles;
+    batchOpen_ = true;
+    batchMscal_ = batchXgkick_ = 0;
+    active_ = true;
+    t0_ = Clock::now();
+}
+
+void HostProfile::Vif1Batch::end() {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0_).count();
+    ++sync_.hostHist[log2Bucket(ns > 0 ? static_cast<std::uint64_t>(ns) : 0)];
+    ++sync_.batches;
+    sync_.batchMscal += batchMscal_;
+    sync_.batchXgkick += batchXgkick_;
+    sync_.batchMscalMax = std::max(sync_.batchMscalMax, batchMscal_);
+    sync_.batchXgkickMax = std::max(sync_.batchXgkickMax, batchXgkick_);
+    batchOpen_ = false;
 }
 
 }  // namespace anyps2::rt

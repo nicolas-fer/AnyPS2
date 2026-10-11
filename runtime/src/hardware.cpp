@@ -7,6 +7,7 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/iop/iop.h"
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/vif.h"
@@ -195,6 +196,7 @@ void Hardware::read(std::uint32_t addr, void* out, unsigned size, std::uint32_t 
         if (!rt_.gs().busDirToHost()) {
             throw GuestError("leitura do VIF1_FIFO com BUSDIR = 0 (o GS não está mandando dados)", pc);
         }
+        HostProfile::count(&SyncStats::gsDownloadFifo);
         std::uint8_t qw[16];
         rt_.gs().readDownload(qw, 1);
         std::memcpy(out, qw, 16);
@@ -220,6 +222,7 @@ void Hardware::write(std::uint32_t addr, const void* in, unsigned size, std::uin
             case 0x10004000: rt_.vif0().fifoWrite(data, 16, pc); return;
             case 0x10005000: rt_.vif1().fifoWrite(data, 16, pc); return;
             case 0x10006000:
+                HostProfile::count(&SyncStats::gifFifoWrites);
                 rt_.gif().transfer(3, data, 1, pc);
                 return;
             default:

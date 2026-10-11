@@ -182,6 +182,7 @@ void Vu::tooManyPairs(std::uint32_t pc) const {
 // o acesso comum à memória de dados (mem, em vu_exec.h) nem chega aqui.
 Reg128& Vu::memVu0Cross(std::uint32_t index, std::uint32_t pc) {
     if (!rt_) fail("acesso aos registradores do VU1 pelo VU0 sem runtime", pc);
+    HostProfile::count(&SyncStats::vu0Cross);
     const vucore::Regs& r1 = rt_->vu1().regs();
     const std::uint32_t n = index & 0x3F;
     if (n < 32) return r1.vf[n];

@@ -9,6 +9,7 @@
 #include "anyps2/runtime/dmac.h"
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
 #include "anyps2/runtime/vu/vu.h"
@@ -80,6 +81,8 @@ bool Vif::stalled() const { return (stat_ & kStatStall) != 0; }
 
 std::size_t Vif::transfer(const std::uint8_t* data, std::size_t bytes, std::uint32_t pc) {
     if (stalled()) return 0;
+    // Parse e UNPACK saem do balde do EE; o VU e o GIF chamados daqui abrem escopos mais internos.
+    const HostProfile::Scope prof(HostProfile::Vif);
     for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
         std::uint32_t w;
         std::memcpy(&w, data + off, 4);
@@ -121,10 +124,13 @@ void Vif::resume(std::uint32_t pc) {
     std::vector<std::uint8_t> pending;
     pending.swap(fifo_);
     std::size_t off = 0;
-    for (; off + 4 <= pending.size() && !stalled(); off += 4) {
-        std::uint32_t w;
-        std::memcpy(&w, pending.data() + off, 4);
-        word(w, pc);
+    {
+        const HostProfile::Scope prof(HostProfile::Vif);
+        for (; off + 4 <= pending.size() && !stalled(); off += 4) {
+            std::uint32_t w;
+            std::memcpy(&w, pending.data() + off, 4);
+            word(w, pc);
+        }
     }
     if (stalled()) {
         fifo_.insert(fifo_.begin(), pending.begin() + static_cast<std::ptrdiff_t>(off), pending.end());
@@ -212,6 +218,7 @@ void Vif::command(std::uint32_t w, std::uint32_t pc) {
         case 0x14: case 0x15: case 0x17: {  // MSCAL, MSCALF, MSCNT
             if (!rt_) throw Unimplemented(unitName + ": " + cmdName(cmd) + " sem runtime", pc);
             itop_ = itops_;
+            if (vif1) HostProfile::noteMscal((cmd & 0x7F) == 0x17);
             if (vif1) {
                 // Double buffering: o VU1 lê TOP; o próximo UNPACK com FLG vai para o outro buffer.
                 top_ = tops_;
@@ -387,7 +394,13 @@ std::uint32_t Vif::readRegister(std::uint32_t addr, std::uint32_t pc) {
         case 0xC0: return tops_;
         case 0xD0: return itop_;
         case 0xE0: return top_;
-        case 0x100: case 0x110: case 0x120: case 0x130: return row_[(off - 0x100) >> 4];
+        case 0x100: case 0x110: case 0x120: case 0x130:
+            // ROW só muda com MODE 1/2: uma thread dona do VU teria de esperar para ler uma soma em dia.
+            if (unit_ == 1 && HostProfile::enabled()) {
+                HostProfile::count(&SyncStats::rowReads);
+                if (mode_ != 0) HostProfile::count(&SyncStats::rowReadsMode);
+            }
+            return row_[(off - 0x100) >> 4];
         case 0x140: case 0x150: case 0x160: case 0x170: return col_[(off - 0x140) >> 4];
         default: break;
     }

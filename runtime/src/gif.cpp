@@ -148,6 +148,7 @@ void Gif::transfer(unsigned path, const std::uint8_t* data, std::size_t qwords, 
 void Gif::kick(const std::uint8_t* mem, std::uint32_t size, std::uint32_t addr, std::uint32_t pc) {
     const Path& p = paths_[0];
     gs_.noteXgkick();
+    HostProfile::noteXgkick();
     for (std::uint32_t n = 0; n <= size / 16; ++n) {
         transfer(1, mem + (addr & (size - 16)), 1, pc);
         addr += 16;
@@ -157,6 +158,7 @@ void Gif::kick(const std::uint8_t* mem, std::uint32_t size, std::uint32_t addr, 
 }
 
 std::uint32_t Gif::readRegister(std::uint32_t addr, std::uint32_t pc) {
+    HostProfile::count(&SyncStats::gifReads);
     switch (addr) {
         case 0x10003000: return ctrl_;
         case 0x10003010: return mode_;

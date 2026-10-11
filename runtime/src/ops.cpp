@@ -7,6 +7,7 @@
 #include "anyps2/runtime/ops.h"
 
 #include "anyps2/runtime/dmac.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/vu/vu.h"
 #include "anyps2/runtime/runtime.h"
 
@@ -100,9 +101,13 @@ void ctc2(Context* c, unsigned id, u32 value, u32 pc) {
         case CMSAR0: c->vi[CMSAR0] = value & 0xFFFF; return;
         case FBRST:
             if (value & 0x002) c->rt->vu0().reset();
-            if (value & 0x200) c->rt->vu1().reset();
+            if (value & 0x200) {
+                HostProfile::count(&SyncStats::ctc2Fbrst);
+                c->rt->vu1().reset();
+            }
             return;
         case CMSAR1:  // escrever CMSAR1 inicia o microprograma do VU1
+            HostProfile::count(&SyncStats::ctc2Cmsar1);
             c->vi[CMSAR1] = value & 0xFFFF;
             c->rt->vu1().start((value & 0xFFFF) * 8, pc);
             return;
@@ -116,7 +121,15 @@ u32 cfc2(Context* c, unsigned id) {
     using namespace vucore::reg;
     if (id < 16) return c->vi[id] & 0xFFFF;
     switch (id) {
-        case FBRST: case VPUSTAT: return 0;  // VUs nunca ocupados
+        case FBRST:
+            HostProfile::count(&SyncStats::cfc2Fbrst);
+            return 0;
+        case VPUSTAT:  // VUs nunca ocupados
+            HostProfile::count(&SyncStats::cfc2Vpustat);
+            return 0;
+        case CMSAR1:
+            HostProfile::count(&SyncStats::cfc2Cmsar1);
+            return c->vi[id];
         case Status: return c->vi[Status] & 0xFFF;
         case Mac: return c->vi[Mac] & 0xFFFF;
         case Clip: return c->vi[Clip] & 0xFFFFFF;

@@ -7,9 +7,11 @@
 #include "anyps2/runtime/errors.h"
 #include "anyps2/runtime/gif.h"
 #include "anyps2/runtime/gs/gs.h"
+#include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/ipu.h"
 #include "anyps2/runtime/kernel.h"
 #include "anyps2/runtime/runtime.h"
+#include "anyps2/runtime/timing.h"
 #include "anyps2/runtime/vif.h"
 
 namespace anyps2::rt {
@@ -120,7 +122,16 @@ void Dmac::write(std::uint32_t addr, std::uint32_t value, std::uint32_t pc) {
                     const bool emptyRet = id == 6 && ((value >> 4) & 3) == 0;
                     c.tagEnds = id == 0 || id == 7 || emptyRet || ((value >> 31) && (value & kChcrTie));
                 }
-                if (value & kChcrStr) start(static_cast<unsigned>(ch), pc);
+                if (value & kChcrStr) {
+                    if (ch == kVif1) {
+                        // Lote do VIF1: do início do DMA até o canal terminar (ou pausar).
+                        const HostProfile::Vif1Batch batch(HostProfile::enabled() ? rt_.timing().now() : 0);
+                        start(static_cast<unsigned>(ch), pc);
+                    } else {
+                        if (ch == kGif) HostProfile::count(&SyncStats::gifDmaStarts);
+                        start(static_cast<unsigned>(ch), pc);
+                    }
+                }
                 return;
             case 0x10: c.madr = value & 0xFFFFFFF0u; return;
             case 0x20: c.qwc = value & 0xFFFF; return;
@@ -272,6 +283,7 @@ void Dmac::start(unsigned ch, std::uint32_t pc) {
                 if (!rt_.gs().busDirToHost()) {
                     throw GuestError("DMA VIF1→memória com BUSDIR = 0 (o GS não está mandando dados)", pc);
                 }
+                HostProfile::count(&SyncStats::gsDownloadDma);
                 if (c.qwc) rt_.gs().readDownload(hostAddress(c.madr, c.qwc, ch, pc), c.qwc);
                 c.madr += c.qwc * 16;
                 c.qwc = 0;

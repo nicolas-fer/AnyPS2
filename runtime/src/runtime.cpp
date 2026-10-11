@@ -4,6 +4,7 @@
 #include <functional>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -52,6 +53,38 @@ void disablePowerThrottling() {
 #endif
 }
 
+// Memória do VU1 (micro 0x1100_8000 e dados 0x1100_C000) vista pelo EE como MMIO que só
+// conta os acessos (ANYPS2_VU1_MEMCOUNT=1). É diagnóstico da medição "vu1 sync": mostra
+// quantas vezes o EE tocaria a memória de um VU1 dono de outra thread. Os dados são os
+// mesmos buffers do host; só o caminho é lento, e as cópias por hostPointer/copyFromGuest
+// nessa faixa deixam de funcionar (a faixa não é RAM para elas), uma lacuna aceita no modo
+// diagnóstico. Não usar fora da medição.
+class Vu1MemCounter : public MmioDevice {
+public:
+    Vu1MemCounter(std::uint8_t* micro, std::uint8_t* data) : micro_(micro), data_(data) {}
+    void read(std::uint32_t addr, void* out, unsigned size, std::uint32_t) override {
+        HostProfile::count(&SyncStats::vu1MemReads);
+        std::memcpy(out, host(addr, size), size);
+    }
+    void write(std::uint32_t addr, const void* in, unsigned size, std::uint32_t) override {
+        HostProfile::count(&SyncStats::vu1MemWrites);
+        std::memcpy(host(addr, size), in, size);
+    }
+
+private:
+    static constexpr std::uint32_t kBase = 0x11008000u;
+    // O acesso inteiro cabe em uma das duas memórias (16 KB cada): Memory::deviceFor só
+    // entrega acessos dentro da faixa e o alinhamento natural impede cruzar o meio.
+    std::uint8_t* host(std::uint32_t addr, unsigned size) const {
+        const std::uint32_t off = addr - kBase;
+        const bool isData = off >= VuMemory::kVu1Size;
+        const std::uint32_t inner = off & (VuMemory::kVu1Size - 1);
+        return (isData ? data_ : micro_) + std::min<std::uint32_t>(inner, VuMemory::kVu1Size - size);
+    }
+    std::uint8_t* micro_;
+    std::uint8_t* data_;
+};
+
 }  // namespace
 
 RuntimeOptions RuntimeOptions::fromEnvironment() {
@@ -77,8 +110,14 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
     vu_ = std::make_unique<VuMemory>();
     mem_->mapRam(0x11000000u, vu_->micro0.get(), VuMemory::kVu0Size);
     mem_->mapRam(0x11004000u, vu_->data0.get(), VuMemory::kVu0Size);
-    mem_->mapRam(0x11008000u, vu_->micro1.get(), VuMemory::kVu1Size);
-    mem_->mapRam(0x1100C000u, vu_->data1.get(), VuMemory::kVu1Size);
+    if (const char* c = std::getenv("ANYPS2_VU1_MEMCOUNT"); c && *c && std::string(c) != "0") {
+        vu1Mem_ = std::make_unique<Vu1MemCounter>(vu_->micro1.get(), vu_->data1.get());
+        mem_->mapDevice(0x11008000u, 2 * VuMemory::kVu1Size, vu1Mem_.get());
+        HostProfile::sync().vu1MemCounted = true;
+    } else {
+        mem_->mapRam(0x11008000u, vu_->micro1.get(), VuMemory::kVu1Size);
+        mem_->mapRam(0x1100C000u, vu_->data1.get(), VuMemory::kVu1Size);
+    }
     gs_ = std::make_unique<gs::Gs>(this);
     gs_->setHsyncSource([](void* t) { return static_cast<Timing*>(t)->now(); }, timing_.get(),
                         Timing::kCyclesPerLine);
@@ -115,6 +154,7 @@ Runtime::~Runtime() {
         std::fputs(HostProfile::texelsReport(gs_->texReport(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texSimReport(gs_->texSim(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texCacheReport(gs_->texCacheReport(), vblanks_).c_str(), stderr);
+        std::fputs(HostProfile::syncReport(vblanks_).c_str(), stderr);
     }
 }
 
@@ -135,6 +175,7 @@ void Runtime::onVblank(std::uint32_t pc) {
         std::fputs(HostProfile::texelsInterval(gs_->texReport(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texSimInterval(gs_->texSim(), vblanks_).c_str(), stderr);
         std::fputs(HostProfile::texCacheInterval(gs_->texCacheReport(), vblanks_).c_str(), stderr);
+        std::fputs(HostProfile::syncInterval(vblanks_).c_str(), stderr);
         // Pares de VU desde o começo: compilados × interpretados (microcódigo
         // que só existe em tempo de execução cai no interpretador).
         std::fprintf(stderr, "[perfil] pares de VU: VU0 %llu compilados / %llu interpretados; VU1 %llu / %llu\n",

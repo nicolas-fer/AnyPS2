@@ -414,10 +414,15 @@ void Gs::setHsyncSource(std::uint64_t (*now)(void*), void* ctx, std::uint64_t cy
 
 void Gs::raiseEvent(unsigned bit) {
     const std::uint64_t mask = 1ull << bit;
-    if (csr_ & mask) return;
+    if (csr_ & mask) {
+        HostProfile::gsRaise(bit, SyncStats::OutAlreadySet);
+        return;
+    }
     csr_ |= mask;
     // IMR: bits 8–12 mascaram SIGNAL, FINISH, HSINT, VSINT, EDWINT.
-    if (!(imr_ & (1ull << (bit + 8))) && rt_) rt_->kernel().raiseIntc(0);  // INTC_GS
+    const bool interrupt = !(imr_ & (1ull << (bit + 8)));
+    HostProfile::gsRaise(bit, interrupt ? SyncStats::OutInterrupt : SyncStats::OutCsrOnly);
+    if (interrupt && rt_) rt_->kernel().raiseIntc(0);  // INTC_GS
 }
 
 // Custo (ciclos do EE, 294 MHz) usado para atrasar o FINISH: o GIF entrega
@@ -472,12 +477,23 @@ void Gs::setCrt(std::uint32_t interlace, std::uint32_t mode, std::uint32_t field
 
 std::uint64_t Gs::readPrivileged(std::uint32_t addr, std::uint32_t pc) {
     const std::uint32_t off = addr - 0x12000000u;
-    if (off < 0xF0) return priv_[off >> 4];
+    if (off < 0xF0) {
+        HostProfile::count(&SyncStats::gsOtherPrivReads);
+        return priv_[off >> 4];
+    }
     switch (off & ~0xFu) {
-        case 0x1000: return csr();
-        case 0x1010: return imr_;
-        case 0x1040: return 0;  // BUSDIR
-        case 0x1080: return siglblid_;
+        case 0x1000:
+            HostProfile::count(&SyncStats::gsCsrReads);
+            return csr();
+        case 0x1010:
+            HostProfile::count(&SyncStats::gsOtherPrivReads);
+            return imr_;
+        case 0x1040:  // BUSDIR
+            HostProfile::count(&SyncStats::gsOtherPrivReads);
+            return 0;
+        case 0x1080:
+            HostProfile::count(&SyncStats::gsSiglblidReads);
+            return siglblid_;
         default: break;
     }
     throw Unimplemented("leitura de registrador privilegiado do GS inexistente " + anyps2::hex(addr), pc);
@@ -614,12 +630,14 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
         case SIGNAL: {
             const std::uint64_t mask = v >> 32;
             siglblid_ = (siglblid_ & ~mask) | (v & mask & 0xFFFFFFFFull);
+            HostProfile::gsEvent(SyncStats::EvSignal, source_);
             // O sinal vale depois de todos os desenhos anteriores.
             waitIdle(BandStats::WaitSignal);
             raiseEvent(kSignal);
             return;
         }
         case FINISH: {
+            HostProfile::gsEvent(SyncStats::EvFinish, source_);
             // Com relógio real o FINISH só aparece quando o trabalho do GS acabou
             // de fato, então quem o recebe já pode ler a memória. Com o relógio
             // virtual o tempo vem da conta analítica e o worker segue sem espera.
@@ -637,6 +655,7 @@ void Gs::writeRegister(std::uint8_t reg, std::uint64_t v, std::uint32_t pc) {
             return;
         }
         case LABEL: {
+            HostProfile::gsEvent(SyncStats::EvLabel, source_);
             const std::uint64_t mask = (v >> 32) << 32;
             siglblid_ = (siglblid_ & ~mask) | ((v << 32) & mask);
             return;
@@ -1075,6 +1094,7 @@ void Gs::copyLocal(const LocalCopy& c) {
 }
 
 void Gs::localToHost(std::uint32_t pc) {
+    HostProfile::count(&SyncStats::gsLocalToHost);
     // O EE lê a VRAM agora: tudo o que foi desenhado antes tem de estar pronto.
     waitIdle(BandStats::WaitDownload);
     const std::uint64_t buf = regs_[BITBLTBUF], pos = regs_[TRXPOS], rr = regs_[TRXREG];
