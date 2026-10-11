@@ -35,6 +35,25 @@
 
 namespace anyps2::rt {
 
+namespace {
+
+// Num processador híbrido (núcleos de desempenho e de eficiência), o Windows 11
+// põe processos em segundo plano ou sem foco no EcoQoS, que os prende aos núcleos
+// de eficiência: o mesmo jogo chegava a rodar com metade da velocidade de uma
+// execução para outra. O emulador é sensível a latência em todas as threads (EE,
+// faixas do GS, som), então pede sempre a QoS alta.
+void disablePowerThrottling() {
+#ifdef _WIN32
+    PROCESS_POWER_THROTTLING_STATE state{};
+    state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask = 0;  // controle ligado e estado desligado: nunca reduzir a velocidade
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state);
+#endif
+}
+
+}  // namespace
+
 RuntimeOptions RuntimeOptions::fromEnvironment() {
     return resolveOptions([](const char* name) -> const char* { return std::getenv(name); }, defaultConfigPath());
 }
@@ -44,6 +63,7 @@ Runtime::Runtime(const ProgramInfo& program, RuntimeOptions options)
       options_(options),
       mem_(std::make_unique<Memory>()),
       ctx_(std::make_unique<Context>()) {
+    disablePowerThrottling();
     std::memset(static_cast<void*>(ctx_.get()), 0, sizeof(Context));
     ctx_->mem = mem_.get();
     ctx_->rt = this;
