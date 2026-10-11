@@ -8,6 +8,8 @@
 //  * o estado de entrada do pipeline: flags, Q/P e VF em voo quando o
 //    microprograma começa (rede de segurança para mudanças na contabilidade);
 //  * o endereço e o ciclo de cada XGKICK;
+//  * o fluxo de controle estático do código gerado (casos de fluxo: desvio tomado e não tomado, desvio e bit E no
+//    delay slot, alvos nas fronteiras de 64 pares, JR entre trechos, par alterado no delay slot, laço infinito);
 //  * a vazão de cada caminho (informativa), em programas curtos e num laço
 //    longo de transformação de vértices.
 //
@@ -31,6 +33,9 @@
 
 extern const ::anyps2::rt::VuProgramEntry kFuzzVu0[], kFuzzVu1[], kFuzzVu2[], kFuzzVu3[];
 extern const std::size_t kFuzzVu0Count, kFuzzVu1Count, kFuzzVu2Count, kFuzzVu3Count;
+// Programas de fluxo (desvios, bit E, fronteiras de trecho, laços infinitos): ver gen.cpp.
+extern const ::anyps2::rt::VuProgramEntry kFuzzVuHand[];
+extern const std::size_t kFuzzVuHandCount;
 
 namespace {
 
@@ -157,11 +162,15 @@ int failures = 0;
 // recompilado compartilham o runtime (vu_exec.h), então um erro de pipeline comum aos dois passa em
 // `same`; o resumo impresso no fim permite comparar duas versões do runtime: tem de ser idêntico.
 std::uint64_t digest = 0xCBF29CE484222325ull;
+// Os casos de fluxo têm o resumo deles, para que o resumo acima continue comparável com o das versões
+// anteriores do runtime.
+std::uint64_t flowDigest = 0xCBF29CE484222325ull;
+std::uint64_t* activeDigest = &digest;
 void fold(const void* p, std::size_t n) {
     const auto* b = static_cast<const std::uint8_t*>(p);
     for (std::size_t i = 0; i < n; ++i) {
-        digest ^= b[i];
-        digest *= 0x100000001B3ull;
+        *activeDigest ^= b[i];
+        *activeDigest *= 0x100000001B3ull;
     }
 }
 void foldState(const Machine& m) {
@@ -180,7 +189,7 @@ void foldState(const Machine& m) {
 bool same(const Machine& a, const Machine& b, const std::string& what) {
     foldState(a);
     // VUDIFF_DIGESTS=1: o resumo acumulado depois de cada comparação (diff entre duas versões acha a execução que mudou).
-    if (std::getenv("VUDIFF_DIGESTS")) std::printf("%s: %016llx\n", what.c_str(), static_cast<unsigned long long>(digest));
+    if (std::getenv("VUDIFF_DIGESTS")) std::printf("%s: %016llx\n", what.c_str(), static_cast<unsigned long long>(*activeDigest));
     std::string diff;
     for (unsigned i = 0; i < 32 && diff.empty(); ++i) {
         if (std::memcmp(&a.vf[i], &b.vf[i], 16) != 0) diff = "vf" + std::to_string(i);
@@ -346,6 +355,127 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 6. Fluxo de controle estático do código gerado. O código recompilado conta os pares e acompanha o cursor
+    // (delay slot, bit E) em tempo de compilação; os programas de gen.cpp cobrem cada contexto. Máquinas e
+    // gerador de números próprios, para não mexer no resumo das seções anteriores.
+    std::size_t flowRuns = 0, flowPatched = 0, flowInfinite = 0;
+    if (!benchOnly) {
+        activeDigest = &flowDigest;
+        Machine fi, fc;
+        std::vector<anyps2::rt::VuProgramEntry> flowPrograms = programs;
+        flowPrograms.insert(flowPrograms.end(), kFuzzVuHand, kFuzzVuHand + kFuzzVuHandCount);
+        fc.vu.setPrograms(flowPrograms.data(), flowPrograms.size());
+        Rng frng{0xF10F10ull};
+        const auto compare = [&](const std::string& what, const std::string& ea, const std::string& eb, bool pairsToo) {
+            if (ea != eb) {
+                ++failures;
+                std::printf("DIFERENÇA %s: erro '%s' vs '%s'\n", what.c_str(), ea.c_str(), eb.c_str());
+            }
+            same(fi, fc, what);
+            // O contador de pares local do código recompilado soma ao Vu nas saídas: tem de bater com o do
+            // interpretador quando a execução termina (numa exceção de um par o contador local se perde).
+            if (pairsToo && ea.empty() && eb.empty() && fi.vu.pairs() != fc.vu.pairs()) {
+                ++failures;
+                std::printf("DIFERENÇA %s: pares %llu vs %llu\n", what.c_str(),
+                            static_cast<unsigned long long>(fi.vu.pairs()), static_cast<unsigned long long>(fc.vu.pairs()));
+            }
+            ++flowRuns;
+        };
+        for (const auto& h : kHandPrograms) {
+            const std::string name = std::string("fluxo '") + h.name + "'";
+            const std::uint32_t endPc = h.offset + (h.pairs - 2) * 8;
+            if (h.infinite) {
+                // O limite de pares tem de dar o erro nos dois caminhos, sem esperar 200 milhões de pares.
+                constexpr std::uint64_t kLimit = 20000;
+                fi.vu.setMaxPairs(kLimit);
+                fc.vu.setMaxPairs(kLimit);
+                fc.vu.setMode(Vu::Mode::CompiledOnly);
+                std::memcpy(fi.micro.data(), kFuzzImage, kSize);
+                randomState(fi, frng, endPc);
+                copyState(fc, fi);
+                const std::string ea = guarded([&] { fi.vu.interpret(h.offset, 0); });
+                const std::string eb = guarded([&] { fc.vu.start(h.offset, 0); });
+                const bool ok = ea.find("laço infinito") != std::string::npos &&
+                                eb.find("laço infinito") != std::string::npos && fc.vu.pairs() > kLimit &&
+                                fc.vu.pairs() <= kLimit + 4096;
+                if (!ok) {
+                    ++failures;
+                    std::printf("DIFERENÇA %s: esperava o erro de laço infinito nos dois caminhos ('%s' vs '%s', %llu pares)\n",
+                                name.c_str(), ea.c_str(), eb.c_str(), static_cast<unsigned long long>(fc.vu.pairs()));
+                }
+                fi.vu.setMaxPairs(200u * 1000 * 1000);
+                fc.vu.setMaxPairs(200u * 1000 * 1000);
+                ++flowInfinite;
+                continue;
+            }
+            // 6a. Mesma posição, vários estados (cobre o desvio tomado e o não tomado).
+            fc.vu.setMode(Vu::Mode::CompiledOnly);
+            for (int sd = 0; sd < 48; ++sd) {
+                std::memcpy(fi.micro.data(), kFuzzImage, kSize);
+                randomState(fi, frng, endPc);
+                copyState(fc, fi);
+                const std::string ea = guarded([&] { fi.vu.interpret(h.offset, 0); });
+                const std::string eb = guarded([&] { fc.vu.start(h.offset, 0); });
+                compare(name + ", semente " + std::to_string(sd), ea, eb, true);
+            }
+            if (fc.vu.interpretedPairs() != 0) {
+                ++failures;
+                std::printf("FALHA %s: %llu pares interpretados no modo só-recompilado\n", name.c_str(),
+                            static_cast<unsigned long long>(fc.vu.interpretedPairs()));
+            }
+            // 6b. Pipeline semeado.
+            for (int sd = 0; sd < 12; ++sd) {
+                std::memcpy(fi.micro.data(), kFuzzImage, kSize);
+                randomState(fi, frng, endPc);
+                copyState(fc, fi);
+                const auto seed = randomPipeline(frng);
+                fi.vu.seedPipeline(seed);
+                fc.vu.seedPipeline(seed);
+                const std::string ea = guarded([&] { fi.vu.interpret(h.offset, 0); });
+                const std::string eb = guarded([&] { fc.vu.start(h.offset, 0); });
+                compare(name + " com o pipeline semeado " + std::to_string(sd), ea, eb, true);
+            }
+            // 6c. Em outra base (os alvos são relativos; o JR tem alvo absoluto e fica de fora).
+            fc.vu.setMode(Vu::Mode::Auto);
+            if (!h.hasJr) {
+                for (int sd = 0; sd < 6; ++sd) {
+                    const std::uint32_t base = (h.offset + 8 * (1 + frng.below(64))) % (kSize - h.pairs * 8) & ~7u;
+                    std::memset(fi.micro.data(), 0, kSize);
+                    std::memcpy(fi.micro.data() + base, reinterpret_cast<const std::uint8_t*>(kFuzzImage) + h.offset,
+                                h.pairs * 8);
+                    randomState(fi, frng, base + (h.pairs - 2) * 8);
+                    copyState(fc, fi);
+                    const auto before = fc.vu.compiledPairs();
+                    const std::string ea = guarded([&] { fi.vu.interpret(base, 0); });
+                    const std::string eb = guarded([&] { fc.vu.start(base, 0); });
+                    compare(name + " realocado para " + std::to_string(base), ea, eb, true);
+                    if (fc.vu.compiledPairs() == before) {
+                        ++failures;
+                        std::printf("FALHA %s: realocado para %u não usou o código recompilado\n", name.c_str(), base);
+                    }
+                }
+            }
+            // 6d. Um delay slot alterado na micro memória: o pairIs falha no meio do contexto (com o desvio ou o
+            // bit E pendente) e o interpretador tem de retomar do cursor gravado.
+            for (std::uint32_t k = 0; k < h.slotCount; ++k) {
+                for (int sd = 0; sd < 6; ++sd) {
+                    std::memcpy(fi.micro.data(), kFuzzImage, kSize);
+                    const std::uint32_t nopPair[2] = {0x8000033Cu, 0x000002FFu};
+                    std::memcpy(fi.micro.data() + h.offset + h.slots[k] * 8, nopPair, 8);
+                    randomState(fi, frng, endPc);
+                    copyState(fc, fi);
+                    const std::string ea = guarded([&] { fi.vu.interpret(h.offset, 0); });
+                    const std::string eb = guarded([&] { fc.vu.start(h.offset, 0); });
+                    compare(name + " com o delay slot " + std::to_string(h.slots[k]) + " alterado, semente " +
+                                std::to_string(sd),
+                            ea, eb, true);
+                    ++flowPatched;
+                }
+            }
+        }
+        activeDigest = &digest;
+    }
+
     // 5. Vazão (informativa). `longLoop` escolhe o laço longo ou os programas curtos.
     auto bench = [&](Machine& m, bool compiled, bool longLoop) {
         std::memcpy(m.micro.data(), kFuzzImage, kSize);
@@ -416,7 +546,10 @@ int main(int argc, char** argv) {
 
     std::printf("vu_diff: %zu programas, %zu execuções comparadas, %zu realocadas, %zu com par alterado, %zu com o pipeline semeado\n",
                 std::size(kFuzzPrograms), runs, relocated, patched, seeded);
+    std::printf("vu_diff: %zu programas de fluxo, %zu execuções comparadas, %zu com o delay slot alterado, %zu laços infinitos\n",
+                std::size(kHandPrograms), flowRuns, flowPatched, flowInfinite);
     std::printf("vu_diff: resumo do estado final %016llx\n", static_cast<unsigned long long>(digest));
+    std::printf("vu_diff: resumo dos casos de fluxo %016llx\n", static_cast<unsigned long long>(flowDigest));
     if (failures) {
         std::printf("vu_diff: %d diferença(s)\n", failures);
         return 1;

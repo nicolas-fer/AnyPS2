@@ -300,7 +300,10 @@ Limitações e riscos:
   compilação (endereço de carga conhecido) e blocos "crus" que o programa
   envia com um MPG montado em tempo de execução (como o ps2sdk faz) — e cada
   bloco vira C++: trechos de até 64 pares com um rótulo por par e
-  fall-through entre pares consecutivos; cada par chama o núcleo do VU com
+  fall-through entre pares consecutivos; o fluxo é estático (o delay slot de
+  B/BAL/IBxx/JR e o do bit E são emitidos de novo logo depois do par que os cria,
+  com o destino conhecido; o cursor e o contador de pares são locais ao trecho e
+  só vão para o Vu nas saídas); cada par chama o núcleo do VU com
   as operações como parâmetros de template (`if constexpr`), então sobra só
   o código daquela operação. Os blocos não dependem do endereço de carga: o runtime casa
   o conteúdo da micro memória com os blocos (índice pelo par no pc), e cada

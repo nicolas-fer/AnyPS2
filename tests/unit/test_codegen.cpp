@@ -194,8 +194,12 @@ TEST_CASE(codegen, vu_microcode) {
     const std::string& code = files[0].text;
     CHECK_EQ(files[0].name, std::string("vu_000.cpp"));
     CHECK(code.find("vu.pairIs(base + 0x0008u, 0x520107FEu, 0x000002FFu)") != std::string::npos);
-    CHECK(code.find("vu.step<static_cast<U>(0), static_cast<L>(4)>") != std::string::npos);  // ADD + IADDIU
+    CHECK(code.find("vu.execPairOp<static_cast<U>(0), static_cast<L>(4)>") != std::string::npos);  // ADD + IADDIU
     CHECK(code.find("case 0x0018u: goto p_0018;") != std::string::npos);
+    // Fluxo estático: o IBNE tem o delay slot (bit E, contexto aninhado) fora do caminho estático, que grava o
+    // cursor completo; o par com bit E tem a cópia do delay slot que termina o microprograma.
+    CHECK(code.find("cur.hasDelayed = taken; cur.delayedTarget = base + 0x0000u; cur.ending = false;") != std::string::npos);
+    CHECK(code.find("cur.pc = vu.wrap(base + 0x0020u); cur.done = true; vu.addPairs(n); return;") != std::string::npos);
     CHECK(code.find("void kT_block_0(") != std::string::npos);
     const std::string& table = files[1].text;
     CHECK_EQ(files[1].name, std::string("vu_programs.cpp"));

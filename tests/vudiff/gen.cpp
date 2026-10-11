@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -277,6 +278,186 @@ int main(int argc, char** argv) {
         at += pairs * 8;
     }
 
+    // Programas de fluxo (fatia 2 do plano do VU1 enxuto): o gerador do código recompilado trata cada
+    // contexto de desvio e de bit E por um caminho estático, e o sorteio acima quase não passa por
+    // eles (delay slot sempre normal, programas de uma página, sem bit E fora do fim). Estes cobrem,
+    // com a mesma estrutura de programa (termina em par E + delay slot), alvos nas fronteiras de 64 pares,
+    // desvio no delay slot, bit E no desvio e no delay slot, JR entre trechos e laços infinitos. Entram na
+    // mesma imagem, depois dos sorteados, e usam o gerador de números depois deles (os programas
+    // sorteados não mudam). Ficam numa tabela à parte (kFuzzVuHand).
+    struct HandProg {
+        std::string name;
+        std::uint32_t offset, pairs;
+        bool hasJr, infinite;
+        std::vector<std::uint32_t> slots;  // índices dos pares que são delay slot (o teste os altera)
+    };
+    std::vector<HandProg> hands;
+    std::vector<anyps2::vu::MicroBlob> handBlobs;
+    {
+        struct Asm {
+            std::vector<std::uint32_t> w;
+            std::vector<std::uint32_t> slots;
+            Rng& rng;
+            const std::vector<std::uint32_t>& lowers;
+            const std::vector<std::uint32_t>& uppers;
+            std::uint32_t index() const { return static_cast<std::uint32_t>(w.size() / 2); }
+            std::uint32_t anyUpper() { return uppers[rng.below(static_cast<std::uint32_t>(uppers.size()))]; }
+            void normal() {
+                w.push_back(lowers[rng.below(static_cast<std::uint32_t>(lowers.size()))]);
+                w.push_back(anyUpper());
+            }
+            void normalE() {
+                normal();
+                w.back() |= kEBit;
+            }
+            void fillTo(std::uint32_t i) {
+                while (index() < i) normal();
+            }
+            void withUpper(std::uint32_t lower, bool e = false) {
+                w.push_back(lower);
+                w.push_back(anyUpper() | (e ? kEBit : 0u));
+            }
+            // Desvio no par atual para o par `target` (índice); o delay slot é o par seguinte.
+            std::uint32_t rel(std::uint32_t target) const {
+                return static_cast<std::uint32_t>(static_cast<int>(target) - static_cast<int>(index()) - 1);
+            }
+            void b(std::uint32_t target, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x20, 0, 0, 0, rel(target)), e);
+            }
+            void bal(unsigned link, std::uint32_t target, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x21, 0, link, 0, rel(target)), e);
+            }
+            void ibne(unsigned a, unsigned c, std::uint32_t target, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x29, 0, c, a, rel(target)), e);
+            }
+            void ibeq(unsigned a, unsigned c, std::uint32_t target, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x28, 0, c, a, rel(target)), e);
+            }
+            void ibltz(unsigned a, std::uint32_t target, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x2C, 0, 0, a, rel(target)), e);
+            }
+            void jr(unsigned reg, bool e = false) {
+                slots.push_back(index() + 1);
+                withUpper(lo(0x24, 0, 0, reg, 0), e);
+            }
+            void setJump(std::uint32_t base, std::uint32_t targetIndex) {  // vi15 = endereço do par (em pares)
+                withUpper(iaddiu(kJumpReg, 0, (base + targetIndex * 8) / 8));
+            }
+            void end() {  // fim: par E + delay slot (o teste põe vi15 aqui)
+                normalE();
+                normal();
+            }
+        };
+        auto place = [&](const std::string& name, bool hasJr, bool infinite, Asm& a) {
+            const auto pairs = static_cast<std::uint32_t>(a.w.size() / 2);
+            if (at + pairs * 8 > kMicro) {
+                std::cerr << "sem espaço para o programa de fluxo " << name << "\n";
+                std::exit(1);
+            }
+            for (std::size_t k = 0; k < a.w.size(); ++k) image[at / 4 + k] = a.w[k];
+            anyps2::vu::MicroBlob blob;
+            blob.address = at;
+            blob.loadAddress = at;
+            blob.words = a.w;
+            handBlobs.push_back(blob);
+            hands.push_back({name, at, pairs, hasJr, infinite, a.slots});
+            at += pairs * 8;
+        };
+
+        // Fronteiras de trecho (64 pares): alvo no primeiro par do trecho seguinte, delay slot no outro trecho,
+        // laço que atravessa a fronteira e desvio de um trecho para o anterior.
+        {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(10); a.b(12); a.normal();                       // B curto
+            a.fillTo(20); a.ibne(1, 2, 24); a.normal();
+            a.fillTo(30); a.ibeq(3, 4, 62); a.normal();              // salta o início do laço
+            a.fillTo(58); a.withUpper(iaddiu(kLoopReg, 0, 3));       // contador do laço (59..101)
+            a.fillTo(61); a.ibne(8, 9, 64); a.normal();              // alvo exatamente na fronteira (64)
+            a.fillTo(63); a.ibne(3, 4, 70); a.normal();              // delay slot (64) no outro trecho
+            a.fillTo(99); a.withUpper(isubiu(kLoopReg, kLoopReg, 1));
+            a.ibne(kLoopReg, 0, 59); a.normal();                     // volta ao trecho anterior (aresta de volta)
+            a.fillTo(120); a.b(124); a.normal();
+            a.fillTo(126); a.ibltz(5, 128); a.normal();              // alvo = primeiro par do terceiro trecho
+            a.fillTo(134); a.bal(5, 138); a.normal();
+            a.fillTo(144);
+            a.end();
+            place("fronteiras", false, false, a);
+        }
+        // JR entre trechos, para a frente e para trás (o alvo é absoluto: não vale realocado).
+        {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(5); a.withUpper(iaddiu(kLoopReg, 0, 2));
+            a.fillTo(19); a.setJump(at, 70); a.jr(kJumpReg); a.normal();   // trecho 0 -> trecho 1
+            a.fillTo(70); a.setJump(at, 30);                                // o laço volta ao trecho 0
+            a.withUpper(isubiu(kLoopReg, kLoopReg, 1));
+            a.ibeq(kLoopReg, 0, 76); a.normal();
+            a.jr(kJumpReg); a.normal();
+            a.fillTo(76); a.setJump(at, 130); a.jr(kJumpReg); a.normal();   // trecho 1 -> trecho 2
+            a.fillTo(130);
+            a.end();
+            place("jr entre trechos", true, false, a);
+        }
+        // Desvio e bit E no delay slot, em todas as combinações (programas curtos: o sorteio de estados
+        // escolhe se IBxx é tomado ou não).
+        static const char* const kNames[] = {
+            "b com ibne no delay slot", "ibne com b no delay slot", "bal com jr no delay slot", "b com bit E",
+            "ibne com bit E", "jr com bit E", "bit E com b no delay slot", "ibne com bit E no delay slot",
+            "b com bit E e bit E no delay slot", "bit E com bit E no delay slot", "ibne com ibne com ibne",
+            "ibeq com bit E e ibne no delay slot"};
+        for (unsigned v = 0; v < std::size(kNames); ++v) {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(2);
+            a.setJump(at, 10);
+            bool jr = false;
+            switch (v) {
+                case 0: a.b(10); a.ibne(1, 2, 8); break;
+                case 1: a.ibne(1, 2, 10); a.b(8); break;
+                case 2: a.bal(5, 10); a.jr(kJumpReg); jr = true; break;
+                case 3: a.b(10, true); a.normal(); break;
+                case 4: a.ibne(1, 2, 10, true); a.normal(); break;
+                case 5: a.jr(kJumpReg, true); a.normal(); jr = true; break;
+                case 6: a.normalE(); a.b(10); break;
+                case 7: a.ibne(1, 2, 10); a.normalE(); break;
+                case 8: a.b(10, true); a.normalE(); break;
+                case 9: a.normalE(); a.normalE(); break;
+                case 10: a.ibne(1, 2, 10); a.ibne(3, 4, 13); a.ibne(5, 6, 14); break;
+                default: a.ibeq(1, 2, 10, true); a.ibne(3, 4, 12); break;
+            }
+            if (v == 9 || v == 6) a.slots.push_back(4);  // o par depois do E também é delay slot
+            a.fillTo(18);
+            a.end();
+            place(kNames[v], jr, false, a);
+        }
+        // Laços infinitos: o limite de pares por execução tem de dar o erro (dentro de um trecho, entre
+        // trechos e por JR).
+        {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(2); a.b(2); a.normal();            // o B salta para si mesmo
+            a.fillTo(8);
+            a.end();
+            place("laço infinito num trecho", false, true, a);
+        }
+        {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(70); a.b(62); a.normal();          // 62..71 atravessa a fronteira do trecho
+            a.fillTo(75);
+            a.end();
+            place("laço infinito entre trechos", false, true, a);
+        }
+        {
+            Asm a{{}, {}, rng, lowers, uppers};
+            a.fillTo(1); a.setJump(at, 2); a.jr(kJumpReg); a.normal();   // JR para si mesmo
+            a.fillTo(8);
+            a.end();
+            place("laço infinito por jr", true, true, a);
+        }
+    }
+
     const std::string out = argv[2];
     // 4 grupos de programas, cada um num arquivo com a sua tabela
     // (kFuzzVu0..3): compilam em paralelo (sob sanitizers o C++ gerado é
@@ -296,6 +477,16 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    {
+        std::string text;
+        for (const auto& f : anyps2::codegen::generateVuSources(handBlobs, "kFuzzVuHand", 1u << 20)) text += f.text + "\n";
+        std::ofstream o(out + "/vu_fuzz_4.cpp", std::ios::binary);
+        o << text;
+        if (!o) {
+            std::cerr << "falha ao escrever vu_fuzz_4.cpp\n";
+            return 1;
+        }
+    }
     std::ofstream h(out + "/vu_fuzz_data.h", std::ios::binary);
     h << "// Gerado por vu_fuzz_gen — não edite.\n#pragma once\n#include <cstdint>\n\n"
          "struct FuzzProgram {\n    std::uint32_t offset;\n    std::uint32_t pairs;\n    bool hasJr;\n    bool longLoop;\n};\n"
@@ -303,6 +494,17 @@ int main(int argc, char** argv) {
     for (const auto& p : progs) {
         h << "    {" << p.offset << "u, " << p.pairs << "u, " << (p.hasJr ? "true" : "false") << ", "
           << (p.longLoop ? "true" : "false") << "},\n";
+    }
+    h << "};\n";
+    h << "struct HandProgram {\n    const char* name;\n    std::uint32_t offset;\n    std::uint32_t pairs;\n    bool hasJr;\n"
+         "    bool infinite;\n    std::uint32_t slots[16];\n    std::uint32_t slotCount;\n};\n"
+         "inline constexpr HandProgram kHandPrograms[] = {\n";
+    for (const auto& p : hands) {
+        h << "    {\"" << p.name << "\", " << p.offset << "u, " << p.pairs << "u, " << (p.hasJr ? "true" : "false") << ", "
+          << (p.infinite ? "true" : "false") << ", {";
+        const std::size_t n = std::min<std::size_t>(p.slots.size(), 16);
+        for (std::size_t k = 0; k < 16; ++k) h << (k ? ", " : "") << (k < n ? p.slots[k] : 0u) << "u";
+        h << "}, " << n << "u},\n";
     }
     h << "};\ninline constexpr std::uint32_t kFuzzImage[] = {";
     for (std::size_t k = 0; k < image.size(); ++k) {

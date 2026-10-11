@@ -468,7 +468,7 @@ ANYPS2_VU_INLINE void Vu::execLower(const vu::Instr& in, std::uint32_t pc, Flow&
 // ---- Laço: um par com delay slot e bit E -------------------------------------
 
 ANYPS2_VU_INLINE void Vu::countPair(std::uint32_t pc) {
-    if (++pairs_ > kMaxPairs) tooManyPairs(pc);
+    if (++pairs_ > maxPairs_) tooManyPairs(pc);
 }
 
 template <vu::U UOp, vu::L LOp>

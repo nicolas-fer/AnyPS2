@@ -194,7 +194,8 @@ void Vu::finish() {
 }
 
 void Vu::tooManyPairs(std::uint32_t pc) const {
-    throw GuestError("microprograma não terminou após 200 milhões de instruções (laço infinito?) — " + where(pc),
+    const std::string limit = maxPairs_ == kMaxPairs ? "200 milhões" : std::to_string(maxPairs_);
+    throw GuestError("microprograma não terminou após " + limit + " de instruções (laço infinito?) — " + where(pc),
                      eePc_);
 }
 
@@ -329,6 +330,10 @@ Vu::Match Vu::findBlock(std::uint32_t pc) const {
         }
     }
     return best;
+}
+
+void Vu::stepOne(VuCursor& cur) {
+    step(fetch(cur.pc), cur.pc, cur);
 }
 
 void Vu::start(std::uint32_t pc, std::uint32_t eePc) {

@@ -53,7 +53,7 @@ target_link_libraries(vu_fuzz_gen PRIVATE anyps2::recompiler)
 anyps2_set_warnings(vu_fuzz_gen)
 set(vudiff_gen ${CMAKE_CURRENT_BINARY_DIR}/vudiff)
 set(vudiff_sources ${vudiff_gen}/vu_fuzz_0.cpp ${vudiff_gen}/vu_fuzz_1.cpp ${vudiff_gen}/vu_fuzz_2.cpp
-    ${vudiff_gen}/vu_fuzz_3.cpp)
+    ${vudiff_gen}/vu_fuzz_3.cpp ${vudiff_gen}/vu_fuzz_4.cpp)
 add_custom_command(
     OUTPUT ${vudiff_gen}/vu_fuzz_data.h ${vudiff_sources}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${vudiff_gen}

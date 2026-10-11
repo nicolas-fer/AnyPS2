@@ -192,6 +192,9 @@ public:
     std::uint32_t vifItopValue() const { return vifItop_; }
     // Pares executados na última execução (start/interpret).
     std::uint64_t pairs() const { return pairs_; }
+    // Só para testes: limite de pares por execução menor que o padrão (para provocar o erro de laço infinito
+    // sem esperar 200 milhões de pares).
+    void setMaxPairs(std::uint64_t n) { maxPairs_ = n; }
     // Só para testes: registra os XGKICK (e, sem Runtime, não falha neles).
     void setXgkickLog(std::vector<VuXgkickEvent>* log) { xgkickLog_ = log; }
 #ifdef ANYPS2_VU_STATS
@@ -220,6 +223,22 @@ public:
     void finish();
     // Limite de pares por execução (laço infinito vira erro).
     void countPair(std::uint32_t pc);
+
+    // ---- Código recompilado com fluxo estático (gerado por vu_generator.cpp) ----
+    // Cada trecho conta os pares numa variável local e só soma ao pairs_ nas saídas (addPairs), em vez de
+    // um RMW no objeto por par. O limite de pares é conferido nas arestas de volta e a cada volta do
+    // laço do bloco: pairsOver diz se `n` pares locais a mais estouram o limite, e pairsOverflow soma
+    // e lança o mesmo erro do countPair (o pc é o do par a executar). Numa exceção de um par (erro do
+    // guest) os pares locais ainda não somados se perdem: o pairs() fica menor que no interpretador.
+    void addPairs(std::uint64_t n) { pairs_ += n; }
+    bool pairsOver(std::uint64_t n) const { return pairs_ + n > maxPairs_; }
+    [[noreturn]] void pairsOverflow(std::uint64_t n, std::uint32_t pc) {
+        pairs_ += n;
+        tooManyPairs(pc);
+    }
+    // Um par pelo interpretador, com o cursor como estiver (o trecho recompilado entra com delay slot ou
+    // bit E pendentes, que o fluxo estático não cobre, por aqui).
+    void stepOne(VuCursor& cur);
     std::uint64_t cycle() const { return cycle_; }
     std::uint32_t startPc() const { return startPc_; }
 
@@ -284,6 +303,7 @@ private:
     void xgkick(std::uint32_t addr, std::uint32_t pc);
     [[noreturn]] void tooManyPairs(std::uint32_t pc) const;
     static constexpr std::uint64_t kMaxPairs = 200u * 1000 * 1000;
+    std::uint64_t maxPairs_ = kMaxPairs;
     std::uint32_t vifTop(bool itop, std::uint32_t pc);  // XTOP/XITOP
     [[noreturn]] void fail(const std::string& what, std::uint32_t pc) const;
     std::string where(std::uint32_t pc) const;
