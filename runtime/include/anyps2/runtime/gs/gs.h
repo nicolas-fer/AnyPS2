@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -51,6 +52,16 @@ struct Frame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<std::uint32_t> pixels;
+};
+
+// Buffer de CLUT interno (1 KB). Cada carga de CLUT produz uma versão nova, que
+// depois de pronta não muda mais: os desenhos guardam a versão que valia quando
+// foram enfileirados, e as faixas não leem estado global.
+struct ClutBuffer {
+    std::array<std::uint16_t, 512> v{};
+    // Falso enquanto uma barreira ainda vai preencher `v` (carga que não pôde ser
+    // feita no produtor); as faixas a marcam pronta, e só então o produtor copia.
+    std::atomic<bool> ready{true};
 };
 
 // Contadores de serialização das faixas (diagnóstico do ANYPS2_PROFILE): por que o
@@ -131,6 +142,8 @@ struct BandStats {
     std::uint64_t conflict[ConflictCount] = {};
     std::uint64_t submit[SubmitCount] = {};
     std::uint64_t hostBatches = 0;  // lotes HOST→LOCAL (flushHost)
+    std::uint64_t clutDirect = 0;   // cargas de CLUT feitas no produtor, sem barreira
+    std::uint64_t hostDirect = 0;   // transferências HOST→LOCAL escritas direto pelo produtor
     std::uint64_t waits[WaitCount] = {};
     std::int64_t waitNs[WaitCount] = {};  // só medido com ANYPS2_PROFILE
     PairTable selfPairs;                  // desenhos sozinhos por textura no próprio buffer
@@ -240,6 +253,16 @@ private:
         std::uint64_t scissor = 0, alpha = 0, test = 0, fba = 0, frame = 0, zbuf = 0;
     };
 
+    // Estado de uma transferência HOST→LOCAL.
+    struct Transfer {
+        bool active = false;
+        std::uint32_t dbp = 0, dbw = 0, psm = 0;
+        std::uint32_t x0 = 0, y0 = 0, w = 0, h = 0;
+        std::uint32_t x = 0, y = 0;
+        std::uint64_t bits = 0;  // dados de 24 bits/4 bits pendentes
+        unsigned nbits = 0;
+    };
+
     // Transferência LOCAL→LOCAL já validada no EE; o worker só copia.
     struct LocalCopy {
         std::uint32_t sbp, sbw, spsm, dbp, dbw, dpsm, sx, sy, dx, dy, w, h;
@@ -266,9 +289,29 @@ private:
     // Operação global: barreira em todas as faixas (ver GsWorker::barrier).
     void submit(GsWorker::Op op, BandStats::SubmitKind kind);
     void flushHost();
-    void hostWord(std::uint64_t data);
+    // Acessos diretos do produtor à VRAM (CLUT): vê se o que as faixas ainda podem
+    // estar fazendo não toca as páginas. outstanding_ guarda os acessos de tudo o que
+    // foi enfileirado desde que as faixas foram vistas ociosas (diferente de pending_,
+    // que uma barreira esvazia, mas não termina na hora).
+    bool trackOutstanding();
+    // Registra um acesso que a próxima barreira enfileirada conclui (chamar com o
+    // lote HOST→LOCAL já descarregado e depois da barreira de conflito).
+    void noteOutstanding(VramAccess a);
+    // Há acesso não concluído que colide com `a` (ou a lista perdeu o rastro).
+    bool outstandingConflicts(const VramAccess& a);
+    // Fim da transferência HOST→LOCAL aberta: descarrega o lote e passa o destino
+    // para outstanding_, concluído pela última barreira enfileirada.
+    void closeHostTransfer();
+    VramAccess rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x0,
+                          std::uint32_t y0, std::uint32_t w, std::uint32_t h) const;
+    VramAccess clutSource(std::uint64_t tex0, std::uint64_t texclut) const;
+    void hostWord(Transfer& x, std::uint64_t data);
+    // Uma operação das faixas tocou o destino de uma transferência direta aberta: as
+    // palavras que faltam passam a ir em lotes, depois da operação (modo do worker).
+    void demoteHostTransfer();
+    void demoteIfOverlaps(const VramAccess* acc, unsigned n);
     void copyLocal(const LocalCopy& c);
-    void loadClutCells(std::uint64_t tex0, std::uint64_t texclut);
+    void loadClutCells(ClutBuffer& dst, std::uint64_t tex0, std::uint64_t texclut) const;
 
     // Rasterização (gs_draw.cpp)
     struct DrawEnv;
@@ -290,12 +333,21 @@ private:
     std::vector<std::uint64_t> hostBatch_;  // palavras HOST→LOCAL ainda não enfileiradas
     // Acessos à VRAM dos desenhos enfileirados desde a última barreira (produtor).
     PendingAccess pending_;
+    PendingAccess outstanding_{256};  // produtor; ver trackOutstanding()
+    std::uint64_t outstandingLostNeed_ = 0;  // lista cheia: sem rastro até a barreira desse número
+    // Transferência HOST→LOCAL aberta (faltam palavras): o destino conta como escrita
+    // em andamento enquanto o produtor ainda pode enviar dados.
+    bool hostOpenValid_ = false;
+    bool hostDirect_ = false;  // aberta no modo direto (o produtor escreve na VRAM)
+    VramAccess hostOpen_;
+    std::uint64_t hostWordsLeft_ = 0;
 
     Runtime* rt_;
     Vram vram_;  // worker
     std::array<std::uint64_t, 256> regs_{};
     Context ctx_[2];
-    std::array<std::uint16_t, 512> clut_{};  // buffer de CLUT interno (1 KB), worker
+    // CLUT corrente (versão mais recente; produtor).
+    std::shared_ptr<ClutBuffer> clut_ = std::make_shared<ClutBuffer>();
     std::uint32_t cbp0_ = 0, cbp1_ = 0;
 
     // Fila de vértices
@@ -304,15 +356,11 @@ private:
     unsigned queued_ = 0;
     unsigned fanFirst_ = 0;
 
-    // Transferência HOST→LOCAL em andamento (worker)
-    struct Transfer {
-        bool active = false;
-        std::uint32_t dbp = 0, dbw = 0, psm = 0;
-        std::uint32_t x0 = 0, y0 = 0, w = 0, h = 0;
-        std::uint32_t x = 0, y = 0;
-        std::uint64_t bits = 0;  // dados de 24 bits/4 bits pendentes
-        unsigned nbits = 0;
-    } xfer_;
+    // Transferência HOST→LOCAL em andamento. Duas cópias do estado, uma por modo:
+    // xfer_ é do worker (palavras em lotes por barreira) e xferDirect_ é do produtor
+    // (palavras escritas na hora; ver startTransfer). Uma transferência usa uma só.
+    Transfer xfer_;        // worker
+    Transfer xferDirect_;  // produtor
 
     // Transferência LOCAL→HOST: dados prontos para o VIF1 e quanto já saiu
     // (produtor: sai de uma leitura da VRAM feita depois de waitIdle()).

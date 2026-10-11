@@ -58,8 +58,10 @@ void GsWorker::push(unsigned lane, const std::shared_ptr<const Task>& task) {
 }
 
 void GsWorker::barrier(Op op) {
+    ++issued_;
     if (!threaded_) {
         op();
+        done_.fetch_add(1, std::memory_order_release);
         return;
     }
     auto b = std::make_shared<Barrier>();
@@ -81,6 +83,12 @@ void GsWorker::drain() {
         lock.unlock();
         std::rethrow_exception(e);
     }
+}
+
+bool GsWorker::idle() {
+    if (!threaded_) return true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_ == 0;
 }
 
 void GsWorker::stop() noexcept {
@@ -117,6 +125,7 @@ void GsWorker::run(unsigned lane) {
                 lock.unlock();
                 failure = runTimed([&b] { b.op(); });
                 lock.lock();
+                done_.fetch_add(1, std::memory_order_release);
                 b.done = true;
                 barrierCv_.notify_all();
             } else {

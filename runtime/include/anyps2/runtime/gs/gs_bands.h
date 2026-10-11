@@ -34,11 +34,16 @@ RowRange drawRows(const DrawWindow& w, unsigned type, const Vertex& v0, const Ve
 // O mesmo para as colunas (lo/hi em x), cortadas pela janela.
 RowRange drawCols(const DrawWindow& w, unsigned type, const Vertex& v0, const Vertex& v1, const Vertex& v2);
 
-// Páginas de um retângulo de pixels: linhas rowLo..rowHi, colunas 0..cols-1, num
-// buffer de base `base` (páginas) e largura bw (em unidades de 64 pixels), no
-// formato psm. Conservador: o intervalo contém todas as páginas tocadas, e pode
-// conter mais.
-VramSpan pageSpan(std::uint32_t psm, std::uint32_t base, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
-                  unsigned cols);
+// Páginas de um retângulo de pixels: linhas rowLo..rowHi, colunas colLo..colHi, num
+// buffer de base `bp` (em blocos de 256 bytes, como TBP/FBP·32) e largura bw (em
+// unidades de 64 pixels), no formato psm. Segue o endereçamento de vram.cpp: a
+// página do pixel (x, y) é bp/32 + (y/altura)·largura + x/largura, com páginas de
+// 64x32 (32 bits), 64x64 (16 bits), 128x64 (PSMT8) e 128x128 (PSMT4), e a largura
+// do buffer em páginas é bw (bw/2 nos formatos de 8 e 4 bits, como em vram.cpp).
+// O intervalo vai da primeira à última página do retângulo (pode conter páginas
+// entre as linhas que o retângulo não toca, mas nunca falta uma tocada); se passa
+// do fim da VRAM, vira dois intervalos; se cobre 512 páginas ou mais, a VRAM toda.
+PageSpans pageSpan(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
+                   unsigned colLo, unsigned colHi);
 
 }  // namespace anyps2::rt::gs

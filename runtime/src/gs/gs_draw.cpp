@@ -72,6 +72,8 @@ struct Gs::DrawEnv {
     // Textura
     std::uint32_t tbp[7] = {}, tbw[7] = {};
     std::uint32_t tpsm = 0, tw = 0, th = 0, cpsm = 0, csa = 0;
+    // Versão da CLUT que vale para este desenho (imutável; ver ClutBuffer).
+    std::shared_ptr<const ClutBuffer> clut;
     bool tcc = false;
     unsigned tfx = 0;
     unsigned mxl = 0, mmin = 0, lodL = 0;
@@ -173,6 +175,7 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
         e.tcc = bits(t0, 34, 1);
         e.tfx = static_cast<unsigned>(bits(t0, 35, 2));
         e.cpsm = static_cast<std::uint32_t>(bits(t0, 51, 4));
+        e.clut = clut_;
         e.csa = static_cast<std::uint32_t>(bits(t0, 56, 5));
         e.lcm = bits(t1, 0, 1);
         e.mxl = static_cast<unsigned>(bits(t1, 2, 3));
@@ -253,19 +256,31 @@ void Gs::draw(std::uint32_t pc) {
     const RowRange colRange = drawCols(w, e.type, v0, v1, v2);
     if (colRange.empty()) return;
     const auto rowLo = static_cast<unsigned>(rows.lo), rowHi = static_cast<unsigned>(rows.hi);
-    const auto cols = static_cast<unsigned>(colRange.hi) + 1;
+    const auto colLo = static_cast<unsigned>(std::max(colRange.lo, 0)), colHi = static_cast<unsigned>(colRange.hi);
+    const unsigned cols = colHi + 1;
+    // O mapeamento (base em páginas, largura, formato) identifica as escritas que
+    // caem na mesma faixa; o intervalo de páginas é exato (pageSpan).
+    auto access = [](const PageSpans& p, bool write, unsigned surface, std::uint32_t bp, std::uint32_t bw,
+                     std::uint32_t psm) {
+        VramAccess a;
+        a.span = p.span;
+        a.wrap = p.wrap;
+        a.write = write;
+        a.surface = surface;
+        a.base = bp / 32;
+        a.bw = bw;
+        a.psm = psm;
+        return a;
+    };
     VramAccess writes[2];
     unsigned nw = 0;
     VramAccess reads[8];
     unsigned nr = 0;
-    writes[nw++] = VramAccess{pageSpan(e.fpsm, e.fbp / 32, e.fbw, rowLo, rowHi, cols), true, 0, e.fbp / 32,
-                              e.fbw, e.fpsm};
+    writes[nw++] = access(pageSpan(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0, e.fbp, e.fbw, e.fpsm);
     if (e.zte && !e.zmsk) {
-        writes[nw++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), true, 1, e.zbp / 32,
-                                  e.fbw, e.zpsm};
+        writes[nw++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 1, e.zbp, e.fbw, e.zpsm);
     } else if (e.zte && e.ztst >= 2) {
-        reads[nr++] = VramAccess{pageSpan(e.zpsm, e.zbp / 32, e.fbw, rowLo, rowHi, cols), false, 1, e.zbp / 32,
-                                 e.fbw, e.zpsm};
+        reads[nr++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 1, e.zbp, e.fbw, e.zpsm);
     }
     if (e.tme) {
         for (unsigned l = 0; l <= e.mxl; ++l) {
@@ -279,8 +294,8 @@ void Gs::draw(std::uint32_t pc) {
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            reads[nr++] = VramAccess{pageSpan(e.tpsm, e.tbp[l] / 32, e.tbw[l], 0, rowsV - 1, colsU), false, 2,
-                                     e.tbp[l] / 32, e.tbw[l], e.tpsm};
+            reads[nr++] = access(pageSpan(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
+                                 e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
 
@@ -295,7 +310,7 @@ void Gs::draw(std::uint32_t pc) {
     constexpr std::uint32_t kPages = Vram::kSize / 8192;
     bool selfWrap = e.fbw == 0 || cols > e.fbw * 64;
     for (unsigned i = 0; i < nw; ++i) {
-        selfWrap = selfWrap || (writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
+        selfWrap = selfWrap || (writes[i].wrap.empty() && writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
     }
     bool selfTexture = false, selfFrameZ = false;
     for (unsigned i = 0; i < nw; ++i) {
@@ -315,7 +330,14 @@ void Gs::draw(std::uint32_t pc) {
         } else {
             ++bandStats_.self[BandStats::SelfFrameZ];
         }
+        // Para quem acessa a VRAM direto do produtor (trackOutstanding): a barreira
+        // do próprio desenho conclui estes acessos.
+        flushHost();
+        for (unsigned i = 0; i < nw; ++i) noteOutstanding(writes[i]);
+        for (unsigned j = 0; j < nr; ++j) noteOutstanding(reads[j]);
         submit([this, e, v0, v1, v2] { rasterize(e, v0, v1, v2); }, BandStats::SubmitDraw);
+        demoteIfOverlaps(writes, nw);
+        demoteIfOverlaps(reads, nr);
         if (traced) trace_->endDraw(*this);
         return;
     }
@@ -347,6 +369,9 @@ void Gs::draw(std::uint32_t pc) {
     }
     for (unsigned i = 0; i < nw; ++i) pending_.add(writes[i]);
     for (unsigned j = 0; j < nr; ++j) pending_.add(reads[j]);
+    // A próxima barreira que vier depois destas tarefas conclui estes acessos.
+    for (unsigned i = 0; i < nw; ++i) noteOutstanding(writes[i]);
+    for (unsigned j = 0; j < nr; ++j) noteOutstanding(reads[j]);
 
     // Uma tarefa só para as faixas que têm linhas do desenho; cada uma recebe o
     // seu índice e sombreia só as suas linhas.
@@ -365,6 +390,8 @@ void Gs::draw(std::uint32_t pc) {
             worker_->push(lane, task);
         }
     }
+    demoteIfOverlaps(writes, nw);
+    demoteIfOverlaps(reads, nr);
     if (traced) trace_->endDraw(*this);
 }
 
@@ -402,9 +429,9 @@ std::uint32_t Gs::fetchTexel(const DrawEnv& e, unsigned level, int u, int v) con
             const unsigned idx = e.csa * 16 + raw;
             if (e.cpsm == PSMCT32) {
                 const unsigned i = idx & 255;
-                return static_cast<std::uint32_t>(clut_[i]) | (static_cast<std::uint32_t>(clut_[i + 256]) << 16);
+                return static_cast<std::uint32_t>(e.clut->v[i]) | (static_cast<std::uint32_t>(e.clut->v[i + 256]) << 16);
             }
-            return expand16(clut_[idx & 511], e.ta0, e.ta1, e.aem);
+            return expand16(e.clut->v[idx & 511], e.ta0, e.ta1, e.aem);
         }
     }
 }

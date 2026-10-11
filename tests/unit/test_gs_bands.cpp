@@ -328,29 +328,124 @@ TEST_CASE(gs_bands, clashes_rules) {
     CHECK(!clashes(read, read2));   // duas leituras nunca colidem
 }
 
+namespace {
+
+// Página (índice absoluto, 0..511) do pixel (x, y) pelo endereçamento real da Vram.
+std::uint32_t pageOf(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned x, unsigned y) {
+    std::uint32_t addr = 0;
+    switch (psm) {
+        case PSMT8: addr = Vram::byteAddress8(bp, bw, x, y); break;
+        case PSMT4: addr = Vram::nibbleAddress4(bp, bw, x, y) / 2; break;
+        case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: addr = Vram::byteAddress16(bp, bw, x, y, psm); break;
+        case PSMZ32: case PSMZ24: addr = Vram::byteAddress32(bp, bw, x, y, true); break;
+        default: addr = Vram::byteAddress32(bp, bw, x, y, false); break;  // 32/24 bits e os T*H
+    }
+    return addr / 8192;
+}
+
+bool inSpans(const PageSpans& s, std::uint32_t page) {
+    return (!s.span.empty() && page >= s.span.first && page <= s.span.last) ||
+           (!s.wrap.empty() && page >= s.wrap.first && page <= s.wrap.last);
+}
+
+}  // namespace
+
 TEST_CASE(gs_bands, page_span_contains_every_touched_page) {
-    // Varredura: as páginas de cada pixel do retângulo têm de estar no intervalo.
-    const std::uint32_t psms[] = {PSMCT32, PSMCT16, PSMT8, PSMT4, PSMZ32};
+    // Varredura exaustiva: a página de cada pixel do retângulo, no endereçamento
+    // real, tem de estar nos intervalos. Todos os formatos, larguras (inclusive 0 e
+    // ímpares), bases fora de página e retângulos que não começam na coluna 0.
+    const std::uint32_t psms[] = {PSMCT32, PSMCT24, PSMCT16, PSMCT16S, PSMT8,  PSMT4,   PSMT8H,
+                                  PSMT4HL, PSMT4HH, PSMZ32,  PSMZ24,   PSMZ16, PSMZ16S};
     for (std::uint32_t psm : psms) {
-        for (std::uint32_t bw : {0u, 1u, 2u, 3u}) {
-            for (std::uint32_t base : {0u, 1u, 32u}) {
-                const std::uint32_t bp = base * 32 + 7;  // começa no meio de uma página
-                const unsigned rowLo = 3, rowHi = 70, cols = 150;
-                const VramSpan s = pageSpan(psm, base, bw, rowLo, rowHi, cols);
+        for (std::uint32_t bw : {0u, 1u, 2u, 3u, 5u}) {
+            for (std::uint32_t bp : {0u, 7u, 32u, 1000u, 16384u - 40u, 16384u - 3u}) {
+                const unsigned rowLo = 3, rowHi = 140, colLo = 37, colHi = 230;
+                const PageSpans s = pageSpan(psm, bp, bw, rowLo, rowHi, colLo, colHi);
                 for (unsigned y = rowLo; y <= rowHi; ++y) {
-                    for (unsigned x = 0; x < cols; x += 3) {
-                        std::uint32_t addr = 0;
-                        if (psm == PSMT8) addr = Vram::byteAddress8(bp, bw, x, y);
-                        else if (psm == PSMT4) addr = Vram::nibbleAddress4(bp, bw, x, y) / 2;
-                        else if (psm == PSMCT16) addr = Vram::byteAddress16(bp, bw, x, y, psm);
-                        else addr = Vram::byteAddress32(bp, bw, x, y, psm == PSMZ32);
-                        const std::uint32_t page = addr / 8192;
-                        CHECK(page >= s.first && page <= s.last);
-                    }
+                    for (unsigned x = colLo; x <= colHi; ++x) CHECK(inSpans(s, pageOf(psm, bp, bw, x, y)));
                 }
             }
         }
     }
+}
+
+TEST_CASE(gs_bands, page_span_is_exact_per_format) {
+    // Uma textura PSMT4 de 128x64 perto do fim da VRAM (como as do GT4): só as
+    // páginas dela, não a VRAM inteira.
+    const PageSpans t4 = pageSpan(PSMT4, 0x3E60, 2, 0, 63, 0, 127);
+    CHECK(t4.wrap.empty());
+    CHECK_EQ(t4.span.first, 0x3E60u / 32);
+    CHECK_EQ(t4.span.last, 0x3E60u / 32);
+    // PSMT8 de 128x64 alinhado: uma página só.
+    const PageSpans t8 = pageSpan(PSMT8, 0x3F00, 2, 0, 63, 0, 127);
+    CHECK_EQ(t8.span.first, 0x3F00u / 32);
+    CHECK_EQ(t8.span.last, 0x3F00u / 32);
+    CHECK(t8.wrap.empty());
+    // O FRAME de 640x224 em FBP 0x160 (FBW 10, PSMCT32): 10 páginas por linha de
+    // páginas, 7 linhas de páginas.
+    const PageSpans fr = pageSpan(PSMCT32, 0x160 * 32, 10, 0, 223, 0, 639);
+    CHECK_EQ(fr.span.first, 0x160u);
+    CHECK_EQ(fr.span.last, 0x160u + 6 * 10 + 9);
+    // 16 bits: páginas de 64x64.
+    const PageSpans c16 = pageSpan(PSMCT16, 0, 2, 0, 63, 0, 127);
+    CHECK_EQ(c16.span.last, 1u);
+    const PageSpans c16b = pageSpan(PSMCT16, 0, 2, 64, 64, 0, 0);
+    CHECK_EQ(c16b.span.first, 2u);
+    CHECK_EQ(c16b.span.last, 2u);
+    // Coluna inicial: um retângulo que começa na terceira página da linha.
+    const PageSpans col = pageSpan(PSMCT32, 0, 4, 0, 31, 130, 140);
+    CHECK_EQ(col.span.first, 2u);
+    CHECK_EQ(col.span.last, 2u);
+}
+
+TEST_CASE(gs_bands, page_span_wraps_the_end_of_vram_in_two_spans) {
+    // Base na página 510, três páginas em linha: 510, 511 e a volta para a 0.
+    const PageSpans s = pageSpan(PSMCT32, 510 * 32, 3, 0, 31, 0, 191);
+    CHECK_EQ(s.span.first, 510u);
+    CHECK_EQ(s.span.last, 511u);
+    CHECK(!s.wrap.empty());
+    CHECK_EQ(s.wrap.first, 0u);
+    CHECK_EQ(s.wrap.last, 0u);
+    for (unsigned x = 0; x < 192; ++x) CHECK(inSpans(s, pageOf(PSMCT32, 510 * 32, 3, x, 17)));
+    // Um buffer que cobre 512 páginas ou mais vira a VRAM toda.
+    const PageSpans all = pageSpan(PSMCT32, 0, 8, 0, 2047, 0, 511);
+    CHECK_EQ(all.span.first, 0u);
+    CHECK_EQ(all.span.last, 511u);
+    CHECK(all.wrap.empty());
+}
+
+TEST_CASE(gs_bands, clashes_respects_wrapped_spans_and_near_end_textures) {
+    // O acesso que dá a volta colide com o que está no começo da VRAM, e não com o
+    // do meio.
+    VramAccess w{};
+    w.write = true;
+    const PageSpans s = pageSpan(PSMCT32, 510 * 32, 3, 0, 31, 0, 191);
+    w.span = s.span;
+    w.wrap = s.wrap;
+    VramAccess low{};
+    low.span = VramSpan{0, 0};
+    low.surface = 2;
+    VramAccess mid = low;
+    mid.span = VramSpan{100, 120};
+    CHECK(clashes(w, low));
+    CHECK(!clashes(w, mid));
+    // Caso do GT4: textura PSMT4 em TBP 0x3E60 e FRAME em FBP 0x160 não colidem.
+    VramAccess tex{};
+    const PageSpans ts = pageSpan(PSMT4, 0x3E60, 2, 0, 127, 0, 127);
+    tex.span = ts.span;
+    tex.wrap = ts.wrap;
+    tex.surface = 2;
+    VramAccess frame{};
+    const PageSpans fs = pageSpan(PSMCT32, 0x160 * 32, 10, 0, 223, 0, 639);
+    frame.span = fs.span;
+    frame.wrap = fs.wrap;
+    frame.write = true;
+    CHECK(!clashes(frame, tex));
+    // A fila de pendentes também respeita a volta.
+    PendingAccess p;
+    p.add(w);
+    CHECK(p.clashesWith(low));
+    CHECK(!p.clashesWith(mid));
 }
 
 TEST_CASE(gs_bands, draw_rows_match_the_shading_box) {
@@ -441,6 +536,181 @@ TEST_CASE(gs_bands, shaded_matches_covered_with_lanes) {
     for (unsigned lanes : {2u, 4u}) {
         const Render r = renderRandom(true, lanes, 0x5EED + lanes, 150);
         CHECK_EQ(r.shaded, r.covered);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLUT por versões: várias cargas entre desenhos de faixas diferentes
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ClutRender {
+    Render img;
+    BandStats stats;
+};
+
+// Texturas PSMT8 e PSMT4 de 64x64 com cargas de CLUT (CSM1 em CT32 e CT16, CSM2,
+// CSA, CLD 1/4) entre desenhos que cruzam as faixas; áreas de CLUT reescritas por
+// HOST→LOCAL e por desenho, para que algumas cargas conflitem com acessos
+// pendentes e outras não.
+ClutRender renderClut(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    ClutRender out;
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0xC1074};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    for (unsigned k = 0; k < 6; ++k) hostToLocal(g, (48 + k) * 32, 1, PSMCT32, 0, 0, 16, 16, words(128));
+    hostToLocal(g, 60 * 32, 4, PSMCT16, 0, 0, 256, 4, words(256));  // CLUT 16 bits para CSM2
+    hostToLocal(g, 1280, 1, PSMT8, 0, 0, 64, 64, words(512));
+    hostToLocal(g, 1344, 1, PSMT4, 0, 0, 64, 64, words(256));
+    for (unsigned k = 0; k < 18; ++k) {
+        const unsigned c = k % 6;
+        const bool four = k % 3 == 2;
+        const std::uint64_t cld = (k % 4 == 3) ? 4 : 1;
+        std::uint64_t t0 = four ? tex0(1344, 1, PSMT4, 6, 6, (48 + c) * 32, PSMCT32, cld, k % 16)
+                                : tex0(1280, 1, PSMT8, 6, 6, (48 + c) * 32, PSMCT32, cld, 0);
+        if (k % 5 == 4) {  // CLUT de 16 bits, CSM1: lê a área como PSMCT16
+            t0 = four ? tex0(1344, 1, PSMT4, 6, 6, (48 + c) * 32, PSMCT16, 1, k % 16)
+                      : tex0(1280, 1, PSMT8, 6, 6, (48 + c) * 32, PSMCT16, 1, 0);
+        }
+        if (k % 7 == 6) {  // CSM2: entradas em linha de 256 pixels de 16 bits
+            t0 = tex0(1344, 1, PSMT4, 6, 6, 60 * 32, PSMCT16, 1, k % 16) | (1ull << 55);
+            g.writeRegister(TEXCLUT, 4 | (std::uint64_t{k % 3} << 6) | (std::uint64_t{k % 4} << 12), 0);
+        }
+        g.writeRegister(TEX0_1, t0, 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        const unsigned y0 = (k * 7) % 40;
+        vertex(g, 3 + k, y0, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 100 + k, y0 + 70, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+        if (k == 5) {  // um desenho escreve numa área de CLUT: a carga seguinte conflita
+            g.writeRegister(FRAME_1, frameReg(51, 1, PSMCT32), 0);
+            g.writeRegister(PRIM, prim(3, true), 0);
+            vertex(g, 0, 0, rgbaq(255, 0, 0, 0));
+            vertex(g, 63, 0, rgbaq(0, 255, 0, 0));
+            vertex(g, 0, 31, rgbaq(0, 0, 255, 0));
+            g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+        }
+        if (k == 9) hostToLocal(g, 49 * 32, 1, PSMCT32, 0, 0, 16, 16, words(128));  // reescreve a CLUT 1
+    }
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, clut_versions_are_identical_for_any_lane_count) {
+    const ClutRender ref = renderClut(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    CHECK(ref.stats.clutDirect > 10);  // sem thread tudo é direto
+    CHECK_EQ(ref.stats.submit[BandStats::SubmitClut], 0u);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const ClutRender got = renderClut(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+            // Cada carga é direta ou uma barreira (quantas de cada, depende do tempo).
+            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HOST→LOCAL sem barreira: uploads entre desenhos que usam e que não usam a textura
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct UploadRender {
+    Render img;
+    BandStats stats;
+};
+
+// Duas texturas PSMCT32 de 64x64 (páginas 40 e 44) e uma PSMT8 de 64x64 (página 48).
+// A cada volta: desenhos que lêem A, upload em B (sem colisão), desenho com B,
+// upload em A com desenhos pendentes que a lêem (colisão: lotes por barreira),
+// e um upload partido em dois pacotes com um desenho que lê a textura no meio.
+UploadRender renderUploads(bool threaded, unsigned lanes) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    Gs g(nullptr);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(ZBUF_1, 1ull << 32, 0);
+    g.writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g.writeRegister(TEST_1, 0, 0);
+    g.writeRegister(XYOFFSET_1, 0, 0);
+    g.writeRegister(PRMODECONT, 1, 0);
+    Lcg r{0x0B10AD};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    auto drawFrom = [&g](std::uint64_t tbp, unsigned k) {
+        g.writeRegister(TEX0_1, tex0(tbp, 1, PSMCT32, 6, 6), 0);
+        g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+        vertex(g, 2 + k, 5 + k, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+        vertex(g, 70 + k, 90 + k, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+    };
+    const std::uint64_t A = 40 * 32, B = 44 * 32;
+    hostToLocal(g, A, 1, PSMCT32, 0, 0, 64, 64, words(2048));
+    for (unsigned k = 0; k < 12; ++k) {
+        drawFrom(A, k);
+        hostToLocal(g, B, 1, PSMCT32, 0, 0, 64, 64, words(2048));  // B ninguém usa
+        drawFrom(B, k);
+        drawFrom(A, k + 1);
+        hostToLocal(g, A, 1, PSMCT32, 0, 0, 64, 64, words(2048));  // A tem leitores pendentes
+        drawFrom(A, k + 2);
+        // Upload partido: metade, um desenho que lê a textura, o resto.
+        g.writeRegister(BITBLTBUF, (std::uint64_t{B} << 32) | (1ull << 48) | (std::uint64_t{PSMCT32} << 56), 0);
+        g.writeRegister(TRXPOS, 0, 0);
+        g.writeRegister(TRXREG, 64 | (std::uint64_t{64} << 32), 0);
+        g.writeRegister(TRXDIR, 0, 0);
+        for (std::uint64_t d : words(1024)) g.writeRegister(HWREG, d, 0);
+        drawFrom(B, k + 3);
+        for (std::uint64_t d : words(1024)) g.writeRegister(HWREG, d, 0);
+        drawFrom(B, k + 4);
+        // PSMCT24 e PSMT8 (palavras que atravessam pixels), perto do fim da VRAM.
+        hostToLocal(g, 500 * 32, 1, PSMCT24, 3, 5, 20, 7, words(53));
+        hostToLocal(g, 508 * 32, 2, PSMT8, 0, 0, 128, 64, words(1024));
+    }
+    UploadRender out;
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, host_uploads_are_identical_for_any_lane_count) {
+    const UploadRender ref = renderUploads(false, 1);
+    bool any = false;
+    for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+    CHECK(any);
+    // Sem thread tudo é direto; só o upload partido, com um desenho que lê o destino no
+    // meio, passa para lotes (uma vez por volta).
+    CHECK_EQ(ref.stats.hostDirect, 12u * 5 + 1);
+    CHECK_EQ(ref.stats.submit[BandStats::SubmitHostStart], 12u);
+    for (unsigned rep = 0; rep < 5; ++rep) {
+        for (unsigned lanes : {2u, 3u, 4u}) {
+            const UploadRender got = renderUploads(true, lanes);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.img.shaded, got.img.covered);
+        }
     }
 }
 
@@ -561,8 +831,7 @@ TEST_CASE(gs_bands, stats_conflict_texture_and_pairs) {
 TEST_CASE(gs_bands, stats_conflict_full) {
     StatsGs t;
     Gs& g = *t.gs;
-    // Cada desenho escreve numas páginas diferentes (o intervalo conservador cobre
-    // a página e a seguinte, então vão de 3 em 3): nada colide, mas a lista de
+    // Cada desenho escreve numa página diferente (de 3 em 3): nada colide, mas a lista de
     // acessos pendentes enche (64) e o desenho seguinte pede a barreira.
     for (unsigned i = 0; i < 70; ++i) {
         g.writeRegister(FRAME_1, frameReg(3 * i, 1, PSMCT32), 0);
@@ -591,13 +860,17 @@ TEST_CASE(gs_bands, stats_submits_and_host_batches) {
     // Reset do GS
     g.writePrivileged(0x12001000u, 1ull << 9, 0);
     const BandStats& s = g.bandStats();
-    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 1u);
+    // Nada pendente toca o destino: o produtor escreveu direto, sem barreira.
+    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
+    CHECK_EQ(s.hostDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitHostEnd], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitLocal], 1u);
-    CHECK_EQ(s.submit[BandStats::SubmitClut], 1u);
+    // A área da CLUT (página 48) não é tocada por nada pendente: carga no produtor.
+    CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
+    CHECK_EQ(s.clutDirect, 1u);
     CHECK_EQ(s.submit[BandStats::SubmitReset], 1u);
     CHECK_EQ(s.submit[BandStats::SubmitDraw], 0u);
-    CHECK(s.hostBatches >= 1u);
+    CHECK_EQ(s.hostBatches, 0u);
 }
 
 TEST_CASE(gs_bands, stats_waits_by_reason) {
@@ -625,4 +898,32 @@ TEST_CASE(gs_bands, stats_waits_by_reason) {
     CHECK_EQ(s.waits[BandStats::WaitDownload], 1u);
     g.waitIdle();
     CHECK_EQ(s.waits[BandStats::WaitOther], 1u);
+}
+
+TEST_CASE(gs_bands, clut_load_away_from_pending_pages_has_no_barrier) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    // Desenhos grandes pendentes nas páginas 0..: a CLUT na página 48 não é tocada.
+    sprite(g, 0, 0, 100, 63);
+    g.writeRegister(TEX0_1, tex0(1280, 2, 0x13, 6, 6, 1536, PSMCT32, 1), 0);
+    sprite(g, 0, 0, 100, 63);
+    g.writeRegister(TEX0_1, tex0(1280, 2, 0x13, 6, 6, 1568, PSMCT32, 1), 0);
+    sprite(g, 0, 0, 100, 63);
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.clutDirect, 2u);
+    CHECK_EQ(s.submit[BandStats::SubmitClut], 0u);
+    CHECK_EQ(s.conflict[BandStats::ConflictWrite], 0u);
+}
+
+TEST_CASE(gs_bands, host_upload_away_from_pending_pages_has_no_barrier) {
+    StatsGs t;
+    Gs& g = *t.gs;
+    sprite(g, 0, 0, 100, 63);  // pendente no FRAME (páginas 0..1)
+    hostToLocal(g, 40 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
+    hostToLocal(g, 41 * 32, 1, PSMCT32, 0, 0, 64, 32, std::vector<std::uint64_t>(1024, 0x1234));
+    const BandStats& s = g.bandStats();
+    CHECK_EQ(s.hostDirect, 2u);
+    CHECK_EQ(s.submit[BandStats::SubmitHostStart], 0u);
+    CHECK_EQ(s.hostBatches, 0u);
+    CHECK_EQ(g.vram().read32(Vram::byteAddress32(40 * 32, 1, 0, 0)), 0x1234u);
 }

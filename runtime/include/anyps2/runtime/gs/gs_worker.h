@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -48,6 +49,12 @@ public:
     // Espera as filas esvaziarem e as faixas ficarem ociosas. Relança a primeira
     // exceção que uma tarefa lançou: o worker não tem para onde propagá-la.
     void drain();
+    // Nada enfileirado nem em execução (sem espera). Sem thread, sempre verdadeiro.
+    bool idle();
+    // Barreiras enfileiradas (só o produtor chama) e concluídas: quando a de número
+    // N conclui, tudo o que foi enfileirado antes dela já terminou em todas as faixas.
+    std::uint64_t barriersIssued() const { return issued_; }
+    std::uint64_t barriersDone() const { return done_.load(std::memory_order_acquire); }
     // Drena sem relançar e junta as threads. Pode ser chamado mais de uma vez.
     void stop() noexcept;
 
@@ -71,6 +78,8 @@ private:
     std::condition_variable barrierCv_;  // uma barreira foi concluída
     std::condition_variable idleCv_;     // não há item pendente
     std::vector<std::deque<Item>> queues_;
+    std::uint64_t issued_ = 0;
+    std::atomic<std::uint64_t> done_{0};
     std::size_t pending_ = 0;  // itens por faixa ainda não concluídos
     bool stopping_ = false;
     std::exception_ptr error_;

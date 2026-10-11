@@ -11,6 +11,7 @@
 
 #include "anyps2/common/error.h"
 #include "anyps2/runtime/errors.h"
+#include "anyps2/runtime/gs/gs_bands.h"
 #include "anyps2/runtime/gs/gs_trace.h"
 #include "anyps2/runtime/host_profile.h"
 #include "anyps2/runtime/kernel.h"
@@ -93,7 +94,7 @@ Gs::Gs(Runtime* rt)
 }
 
 Gs::~Gs() {
-    // Antes de qualquer membro ser destruído: as faixas ainda usam a VRAM e o clut_.
+    // Antes de qualquer membro ser destruído: as faixas ainda usam a VRAM e as versões da CLUT.
     worker_->stop();
 }
 
@@ -102,18 +103,108 @@ GsTrace& Gs::trace() {
     return *trace_;
 }
 
+bool Gs::trackOutstanding() {
+    if (worker_->idle()) {
+        outstanding_.clear();
+        outstandingLostNeed_ = 0;
+        return true;
+    }
+    const std::uint64_t done = worker_->barriersDone();
+    outstanding_.dropDone(done);
+    return outstandingLostNeed_ <= done;
+}
+
+void Gs::noteOutstanding(VramAccess a) {
+    a.seq = worker_->barriersIssued() + 1;
+    if (outstanding_.full()) {
+        outstandingLostNeed_ = std::max(outstandingLostNeed_, a.seq);
+        return;
+    }
+    outstanding_.add(a);
+}
+
+bool Gs::outstandingConflicts(const VramAccess& a) {
+    if (!trackOutstanding()) return true;
+    // Transferência direta: o próprio produtor escreve, na ordem do programa, então
+    // não colide com o que ele mesmo faz; só a em lotes (worker) conta.
+    if (hostOpenValid_ && !hostDirect_ && accessesOverlap(hostOpen_, a)) return true;
+    return outstanding_.conflictsWith(a);
+}
+
+void Gs::demoteHostTransfer() {
+    if (!hostOpenValid_ || !hostDirect_) return;
+    hostDirect_ = false;
+    const Transfer st = xferDirect_;
+    xferDirect_.active = false;
+    submit([this, st] { xfer_ = st; }, BandStats::SubmitHostStart);
+}
+
+void Gs::demoteIfOverlaps(const VramAccess* acc, unsigned n) {
+    if (!hostOpenValid_ || !hostDirect_) return;
+    for (unsigned i = 0; i < n; ++i) {
+        if (accessesOverlap(hostOpen_, acc[i])) {
+            demoteHostTransfer();
+            return;
+        }
+    }
+}
+
+void Gs::closeHostTransfer() {
+    if (!hostOpenValid_) return;
+    hostOpenValid_ = false;
+    if (hostDirect_) {
+        hostDirect_ = false;  // tudo o que foi escrito já está na VRAM
+        return;
+    }
+    flushHost();
+    // Os dados todos já estão em barreiras enfileiradas; a última conclui a escrita.
+    VramAccess a = hostOpen_;
+    a.seq = worker_->barriersIssued();
+    if (a.seq <= worker_->barriersDone()) return;
+    if (outstanding_.full()) {
+        outstandingLostNeed_ = std::max(outstandingLostNeed_, a.seq);
+        return;
+    }
+    outstanding_.add(a);
+}
+
+// Retângulo de pixels de uma transferência como acesso. Fora de 0..2047 o
+// endereço dá a volta (x e y são cortados em 2047): vale a VRAM inteira.
+VramAccess Gs::rectAccess(bool write, std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, std::uint32_t x0,
+                          std::uint32_t y0, std::uint32_t w, std::uint32_t h) const {
+    VramAccess a;
+    a.write = write;
+    a.surface = 3;
+    a.base = bp / 32;
+    a.bw = bw;
+    a.psm = psm;
+    if (w == 0 || h == 0 || x0 + w > 2048 || y0 + h > 2048) {
+        a.span = VramSpan{0, Vram::kSize / 8192 - 1};
+        return a;
+    }
+    const PageSpans p = pageSpan(psm, bp, bw, y0, y0 + h - 1, x0, x0 + w - 1);
+    a.span = p.span;
+    a.wrap = p.wrap;
+    return a;
+}
+
 void Gs::waitIdle(BandStats::WaitReason why) {
     flushHost();
-    if (!worker_->threaded()) return;
+    if (!worker_->threaded()) {
+        trackOutstanding();
+        return;
+    }
     // Conta as esperas do EE pelas faixas (no modo síncrono não há espera).
     ++bandStats_.waits[why];
     const HostProfile::Scope prof(HostProfile::GsWait);
     if (!HostProfile::enabled()) {
         worker_->drain();
+        trackOutstanding();
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
     worker_->drain();
+    trackOutstanding();
     bandStats_.waitNs[why] +=
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -140,7 +231,7 @@ void Gs::flushHost() {
     ++bandStats_.hostBatches;
     pending_.clear();
     worker_->barrier([this, words = std::move(hostBatch_)] {
-        for (const std::uint64_t d : words) hostWord(d);
+        for (const std::uint64_t d : words) hostWord(xfer_, d);
     });
     hostBatch_.clear();  // o que sobrou do movimento (vazio, mas o estado fica definido)
 }
@@ -249,6 +340,8 @@ void Gs::writePrivileged(std::uint32_t addr, std::uint64_t value, std::uint32_t 
                 // Os desenhos já enfileirados terminam antes (no hardware e na
                 // versão síncrona eles já tinham sido feitos); só o estado de
                 // transferência é zerado, pela própria fila, na mesma ordem.
+                closeHostTransfer();
+                xferDirect_ = {};
                 submit([this] { xfer_ = {}; }, BandStats::SubmitReset);
                 waitIdle();
                 queued_ = 0;
@@ -429,11 +522,51 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
         unsupported("CLUT com CPSM inválido " + psmName(cpsm), pc);
     }
     if (csm2 && cpsm == PSMCT32) unsupported("CLUT CSM2 com CPSM=PSMCT32 (proibido pelo hardware)", pc);
-    // TEXCLUT é lido agora, na ordem do programa; a carga em si é do worker.
-    submit([this, tex0, texclut = regs_[TEXCLUT]] { loadClutCells(tex0, texclut); }, BandStats::SubmitClut);
+    // TEXCLUT é lido agora, na ordem do programa. A CLUT é um buffer imutável por
+    // versão: a carga cria uma versão nova (cópia da corrente com as células
+    // trocadas) e os desenhos seguintes a levam consigo, então não há estado global
+    // para as faixas e a carga não precisa de barreira, desde que o produtor possa
+    // ler a área da CLUT na VRAM agora: nenhum acesso ainda não concluído das faixas
+    // (desenho ou transferência) a escreve. Senão a carga vira uma operação global.
+    const std::uint64_t texclut = regs_[TEXCLUT];
+    flushHost();  // HOST→LOCAL anterior vem antes (e entra em outstanding_)
+    const VramAccess src = clutSource(tex0, texclut);
+    auto next = std::make_shared<ClutBuffer>();
+    if (clut_->ready.load(std::memory_order_acquire) && !outstandingConflicts(src)) {
+        next->v = clut_->v;
+        loadClutCells(*next, tex0, texclut);
+        clut_ = std::move(next);
+        ++bandStats_.clutDirect;
+        return;
+    }
+    noteOutstanding(src);
+    next->ready.store(false, std::memory_order_relaxed);
+    submit([this, prev = clut_, next, tex0, texclut] {
+        next->v = prev->v;
+        loadClutCells(*next, tex0, texclut);
+        next->ready.store(true, std::memory_order_release);
+    }, BandStats::SubmitClut);
+    demoteIfOverlaps(&src, 1);
+    clut_ = std::move(next);
 }
 
-void Gs::loadClutCells(std::uint64_t tex0, std::uint64_t texclut) {
+// Área da VRAM que a carga lê (leitura), a mesma de loadClutCells.
+VramAccess Gs::clutSource(std::uint64_t tex0, std::uint64_t texclut) const {
+    const std::uint32_t psm = static_cast<std::uint32_t>(bits(tex0, 20, 6));
+    const std::uint32_t cbp = static_cast<std::uint32_t>(bits(tex0, 37, 14));
+    const std::uint32_t cpsm = static_cast<std::uint32_t>(bits(tex0, 51, 4));
+    const bool csm2 = bits(tex0, 55, 1) != 0;
+    const bool eight = psm == PSMT8 || psm == PSMT8H;
+    const unsigned count = eight ? 256 : 16;
+    if (csm2) {
+        const auto x0 = static_cast<std::uint32_t>(bits(texclut, 6, 6)) * 16;
+        return rectAccess(false, cpsm, cbp, static_cast<std::uint32_t>(bits(texclut, 0, 6)), x0,
+                          static_cast<std::uint32_t>(bits(texclut, 12, 10)), count, 1);
+    }
+    return eight ? rectAccess(false, cpsm, cbp, 1, 0, 0, 16, 16) : rectAccess(false, cpsm, cbp, 1, 0, 0, 8, 2);
+}
+
+void Gs::loadClutCells(ClutBuffer& dst, std::uint64_t tex0, std::uint64_t texclut) const {
     const std::uint32_t psm = static_cast<std::uint32_t>(bits(tex0, 20, 6));
     const std::uint32_t cbp = static_cast<std::uint32_t>(bits(tex0, 37, 14));
     const std::uint32_t cpsm = static_cast<std::uint32_t>(bits(tex0, 51, 4));
@@ -461,10 +594,10 @@ void Gs::loadClutCells(std::uint64_t tex0, std::uint64_t texclut) {
         const std::uint32_t c = vram_.readPixel(cpsm, cbp, bw, x, y);
         const unsigned e = csa * 16 + i;
         if (cpsm == PSMCT32) {
-            clut_[e & 255] = static_cast<std::uint16_t>(c);
-            clut_[(e & 255) + 256] = static_cast<std::uint16_t>(c >> 16);
+            dst.v[e & 255] = static_cast<std::uint16_t>(c);
+            dst.v[(e & 255) + 256] = static_cast<std::uint16_t>(c >> 16);
         } else {
-            clut_[e & 511] = static_cast<std::uint16_t>(c);
+            dst.v[e & 511] = static_cast<std::uint16_t>(c);
         }
     }
 }
@@ -524,7 +657,32 @@ void Gs::startTransfer(std::uint32_t pc) {
             if (!isValidPsm(t.psm)) unsupported("transferência HOST→LOCAL com " + psmName(t.psm), pc);
             if (t.w == 0 || t.h == 0) t.active = false;
             if (trace_ && t.active) trace_->vramHostStart(*this, t, pc);
-            submit([this, t] { xfer_ = t; }, BandStats::SubmitHostStart);
+            // O destino inteiro será escrito pelas faixas, nos lotes que o produtor
+            // ainda vai enviar: aberta até a última palavra (writeTransferData).
+            //
+            // Sem barreira quando nenhum acesso ainda não concluído das faixas (desenho
+            // que lê ou escreve, cópia, outra transferência) toca o destino: o produtor
+            // escreve as palavras direto na VRAM, na hora, e as faixas seguem desenhando
+            // em outras páginas. Desenhos enfileirados depois que tocam o destino aberto
+            // rebaixam a transferência para o modo em lotes (demoteHostTransfer).
+            const bool workerOpen = hostOpenValid_ && !hostDirect_;  // outra em lotes, ainda aberta
+            closeHostTransfer();
+            xferDirect_.active = false;  // a anterior, se ainda aberta, é substituída
+            bool direct = false;
+            if (t.active) {
+                const VramAccess dest = rectAccess(true, t.psm, t.dbp, t.dbw, t.x0, t.y0, t.w, t.h);
+                direct = !workerOpen && !outstandingConflicts(dest);
+                hostOpen_ = dest;
+                hostWordsLeft_ = (std::uint64_t{t.w} * t.h * psmTransferBits(t.psm) + 63) / 64;
+                hostOpenValid_ = true;
+                hostDirect_ = direct;
+            }
+            if (direct) {
+                xferDirect_ = t;
+                ++bandStats_.hostDirect;
+            } else {
+                submit([this, t] { xfer_ = t; }, BandStats::SubmitHostStart);
+            }
             return;
         }
         case 1:
@@ -534,6 +692,8 @@ void Gs::startTransfer(std::uint32_t pc) {
             localToLocal(pc);
             return;
         default:
+            closeHostTransfer();
+            xferDirect_.active = false;
             submit([this] { xfer_.active = false; }, BandStats::SubmitHostEnd);
             return;
     }
@@ -543,36 +703,41 @@ void Gs::writeTransferData(std::uint64_t data, std::uint32_t pc) {
     (void)pc;
     addWork(1);  // 64 bits: meio ciclo do barramento
     if (trace_) trace_->vramHostWord(*this);
-    // Quem sabe se a transferência ainda está ativa é o worker; aqui só se
-    // junta a palavra ao lote. Palavras depois do fim são descartadas lá.
-    hostBatch_.push_back(data);
-    if (hostBatch_.size() >= kHostBatch) flushHost();
+    if (xferDirect_.active) {
+        hostWord(xferDirect_, data);  // modo direto: na VRAM agora
+    } else {
+        // Em lotes: quem sabe se a transferência ainda está ativa é o worker; aqui só
+        // se junta a palavra. Palavras depois do fim são descartadas lá.
+        hostBatch_.push_back(data);
+        if (hostBatch_.size() >= kHostBatch) flushHost();
+    }
+    if (hostOpenValid_ && --hostWordsLeft_ == 0) closeHostTransfer();
 }
 
-void Gs::hostWord(std::uint64_t data) {
-    if (!xfer_.active) {
+void Gs::hostWord(Transfer& xfer, std::uint64_t data) {
+    if (!xfer.active) {
         // Dados de preenchimento depois do fim de uma transferência são
         // descartados pelo hardware.
         return;
     }
-    const unsigned bpp = psmTransferBits(xfer_.psm);
+    const unsigned bpp = psmTransferBits(xfer.psm);
     auto put = [&](std::uint32_t value) {
-        if (!xfer_.active) return;
-        vram_.writePixel(xfer_.psm, xfer_.dbp, xfer_.dbw, xfer_.x0 + xfer_.x, xfer_.y0 + xfer_.y, value);
-        if (++xfer_.x == xfer_.w) {
-            xfer_.x = 0;
-            if (++xfer_.y == xfer_.h) xfer_.active = false;
+        if (!xfer.active) return;
+        vram_.writePixel(xfer.psm, xfer.dbp, xfer.dbw, xfer.x0 + xfer.x, xfer.y0 + xfer.y, value);
+        if (++xfer.x == xfer.w) {
+            xfer.x = 0;
+            if (++xfer.y == xfer.h) xfer.active = false;
         }
     };
     if (bpp == 24) {
         // Pixels de 3 bytes atravessam as palavras de 64 bits.
         for (unsigned i = 0; i < 8; ++i) {
-            xfer_.bits |= ((data >> (8 * i)) & 0xFF) << xfer_.nbits;
-            xfer_.nbits += 8;
-            if (xfer_.nbits == 24) {
-                put(static_cast<std::uint32_t>(xfer_.bits));
-                xfer_.bits = 0;
-                xfer_.nbits = 0;
+            xfer.bits |= ((data >> (8 * i)) & 0xFF) << xfer.nbits;
+            xfer.nbits += 8;
+            if (xfer.nbits == 24) {
+                put(static_cast<std::uint32_t>(xfer.bits));
+                xfer.bits = 0;
+                xfer.nbits = 0;
             }
         }
         return;
@@ -603,7 +768,13 @@ void Gs::localToLocal(std::uint32_t pc) {
                     pc);
     }
     if (trace_) trace_->vramLocalCopy(*this, c, pc);
+    flushHost();  // os lotes anteriores são barreiras que vêm antes desta cópia
+    const VramAccess touched[2] = {rectAccess(false, c.spsm, c.sbp, c.sbw, c.sx, c.sy, c.w, c.h),
+                                   rectAccess(true, c.dpsm, c.dbp, c.dbw, c.dx, c.dy, c.w, c.h)};
+    noteOutstanding(touched[0]);
+    noteOutstanding(touched[1]);
     submit([this, c] { copyLocal(c); }, BandStats::SubmitLocal);
+    demoteIfOverlaps(touched, 2);
 }
 
 void Gs::copyLocal(const LocalCopy& c) {
