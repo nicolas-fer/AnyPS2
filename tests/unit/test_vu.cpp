@@ -518,3 +518,294 @@ TEST_CASE(vu, xgkick_and_vif1_mscal_double_buffer) {
     CHECK_EQ(t.rt.gs().csr() & 2, 2ull);
     CHECK_EQ(t.rt.vu1().interpretedRuns(), 3u);
 }
+
+// ---------------------------------------------------------------------------
+// Flags preguiçosas: as entradas de MAC/clip em voo só são aplicadas quando alguém as lê, mas o
+// que cada leitor enxerga tem de ser o mesmo de quando eram aplicadas a cada par (ready <= ciclo).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using Pair = std::pair<std::uint32_t, std::uint32_t>;
+constexpr Pair kNopPair{kLNop, kUNop};
+constexpr Pair kEndPair{kLNop, kUNop | (1u << 30)};
+
+std::uint32_t fmand(unsigned ft, unsigned fs) { return lo(0x1A, 0, ft, fs, 0); }
+std::uint32_t fmor(unsigned ft, unsigned fs) { return lo(0x1B, 0, ft, fs, 0); }
+// O imediato do FSAND tem 12 bits: o bit 11 vai no bit 21 da palavra (o campo dest).
+std::uint32_t fsand(unsigned ft, std::int32_t imm) { return lo(0x16, static_cast<std::uint32_t>(imm >> 11) & 1, ft, 0, imm & 0x7FF); }
+std::uint32_t fsset(std::int32_t imm) { return lo(0x15, 0, 0, 0, imm); }
+std::uint32_t fcget(unsigned ft) { return lo(0x1C, 0, ft, 0, 0); }
+std::uint32_t fcand(std::uint32_t imm24) { return (0x12u << 25) | imm24; }
+std::uint32_t jr(unsigned fs) { return lo(0x24, 0, 0, fs, 0); }
+std::uint32_t divq(unsigned fs, unsigned ft) { return lox(0x38, comps(0, 0), ft, fs); }
+std::uint32_t addx(unsigned fd, unsigned fs, unsigned ft) { return up(0x28, X, ft, fs, fd); }
+std::uint32_t clipOp(unsigned fs, unsigned ft) { return upx(0x1F, 0xE, ft, fs); }
+
+// vf2 = (1,1,1,1), vf3 = (-1,-1,-1,-1): add.x vf1, vf2, vf3 dá 0 (MAC Z em x = 0x0008, status 0x41);
+// add.x vf6, vf2, vf2 dá 2 (MAC 0). Os clips contra vf7.w = 0,5: vf2 → +x+y+z = 0x15; vf8 → -x-y-z =
+// 0x2A; vf9 = (2,0,-2) → +x -z = 0x21.
+void flagRegs(Rig& t) {
+    setVf(t.r1().vf[2], 1, 1, 1, 1);
+    setVf(t.r1().vf[3], -1, -1, -1, -1);
+    setVf(t.r1().vf[7], 0, 0, 0, 0.5f);
+    setVf(t.r1().vf[8], -1, -1, -1, 1);
+    setVf(t.r1().vf[9], 2, 0, -2, 1);
+    t.r1().vi[2] = 0xFFFF;
+    t.r1().vi[vucore::reg::Mac] = 0x0100;  // valor antigo, distinguível do novo
+}
+
+}  // namespace
+
+TEST_CASE(vu, lazy_flags_readers_at_ready_boundary) {
+    // add.x no ciclo 0 → flags prontas no ciclo 4. Um leitor no par k enxerga o valor novo só se k >= 4:
+    // ready == cycle (k = 4) é visível, ready == cycle + 1 (k = 3) ainda não.
+    for (unsigned k = 1; k <= 6; ++k) {
+        for (int which = 0; which < 3; ++which) {
+            Rig t;
+            flagRegs(t);
+            t.r1().vi[vucore::reg::Status] = 0x20;  // D (do FDIV): o status do MAC o preserva
+            std::vector<Pair> p{{kLNop, addx(1, 2, 3)}};
+            for (unsigned i = 1; i < k; ++i) p.push_back(kNopPair);
+            const std::uint32_t read = which == 0 ? fmand(4, 2) : which == 1 ? fmor(4, 11) : fsand(4, 0xFFF);
+            p.push_back({read, kUNop});
+            p.push_back(kEndPair);
+            p.push_back(kNopPair);
+            t.program1(p);
+            t.rt.vu1().interpret(0, 0);
+            const bool fresh = k >= 4;
+            const std::uint32_t want = which == 2 ? (fresh ? 0x61u : 0x20u) : (fresh ? 0x0008u : 0x0100u);
+            CHECK_EQ(t.r1().vi[4], want);
+            CHECK_EQ(t.r1().vi[vucore::reg::Mac], 0x0008u);
+            CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x61u);
+        }
+    }
+}
+
+TEST_CASE(vu, lazy_flags_fmand_after_fmac_with_div_stall_between) {
+    // O segundo DIV espera o primeiro (Q ocupado) e leva o ciclo a 8: os dois add.x (prontos em 4 e 6)
+    // passam a valer juntos, em ordem, e o Q (com D) e as flags do MAC coexistem no status.
+    Rig t;
+    flagRegs(t);
+    setVf(t.r1().vf[4], 6, 0, 0, 0);
+    setVf(t.r1().vf[5], 0, 0, 0, 0);  // divisão por zero: D
+    t.program1({
+        {kLNop, addx(1, 2, 3)},        // 0 MAC Z, pronto em 4
+        {divq(4, 5), kUNop},           // 1 Q pronto em 8
+        {kLNop, addx(6, 2, 2)},        // 2 MAC 0, pronto em 6
+        {divq(4, 5), kUNop},           // 3 espera o Q anterior: ciclo 8
+        {fmand(1, 2), kUNop},          // 4 (ciclo 9) vê o MAC do segundo add.x
+        {fsand(5, 0xFFF), kUNop},      // 5
+        kEndPair,
+        kNopPair,
+    });
+    const std::uint64_t c0 = t.rt.vu1().cycle();
+    t.rt.vu1().interpret(0, 0);
+    CHECK_EQ(t.r1().vi[1], 0x0000u);
+    CHECK_EQ(t.r1().vi[5], 0x0860u);  // D e DS do Q, ZS do primeiro add.x; Z limpo pelo segundo
+    CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x0860u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Mac], 0x0000u);
+    CHECK_EQ(t.rt.vu1().cycle() - c0, std::uint64_t{13});  // 8 pares + 5 ciclos de stall do segundo DIV
+}
+
+TEST_CASE(vu, lazy_flags_fsset_with_pending_flags) {
+    // FSSET troca os sticky (bits 6–11): a entrada pronta antes dele vale antes (os sticky dela são
+    // sobrescritos); a que ainda está em voo vale depois (soma ZS aos sticky novos).
+    Rig early;
+    flagRegs(early);
+    early.program1({
+        {kLNop, addx(1, 2, 3)},  // pronto em 4
+        {fsset(0x180), kUNop},   // ciclo 1: entrada ainda em voo
+        kNopPair, kNopPair, kNopPair,
+        {fsand(5, 0xFFF), kUNop},  // ciclo 5: já aplicada
+        kEndPair, kNopPair,
+    });
+    early.rt.vu1().interpret(0, 0);
+    CHECK_EQ(early.r1().vi[5], 0x01C1u);
+    CHECK_EQ(early.r1().vi[vucore::reg::Status], 0x01C1u);
+
+    Rig late;
+    flagRegs(late);
+    late.program1({
+        {kLNop, addx(1, 2, 3)},
+        kNopPair, kNopPair, kNopPair, kNopPair,  // ciclo 1–4
+        {fsset(0x180), kUNop},                   // ciclo 5: a entrada (pronta em 4) vale antes dele
+        {fsand(5, 0xFFF), kUNop},
+        kEndPair, kNopPair,
+    });
+    late.rt.vu1().interpret(0, 0);
+    CHECK_EQ(late.r1().vi[5], 0x0181u);
+    CHECK_EQ(late.r1().vi[vucore::reg::Status], 0x0181u);
+}
+
+TEST_CASE(vu, lazy_flags_div_and_flags_ready_in_the_same_cycle) {
+    // DIV (D) no ciclo 0 fica pronto em 7; add.x no ciclo 3 também em 7. Os dois chegam ao status no
+    // mesmo ciclo; o leitor no ciclo 6 não vê nenhum e o do 7 vê os dois (a ordem entre eles não muda o
+    // resultado: um mexe em I/D/IS/DS, o outro em Z/S/U/O e nos sticky ZSUO).
+    for (unsigned k : {5u, 6u, 7u, 8u}) {
+        Rig t;
+        flagRegs(t);
+        setVf(t.r1().vf[4], 6, 0, 0, 0);
+        setVf(t.r1().vf[5], 0, 0, 0, 0);
+        std::vector<Pair> p{{divq(4, 5), kUNop}, kNopPair, kNopPair, {kLNop, addx(1, 2, 3)}};
+        for (unsigned i = 4; i < k; ++i) p.push_back(kNopPair);
+        p.push_back({fsand(5, 0xFFF), kUNop});  // ciclo k
+        p.push_back({fmand(6, 2), kUNop});      // ciclo k + 1
+        p.push_back(kEndPair);
+        p.push_back(kNopPair);
+        t.program1(p);
+        t.rt.vu1().interpret(0, 0);
+        CHECK_EQ(t.r1().vi[5], k >= 7 ? 0x0861u : 0x0000u);
+        CHECK_EQ(t.r1().vi[6], k >= 6 ? 0x0008u : 0x0100u);
+        CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x0861u);
+        CHECK_EQ(t.r1().vi[vucore::reg::Q], ps2f::kFmax);
+    }
+}
+
+TEST_CASE(vu, lazy_flags_queue_full_without_reader) {
+    // 20 pares seguidos produzem flags e ninguém as lê (a fila de 16 enche de entradas já prontas):
+    // o resultado e o relógio são os de antes, sem nenhum stall novo.
+    Rig t;
+    flagRegs(t);
+    std::vector<Pair> p;
+    for (unsigned i = 0; i < 20; ++i) {
+        const std::uint32_t u = i % 5 == 4 ? clipOp(i % 2 ? 2 : 8, 7) : (i % 2 ? addx(6, 2, 2) : addx(1, 2, 3));
+        p.push_back({kLNop, u});
+    }
+    p.push_back(kEndPair);
+    p.push_back(kNopPair);
+    t.program1(p);
+    const std::uint64_t c0 = t.rt.vu1().cycle();
+    t.rt.vu1().interpret(0, 0);
+    // 22 pares; o último clip (par 19) só fica pronto em 23: o finish espera por ele
+    CHECK_EQ(t.rt.vu1().cycle() - c0, std::uint64_t{23});
+    CHECK_EQ(t.r1().vi[vucore::reg::Mac], 0x0008u);     // do par 18
+    CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x0041u);
+    // clips dos pares 4, 9, 14 e 19: 0x2A, 0x15, 0x2A, 0x15 empurrados de 6 em 6 bits
+    CHECK_EQ(t.r1().vi[vucore::reg::Clip], 0xA95A95u);
+}
+
+TEST_CASE(vu, lazy_flags_jr_right_after_fmac) {
+    Rig t;
+    flagRegs(t);
+    t.r1().vi[15] = 5;  // alvo do JR: par 5
+    t.program1({
+        {kLNop, addx(1, 2, 3)},  // 0 pronto em 4
+        {jr(15), kUNop},         // 1
+        {fmand(1, 2), kUNop},    // 2 delay slot (ciclo 2): MAC antigo
+        {fmand(9, 2), kUNop},    // 3 não executa
+        kNopPair,                // 4 não executa
+        {fmand(4, 2), kUNop},    // 5 (ciclo 3): ainda o antigo
+        kNopPair,                // 6 (ciclo 4)
+        {fmand(10, 2), kUNop},   // 7 (ciclo 5): o novo
+        kEndPair,
+        kNopPair,
+    });
+    t.rt.vu1().interpret(0, 0);
+    CHECK_EQ(t.r1().vi[1], 0x0100u);
+    CHECK_EQ(t.r1().vi[9], 0u);
+    CHECK_EQ(t.r1().vi[4], 0x0100u);
+    CHECK_EQ(t.r1().vi[10], 0x0008u);
+}
+
+TEST_CASE(vu, lazy_flags_seed_pipeline_with_flags_in_flight) {
+    Rig t;
+    flagRegs(t);
+    VuPipelineSeed seed;
+    VuPipelineSeed::Flags a, b, c;
+    a.delay = 1; a.hasMac = true; a.mac = 0x0022;
+    b.delay = 3; b.hasMac = true; b.mac = 0x8001; b.hasClip = true; b.clip = 0x2A;
+    c.delay = 6; c.hasClip = true; c.clip = 0x15;
+    seed.flags = {a, b, c};
+    seed.head = 14;  // o anel dá a volta
+    t.rt.vu1().seedPipeline(seed);
+    t.program1({
+        {fmand(1, 2), kUNop},     // ciclo 0: nada pronto
+        {fmand(3, 2), kUNop},     // 1: a
+        {fsand(5, 0xFFF), kUNop}, // 2
+        {fmand(6, 2), kUNop},     // 3: b
+        kNopPair,
+        {fcget(7), kUNop},        // 5: clip de b
+        {fcget(8), kUNop},        // 6: clip de b e c
+        kEndPair,
+        kNopPair,
+    });
+    t.rt.vu1().interpret(0, 0);
+    CHECK_EQ(t.r1().vi[1], 0x0100u);
+    CHECK_EQ(t.r1().vi[3], 0x0022u);
+    CHECK_EQ(t.r1().vi[5], 0x00C3u);
+    CHECK_EQ(t.r1().vi[6], 0x8001u);
+    CHECK_EQ(t.r1().vi[7], 0x002Au);
+    CHECK_EQ(t.r1().vi[8], 0x0A95u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Clip], 0x0A95u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Mac], 0x8001u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x02C9u);
+}
+
+TEST_CASE(vu, lazy_flags_seed_pipeline_full_queue_then_fmac) {
+    // 16 entradas ainda em voo: um novo add.x não cabe e espera a cabeça (o único caso de stall da fila).
+    Rig t;
+    flagRegs(t);
+    VuPipelineSeed seed;
+    for (unsigned i = 0; i < 16; ++i) {
+        VuPipelineSeed::Flags f;
+        f.delay = static_cast<std::uint8_t>(3 + i);
+        f.hasMac = true;
+        f.mac = static_cast<std::uint16_t>(1u << (i % 12));
+        seed.flags.push_back(f);
+    }
+    seed.head = 5;
+    t.rt.vu1().seedPipeline(seed);
+    t.program1({
+        {kLNop, addx(1, 2, 3)},
+        {fmand(4, 2), kUNop},
+        kEndPair,
+        kNopPair,
+    });
+    const std::uint64_t c0 = t.rt.vu1().cycle();
+    t.rt.vu1().interpret(0, 0);
+    // O add.x espera a cabeça (pronta em 3), entra, e o finish espera a última entrada semeada (18).
+    CHECK_EQ(t.rt.vu1().cycle() - c0, std::uint64_t{18});
+    CHECK_EQ(t.r1().vi[4], 0x0002u);  // ciclo 4: o 1º e o 2º semeados já valem
+    CHECK_EQ(t.r1().vi[vucore::reg::Mac], 0x0008u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Status], 0x01C1u);  // Z do add.x (o último da fila) + sticky Z/S/U dos semeados
+}
+
+TEST_CASE(vu, lazy_flags_clips_in_sequence_with_fcget) {
+    Rig t;
+    flagRegs(t);
+    t.r1().vi[vucore::reg::Clip] = 0xABC;
+    t.program1({
+        {kLNop, clipOp(2, 7)},   // 0 +x+y+z = 0x15, pronto em 4
+        {kLNop, clipOp(8, 7)},   // 1 0x2A, pronto em 5
+        {kLNop, clipOp(9, 7)},   // 2 0x21, pronto em 6
+        {fcget(10), kUNop},      // 3: nada pronto
+        {fcget(4), kUNop},       // 4: o primeiro
+        {fcget(5), kUNop},       // 5: o primeiro e o segundo
+        {fcget(6), kUNop},       // 6: os três
+        {fcand(0xFFFFFF), kUNop},  // 7: vi1 = clip != 0
+        kEndPair,
+        kNopPair,
+    });
+    t.rt.vu1().interpret(0, 0);
+    CHECK_EQ(t.r1().vi[10], 0xABCu);
+    CHECK_EQ(t.r1().vi[4], 0xF15u);
+    CHECK_EQ(t.r1().vi[5], 0x56Au);
+    CHECK_EQ(t.r1().vi[6], 0xAA1u);
+    CHECK_EQ(t.r1().vi[1], 1u);
+    CHECK_EQ(t.r1().vi[vucore::reg::Clip], 0xF15AA1u);
+}
+
+TEST_CASE(vu, lazy_flags_vu0_micro_cfc2_sees_flags_in_flight_at_the_end) {
+    // O VU0 termina com flags ainda em voo (o delay slot do bit E): o EE as vê completas no CFC2.
+    Rig t;
+    setVf(t.c.vf[2], 1, 1, 1, 1);
+    setVf(t.c.vf[3], -1, -1, -1, -1);
+    setVf(t.c.vf[7], 0, 0, 0, 0.5f);
+    const Pair prog[] = {{kLNop, addx(1, 2, 3)}, {kLNop, clipOp(2, 7)}, kEndPair, kNopPair};
+    std::memcpy(t.rt.vu().micro0.get(), prog, sizeof(prog));
+    ops::vu0Call(&t.c, 0, 0x100);
+    CHECK_EQ(ops::cfc2(&t.c, 17), 0x0008u);
+    CHECK_EQ(ops::cfc2(&t.c, 16), 0x0041u);
+    CHECK_EQ(ops::cfc2(&t.c, 18), 0x0015u);
+}

@@ -120,7 +120,9 @@ anyps2::rt::VuPipelineSeed randomPipeline(Rng& r) {
     for (unsigned i = 1; i < 32; ++i) {
         if (r.below(4) == 0) seed.vfBusy[i] = static_cast<std::uint8_t>(1 + r.below(6));
     }
-    const std::uint32_t n = r.below(4) == 0 ? 0 : r.below(7);
+    // De vez em quando a fila vem (quase) cheia: o par que empilha mais uma entrada tem de esperar ou
+    // aplicar as já prontas, e o resultado não pode depender de como a fila é esvaziada.
+    const std::uint32_t n = r.below(4) == 0 ? 0 : r.below(6) == 0 ? 12 + r.below(5) : r.below(7);
     for (std::uint32_t i = 0; i < n; ++i) {
         anyps2::rt::VuPipelineSeed::Flags f;
         f.delay = static_cast<std::uint8_t>(r.below(6));
@@ -151,7 +153,32 @@ void copyState(Machine& to, const Machine& from) {
 
 int failures = 0;
 
+// Resumo (FNV-1a) do estado final de todas as execuções comparadas. O interpretador e o código
+// recompilado compartilham o runtime (vu_exec.h), então um erro de pipeline comum aos dois passa em
+// `same`; o resumo impresso no fim permite comparar duas versões do runtime: tem de ser idêntico.
+std::uint64_t digest = 0xCBF29CE484222325ull;
+void fold(const void* p, std::size_t n) {
+    const auto* b = static_cast<const std::uint8_t*>(p);
+    for (std::size_t i = 0; i < n; ++i) {
+        digest ^= b[i];
+        digest *= 0x100000001B3ull;
+    }
+}
+void foldState(const Machine& m) {
+    fold(m.vf, sizeof(m.vf));
+    fold(m.vi, sizeof(m.vi));
+    fold(&m.acc, sizeof(m.acc));
+    fold(m.data.data(), m.data.size());
+    const std::uint64_t cycle = m.vu.cycle();
+    fold(&cycle, sizeof(cycle));
+    for (const auto& k : m.kicks) {
+        fold(&k.addr, sizeof(k.addr));
+        fold(&k.cycle, sizeof(k.cycle));
+    }
+}
+
 bool same(const Machine& a, const Machine& b, const std::string& what) {
+    foldState(a);
     std::string diff;
     for (unsigned i = 0; i < 32 && diff.empty(); ++i) {
         if (std::memcmp(&a.vf[i], &b.vf[i], 16) != 0) diff = "vf" + std::to_string(i);
@@ -387,6 +414,7 @@ int main(int argc, char** argv) {
 
     std::printf("vu_diff: %zu programas, %zu execuções comparadas, %zu realocadas, %zu com par alterado, %zu com o pipeline semeado\n",
                 std::size(kFuzzPrograms), runs, relocated, patched, seeded);
+    std::printf("vu_diff: resumo do estado final %016llx\n", static_cast<unsigned long long>(digest));
     if (failures) {
         std::printf("vu_diff: %d diferença(s)\n", failures);
         return 1;
