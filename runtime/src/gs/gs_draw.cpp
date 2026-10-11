@@ -259,12 +259,11 @@ void Gs::draw(std::uint32_t pc) {
     const auto colLo = static_cast<unsigned>(std::max(colRange.lo, 0)), colHi = static_cast<unsigned>(colRange.hi);
     const unsigned cols = colHi + 1;
     // O mapeamento (base em páginas, largura, formato) identifica as escritas que
-    // caem na mesma faixa; o intervalo de páginas é exato (pageSpan).
-    auto access = [](const PageSpans& p, bool write, unsigned surface, std::uint32_t bp, std::uint32_t bw,
+    // caem na mesma faixa; o conjunto de páginas é exato (pageSet).
+    auto access = [](const PageSet& p, bool write, unsigned surface, std::uint32_t bp, std::uint32_t bw,
                      std::uint32_t psm) {
         VramAccess a;
-        a.span = p.span;
-        a.wrap = p.wrap;
+        a.pages = p;
         a.write = write;
         a.surface = surface;
         a.base = bp / 32;
@@ -276,11 +275,11 @@ void Gs::draw(std::uint32_t pc) {
     unsigned nw = 0;
     VramAccess reads[8];
     unsigned nr = 0;
-    writes[nw++] = access(pageSpan(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0, e.fbp, e.fbw, e.fpsm);
+    writes[nw++] = access(pageSet(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0, e.fbp, e.fbw, e.fpsm);
     if (e.zte && !e.zmsk) {
-        writes[nw++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 1, e.zbp, e.fbw, e.zpsm);
+        writes[nw++] = access(pageSet(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 1, e.zbp, e.fbw, e.zpsm);
     } else if (e.zte && e.ztst >= 2) {
-        reads[nr++] = access(pageSpan(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 1, e.zbp, e.fbw, e.zpsm);
+        reads[nr++] = access(pageSet(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 1, e.zbp, e.fbw, e.zpsm);
     }
     if (e.tme) {
         for (unsigned l = 0; l <= e.mxl; ++l) {
@@ -294,7 +293,7 @@ void Gs::draw(std::uint32_t pc) {
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            reads[nr++] = access(pageSpan(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
+            reads[nr++] = access(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
                                  e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
@@ -307,10 +306,9 @@ void Gs::draw(std::uint32_t pc) {
     // de baixo — (64, 0) e (0, 32) caem no mesmo lugar com FBW = 1 — e o mesmo
     // acontece se o buffer passa do fim da VRAM. Pixels de linhas (e faixas)
     // diferentes escreveriam o mesmo endereço sem ordem entre si.
-    constexpr std::uint32_t kPages = Vram::kSize / 8192;
     bool selfWrap = e.fbw == 0 || cols > e.fbw * 64;
     for (unsigned i = 0; i < nw; ++i) {
-        selfWrap = selfWrap || (writes[i].wrap.empty() && writes[i].span.first == 0 && writes[i].span.last == kPages - 1);
+        selfWrap = selfWrap || writes[i].pages.full();
     }
     bool selfTexture = false, selfFrameZ = false;
     for (unsigned i = 0; i < nw; ++i) {

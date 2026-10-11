@@ -10,26 +10,57 @@
 
 namespace anyps2::rt::gs {
 
-// Intervalo de páginas (8 KB, índice absoluto na VRAM).
-struct VramSpan {
-    std::uint32_t first = 0;
-    std::uint32_t last = 0;
-    bool empty() const { return first > last; }
-};
+// Conjunto de páginas (8 KB) da VRAM: um bit por página, 512 páginas em 8 palavras
+// de 64 bits. Representa o retângulo de um acesso de forma exata (linha de páginas
+// por linha de páginas, inclusive a volta no fim da VRAM), e a interseção de dois
+// acessos é um AND de 8 palavras, sem laços sobre listas de intervalos.
+struct PageSet {
+    static constexpr std::uint32_t kPages = 512;
+    static constexpr unsigned kWords = kPages / 64;
+    std::uint64_t w[kWords] = {};
 
-// Páginas de um acesso: um intervalo, ou dois quando o acesso passa do fim da VRAM
-// e dá a volta ([a..511] e [0..b]); `wrap` é vazio no caso comum.
-struct PageSpans {
-    VramSpan span;
-    VramSpan wrap{1, 0};
+    bool empty() const {
+        std::uint64_t any = 0;
+        for (unsigned i = 0; i < kWords; ++i) any |= w[i];
+        return any == 0;
+    }
+    bool full() const {
+        std::uint64_t all = ~std::uint64_t{0};
+        for (unsigned i = 0; i < kWords; ++i) all &= w[i];
+        return all == ~std::uint64_t{0};
+    }
+    bool test(std::uint32_t page) const { return page < kPages && ((w[page >> 6] >> (page & 63)) & 1) != 0; }
+    void setAll() {
+        for (unsigned i = 0; i < kWords; ++i) w[i] = ~std::uint64_t{0};
+    }
+    // Liga as páginas lo..hi (0 <= lo <= hi < kPages).
+    void setRange(std::uint32_t lo, std::uint32_t hi) {
+        const std::uint32_t w0 = lo >> 6, w1 = hi >> 6;
+        const std::uint64_t m0 = ~std::uint64_t{0} << (lo & 63);
+        const std::uint64_t m1 = ~std::uint64_t{0} >> (63 - (hi & 63));
+        if (w0 == w1) {
+            w[w0] |= m0 & m1;
+            return;
+        }
+        w[w0] |= m0;
+        for (std::uint32_t i = w0 + 1; i < w1; ++i) w[i] = ~std::uint64_t{0};
+        w[w1] |= m1;
+    }
+    void merge(const PageSet& o) {
+        for (unsigned i = 0; i < kWords; ++i) w[i] |= o.w[i];
+    }
+    bool intersects(const PageSet& o) const {
+        std::uint64_t any = 0;
+        for (unsigned i = 0; i < kWords; ++i) any |= w[i] & o.w[i];
+        return any != 0;
+    }
 };
 
 // Acesso à VRAM de um desenho. surface: 0 = FRAME, 1 = ZBUF, 2 = textura.
 // Escritas de FRAME/ZBUF carregam o mapeamento (surface, base, bw, psm): dois
 // desenhos com o mesmo mapeamento escrevem cada pixel na mesma faixa.
 struct VramAccess {
-    VramSpan span;
-    VramSpan wrap{1, 0};  // segundo intervalo (a volta da VRAM); vazio se não houver
+    PageSet pages;  // páginas tocadas (exatas por linha de páginas do retângulo)
     bool write = false;
     unsigned surface = 0;
     std::uint32_t base = 0;

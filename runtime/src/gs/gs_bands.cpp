@@ -8,20 +8,8 @@ namespace anyps2::rt::gs {
 
 namespace {
 
-bool overlap(const VramSpan& a, const VramSpan& b) {
-    return !a.empty() && !b.empty() && a.first <= b.last && b.first <= a.last;
-}
-
 bool overlap(const VramAccess& a, const VramAccess& b) {
-    return overlap(a.span, b.span) || overlap(a.span, b.wrap) || overlap(a.wrap, b.span) ||
-           overlap(a.wrap, b.wrap);
-}
-
-bool sameSpans(const VramAccess& a, const VramAccess& b) {
-    const auto same = [](const VramSpan& x, const VramSpan& y) {
-        return (x.empty() && y.empty()) || (x.first == y.first && x.last == y.last);
-    };
-    return same(a.span, b.span) && same(a.wrap, b.wrap);
+    return a.pages.intersects(b.pages);
 }
 
 // Mesma escrita para o mesmo buffer: o mapeamento pixel→endereço é o mesmo, então
@@ -138,8 +126,29 @@ RowRange drawCols(const DrawWindow& w, unsigned type, const Vertex& v0, const Ve
     return r;
 }
 
-PageSpans pageSpan(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
-                   unsigned colLo, unsigned colHi) {
+namespace {
+
+// Liga as páginas first..last (índices absolutos, sem módulo): a VRAM dá a volta.
+void addPages(PageSet& set, std::uint64_t first, std::uint64_t last) {
+    constexpr std::uint64_t kPages = PageSet::kPages;
+    if (last - first + 1 >= kPages) {
+        set.setAll();
+        return;
+    }
+    const auto a = static_cast<std::uint32_t>(first % kPages);
+    const std::uint64_t e = a + (last - first);
+    if (e < kPages) {
+        set.setRange(a, static_cast<std::uint32_t>(e));
+    } else {
+        set.setRange(a, PageSet::kPages - 1);
+        set.setRange(0, static_cast<std::uint32_t>(e - kPages));
+    }
+}
+
+}  // namespace
+
+PageSet pageSet(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsigned rowLo, unsigned rowHi,
+                unsigned colLo, unsigned colHi) {
     // Tamanho da página em pixels e largura do buffer em páginas, como em vram.cpp
     // (byteAddress32/16/8 e nibbleAddress4): bloco = bp + k·32 + ordem, com
     // k = (y/altura)·largura + x/largura da página.
@@ -167,32 +176,29 @@ PageSpans pageSpan(std::uint32_t psm, std::uint32_t bp, std::uint32_t bw, unsign
     colHi = std::min(colHi, 2047u);
     rowLo = std::min(rowLo, rowHi);
     colLo = std::min(colLo, colHi);
-    const std::uint64_t kMin = std::uint64_t{rowLo / pageH} * stride + colLo / pageW;
-    const std::uint64_t kMax = std::uint64_t{rowHi / pageH} * stride + colHi / pageW;
-    // Intervalo de blocos tocados; a página é bloco/32. A VRAM tem 512 páginas.
-    constexpr std::uint64_t kPages = Vram::kSize / 8192;
-    const std::uint64_t firstPage = (std::uint64_t{bp} + kMin * 32) / 32;
-    const std::uint64_t lastPage = (std::uint64_t{bp} + kMax * 32 + 31) / 32;
-    PageSpans s;
-    if (lastPage - firstPage + 1 >= kPages) {
-        s.span = VramSpan{0, static_cast<std::uint32_t>(kPages - 1)};
+    const std::uint64_t tileLo = rowLo / pageH, tileHi = rowHi / pageH;
+    const std::uint64_t cA = colLo / pageW, cB = colHi / pageW;
+    // Páginas de uma linha de páginas t: blocos bp + (t·largura + cA)·32 até
+    // bp + (t·largura + cB)·32 + 31 (bp pode não estar alinhado a uma página).
+    const auto firstOf = [&](std::uint64_t t) { return (std::uint64_t{bp} + (t * stride + cA) * 32) / 32; };
+    const auto lastOf = [&](std::uint64_t t) { return (std::uint64_t{bp} + (t * stride + cB) * 32 + 31) / 32; };
+    PageSet s;
+    if (tileLo == tileHi || cB - cA + 1 >= stride) {
+        // Uma linha de páginas, ou linhas que se encostam: um intervalo contínuo.
+        addPages(s, firstOf(tileLo), lastOf(tileHi));
         return s;
     }
-    const auto a = static_cast<std::uint32_t>(firstPage % kPages);
-    const auto b = static_cast<std::uint32_t>(lastPage % kPages);
-    if (a <= b) {
-        s.span = VramSpan{a, b};
-    } else {
-        s.span = VramSpan{a, static_cast<std::uint32_t>(kPages - 1)};
-        s.wrap = VramSpan{0, b};
+    for (std::uint64_t t = tileLo; t <= tileHi; ++t) {
+        addPages(s, firstOf(t), lastOf(t));
+        if (s.full()) break;
     }
     return s;
 }
 
 bool clashes(const VramAccess& a, const VramAccess& b) {
     if (!a.write && !b.write) return false;
-    if (!overlap(a, b)) return false;
-    return !sameMapping(a, b);
+    if (sameMapping(a, b)) return false;
+    return overlap(a, b);
 }
 
 bool PendingAccess::clashesWith(const VramAccess& a) const {
@@ -215,16 +221,11 @@ void PendingAccess::dropDone(std::uint64_t done) {
 
 void PendingAccess::add(const VramAccess& a) {
     for (VramAccess& p : list_) {
-        // Fundir escritas do mesmo mapeamento só vale com um intervalo cada (o casco
-        // de dois intervalos que dão a volta seria a VRAM toda): as com volta ficam
-        // como entradas à parte.
-        if (sameMapping(p, a) && p.wrap.empty() && a.wrap.empty()) {
-            p.span.first = std::min(p.span.first, a.span.first);
-            p.span.last = std::max(p.span.last, a.span.last);
-            p.seq = std::max(p.seq, a.seq);
-            return;
-        }
-        if ((!p.write && !a.write && sameSpans(p, a)) || (p.write && a.write && sameMapping(p, a) && sameSpans(p, a))) {
+        // Escritas do mesmo mapeamento se fundem (união das páginas); todas as
+        // leituras viram uma entrada só, já que entre leituras não há colisão e
+        // contra uma escrita só importa a união das páginas lidas.
+        if ((p.write && a.write && sameMapping(p, a)) || (!p.write && !a.write)) {
+            p.pages.merge(a.pages);
             p.seq = std::max(p.seq, a.seq);
             return;
         }
