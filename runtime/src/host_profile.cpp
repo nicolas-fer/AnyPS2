@@ -134,9 +134,9 @@ std::string formatClut(const BandStats& cur, const BandStats& prev, double per, 
     s += unit;
     s += ":";
     std::snprintf(buf, sizeof buf,
-                  " cargas em barreira %.1f: cobertas %.1f, recentes por faixas 1:%.1f 2:%.1f 3:%.1f 4+:%.1f (sem faixa %.1f),"
+                  " diferidas (sem barreira) %.1f, cargas em barreira %.1f: cobertas %.1f, recentes por faixas 1:%.1f 2:%.1f 3:%.1f 4+:%.1f (sem faixa %.1f),"
                   " com bloco verdadeiro %.1f, HOST %.1f, perdidas %.1f, WAR depois %.1f (das cobertas %.1f);",
-                  d(cur.clutBarriers, prev.clutBarriers), d(cur.clutCovered, prev.clutCovered),
+                  d(cur.clutLazy, prev.clutLazy), d(cur.clutBarriers, prev.clutBarriers), d(cur.clutCovered, prev.clutCovered),
                   d(cur.clutRecent[1], prev.clutRecent[1]), d(cur.clutRecent[2], prev.clutRecent[2]),
                   d(cur.clutRecent[3], prev.clutRecent[3]), d(cur.clutRecent[4], prev.clutRecent[4]),
                   d(cur.clutRecent[0], prev.clutRecent[0]), d(cur.clutRecentTrueBlock, prev.clutRecentTrueBlock),

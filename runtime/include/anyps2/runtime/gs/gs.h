@@ -249,6 +249,7 @@ struct BandStats {
     std::uint64_t clutRecent[5] = {};
     std::uint64_t clutRecentTrueBlock = 0;    // das recentes: sobreposição verdadeira em bloco de 256 B
     std::uint64_t clutHost = 0;               // o conflito vem de HOST→LOCAL (fila ou transferência aberta)
+    std::uint64_t clutLazy = 0;               // cargas feitas sem barreira, com leitura diferida (ANYPS2_GS_CLUT_DEP)
     std::uint64_t clutLost = 0;               // outstanding_ perdeu rastro (cheio)
     std::uint64_t clutWarAfter = 0;           // a leitura foi seguida, antes da próxima barreira, de escrita que colide com ela
     std::uint64_t clutWarAfterCovered = 0;    // ...só entre as cobertas
@@ -704,6 +705,12 @@ private:
     static constexpr unsigned kClutChainLimit = 64;
     std::shared_ptr<ClutBuffer> clutBarrier_;
     unsigned clutChain_ = 0;
+    // ANYPS2_GS_CLUT_DEP (ligado; '0' desliga): cargas "cobertas" não viram barreira.
+    bool clutDep_ = true;
+    unsigned clutLazyLane_ = 0;  // faixa que recebe a próxima tarefa de leitura diferida
+    // Versões diferidas criadas depois da última de barreira (esta, ao ficar pronta, garante
+    // as anteriores): o produtor só compacta a cadeia quando todas estão prontas.
+    std::vector<std::shared_ptr<const ClutBuffer>> clutLazies_;
     std::uint32_t cbp0_ = 0, cbp1_ = 0;
 
     // Fila de vértices

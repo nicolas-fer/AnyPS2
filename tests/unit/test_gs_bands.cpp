@@ -5,9 +5,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -719,7 +722,7 @@ TEST_CASE(gs_bands, clut_versions_are_identical_for_any_lane_count) {
             CHECK(got.img.vram == ref.img.vram);
             CHECK_EQ(got.img.shaded, got.img.covered);
             // Cada carga é direta ou uma barreira (quantas de cada, depende do tempo).
-            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+            CHECK_EQ(got.stats.clutDirect + got.stats.clutLazy + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
         }
     }
 }
@@ -847,7 +850,7 @@ TEST_CASE(gs_bands, clut_chain_many_loads_with_real_conflicts_match_sync) {
         for (unsigned lanes : {2u, 3u, 4u}) {
             const ClutRender got = renderClutMany(true, lanes);
             CHECK(got.img.vram == ref.img.vram);
-            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+            CHECK_EQ(got.stats.clutDirect + got.stats.clutLazy + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
         }
     }
 }
@@ -1010,7 +1013,7 @@ TEST_CASE(gs_bands, texture_cache_upload_keeps_clut_loads_barrier_free) {
             CHECK_EQ(got.stats.hostBarrier, 0u);
             // Direta, o upload não fica pendente nas faixas e nenhuma carga de CLUT precisa de
             // barreira; em fila, a escrita pendente da área faz algumas virarem barreira.
-            CHECK_EQ(got.stats.clutDirect + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
+            CHECK_EQ(got.stats.clutDirect + got.stats.clutLazy + got.stats.submit[BandStats::SubmitClut], ref.stats.clutDirect);
             if (got.stats.hostQueued == 0) CHECK_EQ(got.stats.submit[BandStats::SubmitClut], 0u);
         }
     }
@@ -1027,12 +1030,16 @@ namespace {
 // na construção).
 struct StatsGs {
     std::unique_ptr<Gs> gs;
-    StatsGs() {
+    // clutDep = falso: ANYPS2_GS_CLUT_DEP=0 (as cargas de CLUT que conflitam viram sempre
+    // barreira); os testes de classificação da fatia 1 medem esse caminho.
+    explicit StatsGs(bool clutDep = true) {
         setEnv("ANYPS2_GS_THREAD", "1");
         setEnv("ANYPS2_GS_THREADS", "4");
+        setEnv("ANYPS2_GS_CLUT_DEP", clutDep ? "" : "0");
         gs = std::make_unique<Gs>(nullptr);
         setEnv("ANYPS2_GS_THREAD", "");
         setEnv("ANYPS2_GS_THREADS", "");
+        setEnv("ANYPS2_GS_CLUT_DEP", "");
         gs->writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
         gs->writeRegister(XYOFFSET_1, 0, 0);
         gs->writeRegister(PRMODECONT, 1, 0);
@@ -1784,7 +1791,7 @@ template <class F>
 void clutScene(F&& scene) {
     bool ok = false;
     for (unsigned attempt = 0; attempt < 30 && !ok; ++attempt) {
-        StatsGs t;
+        StatsGs t(false);
         Gs& g = *t.gs;
         g.forceClutMeasure(true);
         queueSetup(g);
@@ -2087,3 +2094,376 @@ TEST_CASE(gs_bands, long_lazy_chain_resolves_and_destroys_without_recursion) {
         last.reset();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Carga de CLUT "coberta" sem barreira (fatia 3, ANYPS2_GS_CLUT_DEP): a versão é lida depois,
+// por tarefa numa faixa ou por quem resolve. A VRAM e o quadro têm de sair idênticos aos do
+// caminho síncrono, byte a byte, para 1, 2 e 4 faixas, e as escritas que vêm depois da carga
+// (desenho, HOST direto, LOCAL→LOCAL) não podem mudar o que a versão lê.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+enum ClutDepScenario : unsigned {
+    CdHostQueued,    // (a) HOST em fila nas páginas da CLUT, depois cargas e desenhos
+    CdLocalCopy,     // (b) carga depois de LOCAL→LOCAL sobre a CLUT
+    CdWar,           // (c) carga coberta, desenho que escreve a página (WAR), desenho que usa a CLUT
+    CdHostAfter,     // (d) carga coberta seguida de HOST direto no mesmo lugar (abre em fila)
+    CdHostOpen,      // (e) carga com HOST direto aberto sobre a área (hostDrain_)
+    CdCsm2,          // (f) CSM2 com TEXCLUT
+    CdFormats,       // (g) PSMT4 e PSMT8, CT32 e CT16, cadeia maior que o limite
+    CdNoDraw,        // (h) carga sem desenho antes da próxima barreira e do display
+    CdRenderToClut,  // (i) render-to-CLUT recente: continua barreira
+    CdFullList,      // (j) lista outstanding_ cheia (o caso do GT4)
+    CdCount
+};
+
+constexpr std::uint32_t kCdT8 = 1280, kCdT4 = 1344;
+constexpr std::uint64_t kNoLoad = ~(7ull << 61);  // zera o CLD do TEX0: usa a CLUT que já vale
+
+std::uint64_t cdT4(unsigned page, std::uint32_t cpsm, unsigned csa) {
+    return tex0(kCdT4, 1, PSMT4, 6, 6, page * 32, cpsm, 1, csa);
+}
+std::uint64_t cdT8(unsigned page, std::uint32_t cpsm) {
+    return tex0(kCdT8, 1, PSMT8, 6, 6, page * 32, cpsm, 1, 0);
+}
+
+// CLUTs CT32 de 16x16 nas páginas 48..55 (CBP = página·32), uma CLUT CT16 de 256x4 na página
+// 60 (CSM2) e as texturas indexadas de 64x64.
+void cdPrelude(Gs& g, Lcg& r) {
+    queueSetup(g);
+    for (unsigned k = 0; k < 8; ++k) hostToLocal(g, (48 + k) * 32, 1, PSMCT32, 0, 0, 16, 16, queueWords(r, 128));
+    hostToLocal(g, 60 * 32, 4, PSMCT16, 0, 0, 256, 4, queueWords(r, 256));
+    hostToLocal(g, kCdT8, 1, PSMT8, 0, 0, 64, 64, queueWords(r, 512));
+    hostToLocal(g, kCdT4, 1, PSMT4, 0, 0, 64, 64, queueWords(r, 256));
+}
+
+// Sprite texturizado que usa a CLUT de `t0` (a escrita do TEX0 carrega a CLUT se CLD pedir),
+// nas faixas.
+void cdUse(Gs& g, unsigned k, std::uint64_t t0) {
+    g.writeRegister(TEX0_1, t0, 0);
+    g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+    vertex(g, 2 + k % 7, 3 + k % 5, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+    vertex(g, 90 + k % 9, 100 + k % 11, rgbaq(255, 255, 255, 0x80), 0, uv(63, 63));
+}
+
+// Desenho que escreve a página inteira da CLUT (render-to-CLUT / WAR), com alfa: o resultado
+// depende do conteúdo anterior.
+void cdPageWrite(Gs& g, unsigned page, unsigned k) {
+    g.writeRegister(FRAME_1, frameReg(page, 1, PSMCT32), 0);
+    g.writeRegister(PRIM, prim(6, false, false, true), 0);
+    const std::uint64_t c = rgbaq(30 + (k * 37) % 200, (k * 91) % 256, 200 - (k * 13) % 150, 0x50 + k % 40);
+    vertex(g, 0, 0, c);
+    vertex(g, 63, 31, c);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+}
+
+// Desenho que escreve a linha de CLUTs CT16 da página 60 (CSM2).
+void cdRowWrite(Gs& g, unsigned k) {
+    g.writeRegister(FRAME_1, frameReg(60, 4, PSMCT16), 0);
+    g.writeRegister(PRIM, prim(6, false, false, true), 0);
+    const std::uint64_t c = rgbaq(20 + (k * 53) % 200, (k * 17) % 256, (k * 7) % 256, 0x60);
+    vertex(g, 0, 0, c);
+    vertex(g, 255, 3, c);
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+}
+
+// Desenho no FRAME 0 com outro formato (mesmo endereço): colide com o anterior e abre uma
+// barreira de conflito, esvaziando o pending_ sem esperar as faixas.
+void cdClash(Gs& g, unsigned k) {
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+    g.writeRegister(PRIM, prim(6), 0);
+    vertex(g, 0, 0, rgbaq(10 + k % 90, 20, 30, 0x80));
+    vertex(g, 20, 20, rgbaq(10 + k % 90, 20, 30, 0x80));
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT16), 0);
+    vertex(g, 0, 0, rgbaq(90, 20 + k % 90, 30, 0x80));
+    vertex(g, 20, 20, rgbaq(90, 20 + k % 90, 30, 0x80));
+    g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32), 0);
+}
+
+// LOCAL→LOCAL de 16x16 pixels de uma página (CT32, FBW 1) para outra.
+void cdLocalCopy(Gs& g, unsigned srcPage, unsigned dstPage) {
+    g.writeRegister(BITBLTBUF, (std::uint64_t{srcPage} * 32) | (1ull << 16) | (std::uint64_t{PSMCT32} << 24) |
+                                   ((std::uint64_t{dstPage} * 32) << 32) | (1ull << 48) |
+                                   (std::uint64_t{PSMCT32} << 56),
+                    0);
+    g.writeRegister(TRXPOS, 0, 0);
+    g.writeRegister(TRXREG, 16 | (16ull << 32), 0);
+    g.writeRegister(TRXDIR, 2, 0);
+}
+
+void cdScene(Gs& g, unsigned sc, unsigned rep) {
+    Lcg r{0xC1D0000u + sc * 977u + rep};
+    cdPrelude(g, r);
+    const unsigned salt = rep;
+    switch (sc) {
+        case CdHostQueued: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdPageWrite(g, 48, salt);
+            cdPageWrite(g, 49, salt + 1);
+            const auto w = queueWords(r, 128);
+            queueBegin(g, 48 * 32, 1, PSMCT32, 0, 0, 16, 16);
+            queueSend(g, w, 0, 64);
+            cdUse(g, 0, cdT4(48, PSMCT32, 0));  // a fila é submetida antes da carga
+            queueSend(g, w, 64, 128);           // o resto vem depois: a primeira versão não o vê
+            for (unsigned k = 1; k < 8; ++k) cdUse(g, k, k % 2 ? cdT4(48 + k % 2, PSMCT32, k) : cdT8(48, PSMCT32));
+            const auto w2 = queueWords(r, 128);
+            queueBegin(g, 49 * 32, 1, PSMCT32, 0, 0, 16, 16);
+            queueSend(g, w2, 0, 128);
+            for (unsigned k = 8; k < 12; ++k) cdUse(g, k, cdT4(49, PSMCT32, k));
+            break;
+        }
+        case CdLocalCopy: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdPageWrite(g, 50, salt);
+            cdLocalCopy(g, 53, 50);
+            for (unsigned k = 0; k < 5; ++k) cdUse(g, k, cdT4(50, PSMCT32, k));
+            cdPageWrite(g, 51, salt);
+            cdLocalCopy(g, 52, 51);
+            for (unsigned k = 5; k < 9; ++k) cdUse(g, k, k % 2 ? cdT8(51, PSMCT32) : cdT4(51, PSMCT32, k));
+            break;
+        }
+        case CdWar: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            for (unsigned round = 0; round < 4; ++round) {
+                const unsigned p = 48 + round;
+                cdPageWrite(g, p, salt + round);
+                cdUse(g, round, cdT4(p, PSMCT32, round));                // recente: barreira
+                g.writeRegister(TEX0_1, cdT4(p, PSMCT32, round + 3), 0);  // coberta: diferida
+                cdPageWrite(g, p, salt + round + 9);                     // WAR: barreira antes do desenho
+                cdUse(g, round + 1, cdT4(p, PSMCT32, round + 3) & kNoLoad);  // usa a versão lida antes
+                g.writeRegister(TEX0_1, cdT4(p, PSMCT32, round + 5), 0);
+                cdUse(g, round + 2, cdT4(p, PSMCT32, round + 5) & kNoLoad);
+            }
+            break;
+        }
+        case CdHostAfter: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdPageWrite(g, 53, salt);
+            cdUse(g, 0, cdT4(53, PSMCT32, 0));
+            g.writeRegister(TEX0_1, cdT4(53, PSMCT32, 4), 0);  // coberta
+            const auto w = queueWords(r, 128);
+            hostToLocal(g, 53 * 32, 1, PSMCT32, 0, 0, 16, 16, w);  // HOST sobre a área lida: em fila
+            cdUse(g, 1, cdT4(53, PSMCT32, 4) & kNoLoad);           // a versão é a de antes do HOST
+            g.writeRegister(TEX0_1, cdT4(53, PSMCT32, 6), 0);
+            cdUse(g, 2, cdT4(53, PSMCT32, 6) & kNoLoad);
+            break;
+        }
+        case CdHostOpen: {
+            g.waitIdle();
+            const auto w = queueWords(r, 128);
+            queueBegin(g, 53 * 32, 1, PSMCT32, 0, 0, 16, 16);  // sem acesso pendente: modo direto
+            queueSend(g, w, 0, 40);
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdPageWrite(g, 53, salt);  // desenho sobre o destino aberto: a próxima palavra espera
+            cdClash(g, salt);          // barreira de conflito: o pending_ esvazia
+            cdUse(g, 0, cdT4(53, PSMCT32, 0));  // carga com a transferência ainda aberta
+            queueSend(g, w, 40, 128);
+            cdUse(g, 1, cdT4(53, PSMCT32, 3) & kNoLoad);
+            cdUse(g, 2, cdT8(53, PSMCT32));
+            break;
+        }
+        case CdCsm2: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdRowWrite(g, salt);
+            for (unsigned k = 0; k < 8; ++k) {
+                g.writeRegister(TEXCLUT, 4 | (std::uint64_t{k % 3} << 6) | (std::uint64_t{k % 4} << 12), 0);
+                cdUse(g, k, cdT4(60, PSMCT16, k % 16) | (1ull << 55));
+                if (k == 3) cdRowWrite(g, salt + 5);
+                if (k == 5) hostToLocal(g, 60 * 32, 4, PSMCT16, 0, 0, 256, 4, queueWords(r, 256));
+            }
+            break;
+        }
+        case CdFormats: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            for (unsigned k = 0; k < 150; ++k) {
+                const unsigned p = 48 + k % 6;
+                if (k % 11 == 5) cdPageWrite(g, p, salt + k);
+                if (k % 17 == 9) hostToLocal(g, p * 32, 1, PSMCT32, 0, 0, 16, 16, queueWords(r, 128));
+                const std::uint32_t cpsm = k % 4 == 3 ? PSMCT16 : PSMCT32;
+                cdUse(g, k, k % 3 == 0 ? cdT8(p, cpsm) : cdT4(p, cpsm, (k * 5) % 16));
+            }
+            break;
+        }
+        case CdNoDraw: {
+            queueBusy(g, 0, 2, 100, 100, 30, salt);
+            cdPageWrite(g, 52, salt);
+            for (unsigned k = 0; k < 4; ++k) g.writeRegister(TEX0_1, cdT4(52, PSMCT32, k), 0);  // sem desenho
+            cdLocalCopy(g, 53, 52);  // a próxima barreira escreve a área
+            cdUse(g, 0, cdT4(52, PSMCT32, 3) & kNoLoad);  // a versão ainda é a de antes
+            g.writeRegister(TEX0_1, cdT4(52, PSMCT32, 7), 0);
+            videoOn(g);
+            (void)g.display();  // o vídeo espera as faixas: a leitura já tem de ter acontecido
+            cdUse(g, 1, cdT4(52, PSMCT32, 7) & kNoLoad);
+            break;
+        }
+        case CdRenderToClut: {
+            for (unsigned k = 0; k < 10; ++k) {
+                const unsigned p = 48 + k % 3;
+                queueBusy(g, 0, 2, 100, 100, 6, salt + k);
+                cdPageWrite(g, p, salt + k);
+                cdUse(g, k, cdT4(p, PSMCT32, k));
+                cdUse(g, k + 1, cdT8(p, PSMCT32));
+            }
+            break;
+        }
+        case CdFullList: {
+            // Centenas de barreiras de conflito com as faixas atrasadas: a lista outstanding_
+            // (256) enche e perde o rastro; as cargas seguintes não podem confiar nela.
+            for (unsigned i = 0; i < 300; ++i) {
+                queueBusy(g, 0, 2, 100, 100, 1, i);
+                cdClash(g, i);
+            }
+            cdPageWrite(g, 54, salt);
+            cdClash(g, 1);
+            for (unsigned k = 0; k < 6; ++k) {
+                cdUse(g, k, k % 2 ? cdT8(54, PSMCT32) : cdT4(54, PSMCT32, k));
+                if (k == 2) cdPageWrite(g, 54, salt + 7);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+struct ClutDepRun {
+    Render img;
+    Frame frame;
+    BandStats stats;
+    std::uint64_t mismatches = 0;
+};
+
+ClutDepRun runClutDep(unsigned sc, unsigned rep, bool threaded, unsigned lanes, bool dep, bool texCache) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    setEnv("ANYPS2_GS_CLUT_DEP", dep ? "" : "0");
+    setEnv("ANYPS2_GS_TEXCACHE", texCache ? "1" : "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", texCache ? "1" : "");
+    Gs g(nullptr);
+    setEnv("ANYPS2_GS_CLUT_DEP", "");
+    setEnv("ANYPS2_GS_TEXCACHE", "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", "");
+    g.setTexVerifyAbort(false);
+    if (sc == CdFullList) g.forceClutMeasure(true);
+    cdScene(g, sc, rep);
+    ClutDepRun out;
+    videoOn(g);
+    out.frame = g.display();
+    out.stats = g.bandStats();
+    out.mismatches = g.texVerifyMismatches();
+    out.img = capture(g);
+    return out;
+}
+
+constexpr const char* kCdNames[CdCount] = {"host_queued", "local_copy", "war",            "host_after", "host_open",
+                                           "csm2",        "formats",    "no_draw_display", "render_to_clut", "full_list"};
+
+struct ClutDepTotals {
+    std::uint64_t lazy = 0, clutSubmits = 0, lost = 0;
+};
+
+// Compara `reps` repetições do cenário contra o caminho síncrono para `lanes` faixas.
+ClutDepTotals checkClutDep(unsigned sc, unsigned reps, unsigned lanes, bool texCache) {
+    ClutDepTotals t;
+    for (unsigned rep = 0; rep < reps; ++rep) {
+        const ClutDepRun ref = runClutDep(sc, rep, false, 1, true, false);
+        if (rep == 0) {
+            bool any = false;
+            for (const std::uint8_t b : ref.img.vram) any = any || b != 0;
+            CHECK(any);
+        }
+        const ClutDepRun got = runClutDep(sc, rep, true, lanes, true, texCache);
+        const bool sameVram = got.img.vram == ref.img.vram;
+        if (!sameVram) {
+            std::fprintf(stderr, "  cenário %s, repetição %u, %u faixas: VRAM diferente\n", kCdNames[sc], rep, lanes);
+        }
+        CHECK(sameVram);
+        CHECK(sameFrame(got.frame, ref.frame));
+        CHECK_EQ(got.mismatches, 0u);
+        CHECK_EQ(got.img.shaded, got.img.covered);
+        t.lazy += got.stats.clutLazy;
+        t.clutSubmits += got.stats.submit[BandStats::SubmitClut];
+        t.lost += got.stats.clutLost;
+    }
+    return t;
+}
+
+}  // namespace
+
+#define CLUT_DEP_TEST(NAME, SC, MINLAZY)                                \
+    TEST_CASE(gs_bands, clut_dep_##NAME) {                              \
+        for (const unsigned lanes : {1u, 2u, 4u}) {                     \
+            const ClutDepTotals t = checkClutDep(SC, 50, lanes, false); \
+            if (MINLAZY) CHECK(t.lazy > 0);                             \
+        }                                                               \
+    }
+
+CLUT_DEP_TEST(host_queued, CdHostQueued, true)
+CLUT_DEP_TEST(local_copy, CdLocalCopy, true)
+CLUT_DEP_TEST(war_becomes_barrier, CdWar, true)
+CLUT_DEP_TEST(host_direct_after_opens_queued, CdHostAfter, true)
+CLUT_DEP_TEST(host_open_over_source, CdHostOpen, true)
+CLUT_DEP_TEST(csm2_texclut, CdCsm2, true)
+CLUT_DEP_TEST(formats_and_long_chain, CdFormats, true)
+CLUT_DEP_TEST(no_draw_before_barrier_and_display, CdNoDraw, true)
+CLUT_DEP_TEST(render_to_clut_stays_barrier, CdRenderToClut, false)
+
+TEST_CASE(gs_bands, clut_dep_full_outstanding_list) {
+    for (const unsigned lanes : {1u, 2u, 4u}) {
+        const ClutDepTotals t = checkClutDep(CdFullList, 50, lanes, false);
+        CHECK(t.lazy > 0);
+        CHECK(t.lost > 0);  // a lista enche de fato (o caso do GT4)
+    }
+}
+
+TEST_CASE(gs_bands, clut_dep_render_to_clut_keeps_barriers) {
+    std::uint64_t submits = 0;
+    for (unsigned rep = 0; rep < 10; ++rep) {
+        submits += runClutDep(CdRenderToClut, rep, true, 4, true, false).stats.submit[BandStats::SubmitClut];
+    }
+    CHECK(submits > 0);
+}
+
+TEST_CASE(gs_bands, clut_dep_off_never_defers) {
+    for (unsigned sc = 0; sc < CdCount; ++sc) {
+        const ClutDepRun ref = runClutDep(sc, 0, false, 1, true, false);
+        for (unsigned rep = 0; rep < 3; ++rep) {
+            const ClutDepRun got = runClutDep(sc, 0, true, 4, false, false);
+            CHECK_EQ(got.stats.clutLazy, 0u);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK(sameFrame(got.frame, ref.frame));
+        }
+    }
+}
+
+TEST_CASE(gs_bands, clut_dep_with_texture_cache_verify) {
+    for (unsigned sc = 0; sc < CdCount; ++sc) {
+        for (const unsigned lanes : {2u, 4u}) checkClutDep(sc, 12, lanes, true);
+    }
+}
+
+TEST_CASE(gs_bands, clut_dep_does_not_hang) {
+    // Cenários pesados com 1 e 8 faixas, com tempo limite: uma espera trocada por outra (ou um
+    // mutex preso durante uma espera) travaria; o teste falha em vez de ficar parado.
+    for (const unsigned lanes : {1u, 8u}) {
+        auto done = std::make_shared<std::promise<bool>>();
+        std::future<bool> f = done->get_future();
+        std::thread th([done, lanes] {
+            for (unsigned rep = 0; rep < 20; ++rep) {
+                for (const unsigned sc : {static_cast<unsigned>(CdFormats), static_cast<unsigned>(CdFullList),
+                                          static_cast<unsigned>(CdHostOpen), static_cast<unsigned>(CdWar)}) {
+                    (void)runClutDep(sc, rep, true, lanes, true, false);
+                }
+            }
+            done->set_value(true);
+        });
+        const bool ok = f.wait_for(std::chrono::seconds(120)) == std::future_status::ready;
+        CHECK(ok);
+        if (!ok) {
+            th.detach();  // travado: o teste já falhou
+            return;
+        }
+        th.join();
+    }
+}
+

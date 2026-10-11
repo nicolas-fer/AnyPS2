@@ -115,6 +115,11 @@ Gs::Gs(Runtime* rt)
         asyncDisplay_ = worker_->threaded() && !(v && std::strcmp(v, "0") == 0);
     }
     texVerify_ = envFlag("ANYPS2_GS_TEXCACHE_VERIFY");
+    // ANYPS2_GS_CLUT_DEP=0 volta a carga de CLUT que conflita a ser sempre uma barreira.
+    {
+        const char* v = std::getenv("ANYPS2_GS_CLUT_DEP");
+        clutDep_ = !(v && std::strcmp(v, "0") == 0);
+    }
     if (texVerify_ || envFlag("ANYPS2_GS_TEXCACHE")) texCache_ = std::make_unique<TexCache>(texCacheBudgetFromEnv());
 }
 
@@ -687,11 +692,45 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
         ++bandStats_.clutDirect;
         // Cadeia longa: se todas as sobreposições já estão preenchidas, o produtor
         // materializa e solta a cadeia (senão segue; o custo é só memória).
-        if (++clutChain_ >= kClutChainLimit && (!clutBarrier_ || clutBarrier_->ready.load(std::memory_order_acquire))) {
+        // O produtor não pode ler versão diferida (só vale até a próxima barreira): compacta
+        // quando as diferidas também estão prontas; senão segue com a cadeia longa.
+        if (++clutChain_ >= kClutChainLimit && (!clutBarrier_ || clutBarrier_->ready.load(std::memory_order_acquire)) &&
+            std::all_of(clutLazies_.begin(), clutLazies_.end(),
+                        [](const std::shared_ptr<const ClutBuffer>& l) { return l->ready.load(std::memory_order_acquire); })) {
             clut_->resolve();
             clutChain_ = 0;
             clutBarrier_.reset();
+            clutLazies_.clear();
         }
+        return;
+    }
+    // Carga "coberta": nenhuma escrita conflitante é recente. pending_ é o conjunto exato dos
+    // acessos desde a última barreira emitida (toda barreira, de conflito, de operação
+    // global, de HOST em fila ou de vídeo, passa por submit/clearPending, e waitIdle só o
+    // limpa depois de esperar as faixas; quando ele é maior que isso, só fica mais
+    // conservador). Se nada nele escreve na área, toda escrita anterior que conflita está
+    // atrás de uma barreira B já emitida, e qualquer faixa que execute algo enfileirado
+    // depois de B já viu B concluir; as escritas diretas do produtor já estão na VRAM e as
+    // palavras de HOST em fila que tocavam a área foram submetidas acima. Então a leitura
+    // vale em qualquer instante até a próxima barreira B': uma escrita depois da carga
+    // colide com a leitura registrada no pending_ e vira B'. A leitura é feita pela tarefa
+    // posta numa faixa agora (a FIFO da faixa a põe antes de B') ou antes, por qualquer faixa
+    // que resolva a versão; ela tem de acontecer antes de B' (um desenho enfileirado depois
+    // de B' que usasse a versão leria a escrita nova), por isso a tarefa não é opcional.
+    if (clutDep_ && worker_->threaded() && !pending_.full() && !pending_.conflictsWith(src)) {
+        next->makeLazy([this, tex0, texclut](ClutBuffer& b) { loadClutCells(b, tex0, texclut); });
+        ++bandStats_.clutLazy;
+        VramAccess rd = src;
+        rd.write = false;
+        pending_.add(rd);      // uma escrita seguinte na área vira barreira (WAR)
+        noteOutstanding(src);  // HOST direto posterior sobre a área abre em modo fila
+        noteHostHazard(&src, 1);
+        const std::shared_ptr<const ClutBuffer> keep = next;
+        const unsigned lane = clutLazyLane_++ % worker_->lanes();
+        worker_->push(lane, std::make_shared<const GsWorker::Task>([keep](unsigned, unsigned) { keep->fillLazy(); }));
+        clutLazies_.push_back(next);
+        clut_ = std::move(next);
+        ++clutChain_;
         return;
     }
     const bool measure = measureClut();
@@ -707,6 +746,9 @@ void Gs::loadClut(std::uint64_t tex0, std::uint32_t pc) {
     noteHostHazard(&src, 1);
     clut_ = next;
     clutBarrier_ = std::move(next);
+    // A barreira desta versão só roda depois das tarefas das diferidas anteriores nas filas:
+    // pronta ela, aquelas também estão.
+    clutLazies_.clear();
     ++clutChain_;
 }
 
