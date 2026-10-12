@@ -184,6 +184,10 @@ struct Gs::DrawEnv {
     // direto à VRAM.
     std::shared_ptr<TexLevel> tex[7];
     std::uint64_t drawId = 0;  // número do desenho (mensagem do VERIFY)
+    // Alcance de leitura do nível 0 declarado por Gs::draw (texReach0), quando é menor que a
+    // textura inteira; só o VERIFY o confere (texelRaw), para pegar um retângulo pequeno demais.
+    bool reachKnown = false;
+    unsigned reachU0 = 0, reachU1 = 0, reachV0 = 0, reachV1 = 0;
 };
 
 struct Gs::Fragment {
@@ -327,6 +331,188 @@ void Gs::rasterize(const DrawEnv& e, const Vertex& v0, const Vertex& v1, const V
     }
 }
 
+namespace {
+
+// Retângulo (inclusivo) de texels do nível 0 que um desenho busca, já depois do modo de wrap.
+struct TexRect {
+    unsigned u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+};
+
+// Parâmetros de Gs::draw que o alcance exato usa (o DrawEnv é privado da classe).
+struct ReachParams {
+    unsigned type = 0, tw = 0, th = 0;
+    unsigned wms = 0, wmt = 0, minu = 0, maxu = 0, minv = 0, maxv = 0;
+    bool fst = false;
+    bool linear = false;            // algum filtro do desenho pode ser bilinear (MMAG ou MMIN)
+    unsigned fullU = 1, fullV = 1;  // alcance cheio (colunas, linhas): a volta quando não há como ser exato
+};
+
+bool smallFinite(double v) {
+    return std::isfinite(v) && std::fabs(v) < 1.0e6;
+}
+
+// Faixa de coordenadas inteiras [lo, hi] (antes do wrap) -> faixa de texels depois do
+// modo de wrap, como em texelRaw. Quando o modo não permite uma faixa contínua (REPEAT que
+// dá a volta, REGION_REPEAT com faixa longa, REGION_CLAMP inválido) devolve o alcance cheio.
+void wrapAxis(long long lo, long long hi, unsigned mode, unsigned size, unsigned mn, unsigned mx, unsigned full,
+              unsigned& outLo, unsigned& outHi) {
+    outLo = 0;
+    outHi = full - 1;
+    switch (mode) {
+        case 0: {  // REPEAT
+            if (hi - lo + 1 >= static_cast<long long>(size)) return;
+            const auto m = static_cast<long long>(size - 1);
+            const auto a = static_cast<unsigned>(lo & m), b = static_cast<unsigned>(hi & m);
+            if (a <= b) {
+                outLo = a;
+                outHi = b;
+            }
+            return;
+        }
+        case 1:  // CLAMP
+            outLo = static_cast<unsigned>(std::clamp(lo, 0ll, static_cast<long long>(size) - 1));
+            outHi = static_cast<unsigned>(std::clamp(hi, 0ll, static_cast<long long>(size) - 1));
+            return;
+        case 2:  // REGION_CLAMP (nível 0: MINU/MAXU sem deslocamento)
+            if (mn > mx) {  // região invertida: o clamp devolve MINU (c < MINU) ou MAXU
+                outLo = mx;
+                outHi = mn;
+                return;
+            }
+            outLo = static_cast<unsigned>(std::clamp(lo, static_cast<long long>(mn), static_cast<long long>(mx)));
+            outHi = static_cast<unsigned>(std::clamp(hi, static_cast<long long>(mn), static_cast<long long>(mx)));
+            return;
+        default: {  // REGION_REPEAT: (c & MSK) | FIX não é monotônico; faixas curtas, por enumeração
+            if (hi - lo + 1 > 256) return;
+            unsigned mi = ~0u, ma = 0;
+            for (long long c = lo; c <= hi; ++c) {
+                const auto r = static_cast<unsigned>((c & static_cast<long long>(mn)) | static_cast<long long>(mx));
+                mi = std::min(mi, r);
+                ma = std::max(ma, r);
+            }
+            outLo = mi;
+            outHi = ma;
+            return;
+        }
+    }
+}
+
+// Retângulo de texels do nível 0 que o primitivo realmente busca. Falso quando não há como
+// limitar com segurança (STQ com Q variável, valores fora da faixa, primitivo vazio): quem
+// chama fica com a textura inteira. Sprites repetem a conta de drawSprite/shadePixel (a
+// coluna e a linha extremas do retângulo cortado pelo SCISSOR; a interpolação é monótona),
+// então o resultado é exato; pontos, linhas e triângulos usam o mínimo e o máximo dos
+// vértices com 1 texel de margem (arredondamento da interpolação). O bilinear soma o
+// texel seguinte (taps iu e iu+1 depois do deslocamento de meio texel). Só vale para o
+// nível 0: os níveis de mipmap seguintes ficam com o alcance cheio.
+bool texReach0(const ReachParams& p, const DrawWindow& w, const Vertex& v0, const Vertex& v1, const Vertex& v2,
+               TexRect& out) {
+    const float fw = static_cast<float>(1u << p.tw), fh = static_cast<float>(1u << p.th);
+    float fuLo = 0, fuHi = 0, fvLo = 0, fvHi = 0;  // coordenadas em texels (floats exatos do sprite)
+    double duLo = 0, duHi = 0, dvLo = 0, dvHi = 0;
+    const bool sprite = p.type == 6;
+    if (sprite) {
+        const SpriteRect r = spriteRect(w, v0, v1);
+        if (r.empty()) return false;
+        const double spanX = v1.x - v0.x, spanY = v1.y - v0.y;
+        const float q = v1.q;
+        auto colAt = [&](int px) {
+            const double tx = spanX != 0 ? (px * 16.0 - v0.x) / spanX : 0.0;
+            if (p.fst) {
+                const double a = static_cast<double>(v0.u) / 16.0, b = static_cast<double>(v1.u) / 16.0;
+                return static_cast<float>(a + (b - a) * tx);
+            }
+            const double a = static_cast<double>(v0.s), b = static_cast<double>(v1.s);
+            const auto s = static_cast<float>(a + (b - a) * tx);
+            return s / q * fw;
+        };
+        auto rowAt = [&](int py) {
+            const double ty = spanY != 0 ? (py * 16.0 - v0.y) / spanY : 0.0;
+            if (p.fst) {
+                const double a = static_cast<double>(v0.v) / 16.0, b = static_cast<double>(v1.v) / 16.0;
+                return static_cast<float>(a + (b - a) * ty);
+            }
+            const double a = static_cast<double>(v0.t), b = static_cast<double>(v1.t);
+            const auto t = static_cast<float>(a + (b - a) * ty);
+            return t / q * fh;
+        };
+        const float ua = colAt(r.minX), ub = colAt(r.maxX), va = rowAt(r.minY), vb = rowAt(r.maxY);
+        fuLo = std::min(ua, ub);
+        fuHi = std::max(ua, ub);
+        fvLo = std::min(va, vb);
+        fvHi = std::max(va, vb);
+        if (!smallFinite(static_cast<double>(fuLo)) || !smallFinite(static_cast<double>(fuHi)) ||
+            !smallFinite(static_cast<double>(fvLo)) || !smallFinite(static_cast<double>(fvHi))) {
+            return false;
+        }
+    } else {
+        const Vertex* vs[3] = {&v0, &v1, &v2};
+        const unsigned n = p.type == 0 ? 1u : (p.type == 1 || p.type == 2) ? 2u : 3u;
+        duLo = dvLo = 1.0e30;
+        duHi = dvHi = -1.0e30;
+        for (unsigned i = 0; i < n; ++i) {
+            double u, v;
+            if (p.fst) {
+                u = static_cast<double>(vs[i]->u) / 16.0;
+                v = static_cast<double>(vs[i]->v) / 16.0;
+            } else {
+                // S/Q e T/Q só são limitados se o Q é o mesmo nos vértices (a interpolação
+                // de S/T fica entre os extremos); com Q variável a divisão por pixel não é.
+                const float q = vs[i]->q;
+                if (q != vs[0]->q || q == 0.0f || !std::isfinite(q)) return false;
+                u = static_cast<double>(vs[i]->s) / static_cast<double>(q) * static_cast<double>(fw);
+                v = static_cast<double>(vs[i]->t) / static_cast<double>(q) * static_cast<double>(fh);
+            }
+            if (!smallFinite(u) || !smallFinite(v)) return false;
+            duLo = std::min(duLo, u);
+            duHi = std::max(duHi, u);
+            dvLo = std::min(dvLo, v);
+            dvHi = std::max(dvHi, v);
+        }
+    }
+    long long ulo, uhi, vlo, vhi;
+    if (sprite) {
+        if (p.linear) {
+            ulo = static_cast<long long>(std::floor(fuLo - 0.5f));
+            uhi = static_cast<long long>(std::floor(fuHi - 0.5f)) + 1;
+            vlo = static_cast<long long>(std::floor(fvLo - 0.5f));
+            vhi = static_cast<long long>(std::floor(fvHi - 0.5f)) + 1;
+        } else {
+            ulo = static_cast<long long>(std::floor(fuLo));
+            uhi = static_cast<long long>(std::floor(fuHi));
+            vlo = static_cast<long long>(std::floor(fvLo));
+            vhi = static_cast<long long>(std::floor(fvHi));
+        }
+    } else {
+        const double off = p.linear ? 0.5 : 0.0;
+        ulo = static_cast<long long>(std::floor(duLo - off)) - 1;
+        uhi = static_cast<long long>(std::floor(duHi - off)) + (p.linear ? 2 : 1);
+        vlo = static_cast<long long>(std::floor(dvLo - off)) - 1;
+        vhi = static_cast<long long>(std::floor(dvHi - off)) + (p.linear ? 2 : 1);
+    }
+    wrapAxis(ulo, uhi, p.wms, 1u << p.tw, p.minu, p.maxu, p.fullU, out.u0, out.u1);
+    wrapAxis(vlo, vhi, p.wmt, 1u << p.th, p.minv, p.maxv, p.fullV, out.v0, out.v1);
+    out.u1 = std::min(out.u1, 2047u);
+    out.v1 = std::min(out.v1, 2047u);
+    return out.u0 <= out.u1 && out.v0 <= out.v1;
+}
+
+// Função pixel→endereço do FRAME/ZBUF e da textura: só formatos com a mesma função (CT32 e CT24,
+// Z32 e Z24, e cada um dos de 16 bits) leem o texel (u, v) no endereço do pixel (u, v).
+unsigned mapKey(std::uint32_t psm) {
+    switch (psm) {
+        case PSMCT32: case PSMCT24: return 1;
+        case PSMZ32: case PSMZ24: return 2;
+        case PSMCT16: return 3;
+        case PSMCT16S: return 4;
+        case PSMZ16: return 5;
+        case PSMZ16S: return 6;
+        default: return 0;
+    }
+}
+
+}  // namespace
+
 // Regra de ordem entre desenhos (gs_bands.h): um desenho só entra nas faixas
 // junto com os pendentes se não colide com eles na VRAM. Para isso o produtor
 // anota as páginas que o desenho escreve (FRAME, e ZBUF quando há escrita de Z)
@@ -393,6 +579,10 @@ void Gs::draw(std::uint32_t pc) {
     } else if (e.zte && e.ztst >= 2) {
         reads[nr++] = access(pageSet(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 1, e.zbp, e.fbw, e.zpsm);
     }
+    // Nível 0: o retângulo que o primitivo de fato busca (texReach0), quando conhecido; os
+    // demais níveis ficam com o alcance cheio. texIdx = posição do acesso do nível 0.
+    unsigned texIdx = ~0u;
+    TexRect texRect;
     if (e.tme) {
         for (unsigned l = 0; l <= e.mxl; ++l) {
             const unsigned wl = std::max(1u, (1u << e.tw) >> l), hl = std::max(1u, (1u << e.th) >> l);
@@ -400,12 +590,40 @@ void Gs::draw(std::uint32_t pc) {
             // tamanho do nível; REGION_CLAMP vai até MAX >> nível; REGION_REPEAT
             // é (c & MSK) | FIX, no máximo MSK | FIX. O endereço é cortado em 2047.
             auto reach = [l](unsigned mode, unsigned size, unsigned mn, unsigned mx) {
-                const unsigned r = mode == 2 ? (mx >> l) + 1 : mode == 3 ? (mn | mx) + 1 : size;
+                const unsigned r = mode == 2 ? (std::max(mn, mx) >> l) + 1 : mode == 3 ? (mn | mx) + 1 : size;
                 return std::min(std::max(r, 1u), 2048u);
             };
             const unsigned colsU = reach(e.wms, wl, e.minu, e.maxu);
             const unsigned rowsV = reach(e.wmt, hl, e.minv, e.maxv);
-            reads[nr++] = access(pageSet(e.tpsm, e.tbp[l], e.tbw[l], 0, rowsV - 1, 0, colsU - 1), false, 2,
+            TexRect r{0, colsU - 1, 0, rowsV - 1};
+            if (l == 0) {
+                ReachParams rp;
+                rp.type = e.type;
+                rp.tw = e.tw;
+                rp.th = e.th;
+                rp.wms = e.wms;
+                rp.wmt = e.wmt;
+                rp.minu = e.minu;
+                rp.maxu = e.maxu;
+                rp.minv = e.minv;
+                rp.maxv = e.maxv;
+                rp.fst = e.fst;
+                rp.linear = e.mmag || e.mmin == 1 || e.mmin >= 4;
+                rp.fullU = colsU;
+                rp.fullV = rowsV;
+                TexRect x;
+                if (texReach0(rp, w, v0, v1, v2, x)) {
+                    r = x;
+                    texIdx = nr;
+                    texRect = x;
+                    e.reachKnown = true;
+                    e.reachU0 = x.u0;
+                    e.reachU1 = x.u1;
+                    e.reachV0 = x.v0;
+                    e.reachV1 = x.v1;
+                }
+            }
+            reads[nr++] = access(pageSet(e.tpsm, e.tbp[l], e.tbw[l], r.v0, r.v1, r.u0, r.u1), false, 2,
                                  e.tbp[l], e.tbw[l], e.tpsm);
         }
     }
@@ -422,10 +640,27 @@ void Gs::draw(std::uint32_t pc) {
     for (unsigned i = 0; i < nw; ++i) {
         selfWrap = selfWrap || writes[i].pages.full();
     }
-    bool selfTexture = false, selfFrameZ = false;
+    // Leitura e escrita no mesmo buffer (mesma base, largura e função pixel→endereço, com o
+    // endereço injetivo: sem volta de largura nem do fim da VRAM) comparam-se em pixels: o texel
+    // (u, v) é o pixel (u, v). Retângulos disjuntos não se tocam, mesmo na mesma página.
+    auto reachDisjoint = [&](const VramAccess& rd, const VramAccess& wr) {
+        if (texIdx == ~0u || e.fbw == 0 || rd.bp != wr.bp || rd.bw != wr.bw) return false;
+        const unsigned key = mapKey(e.tpsm);
+        if (key == 0 || key != mapKey(wr.psm)) return false;
+        if (texRect.u1 >= wr.bw * 64) return false;
+        const unsigned pageH = key >= 3 ? 64u : 32u;
+        const std::uint64_t tiles = std::max(texRect.v1, rowHi) / pageH + 1;
+        if (std::uint64_t{wr.bp} + tiles * wr.bw * 32 > std::uint64_t{PageSet::kPages} * 32) return false;
+        return texRect.u1 < colLo || texRect.u0 > colHi || texRect.v1 < rowLo || texRect.v0 > rowHi;
+    };
+    bool selfTexture = false, selfFrameZ = false, reachSpared = false;
     for (unsigned i = 0; i < nw; ++i) {
         for (unsigned j = 0; j < nr; ++j) {
             if (!clashes(reads[j], writes[i])) continue;
+            if (j == texIdx && reachDisjoint(reads[j], writes[i])) {
+                reachSpared = true;  // as páginas se cruzam, mas os texels lidos não são os escritos
+                continue;
+            }
             (reads[j].surface == 2 ? selfTexture : selfFrameZ) = true;
         }
         for (unsigned j = i + 1; j < nw; ++j) selfFrameZ = selfFrameZ || clashes(writes[i], writes[j]);
@@ -448,6 +683,11 @@ void Gs::draw(std::uint32_t pc) {
     // com as gerações que a textura tinha quando o desenho a fixou. Desenhos sozinhos
     // (selfX) também escrevem; só não usam cache.
     const bool anySelf = selfWrap || selfTexture || selfFrameZ;
+    // Desenho que só roda nas faixas porque o alcance exato da textura não cruza o que ele
+    // escreve: as páginas se cruzam, e o preenchimento do cache por bloco (que pode pegar pixels
+    // que outra faixa está escrevendo) não é seguro. Fica sem cache: a leitura vai direto à
+    // VRAM, nos texels do retângulo, que ninguém escreve neste desenho.
+    const bool noCache = anySelf || reachSpared;
     // HOST→LOCAL em modo fila com palavras ainda no buffer do produtor: se este desenho toca
     // o destino, elas entram na fila antes dele (ele as vê, e os desenhos seguintes também;
     // uma escrita dele não é sobrescrita por palavras anteriores a ele). Tem de vir antes
@@ -456,7 +696,7 @@ void Gs::draw(std::uint32_t pc) {
     flushHostQueueIfTouches(reads, nr);
     if (e.tme && (HostProfile::enabled() || texSimForced_)) {
         simTexture(e, selfWrap      ? static_cast<int>(TexSimReport::OffWrap)
-                      : selfTexture ? static_cast<int>(TexSimReport::OffTexture)
+                      : selfTexture || reachSpared ? static_cast<int>(TexSimReport::OffTexture)
                       : selfFrameZ  ? static_cast<int>(TexSimReport::OffFrameZ)
                                     : -1);
     }
@@ -464,7 +704,7 @@ void Gs::draw(std::uint32_t pc) {
         // Antes das escritas deste desenho: a versão de cada nível é a que valia quando
         // ele foi enfileirado. Desenhos sozinhos ficam sem cache (nível nulo).
         e.drawId = drawCount_;
-        if (anySelf) {
+        if (noCache) {
             ++texCacheOff_;
         } else {
             ++texCacheDraws_;
@@ -473,7 +713,7 @@ void Gs::draw(std::uint32_t pc) {
     }
     bumpPages(writes[0].pages, WkFrame);
     if (nw > 1) bumpPages(writes[1].pages, WkZbuf);
-    if (e.tme && !anySelf && hostOpenValid_) {
+    if (e.tme && !noCache && hostOpenValid_) {
         // A versão da textura fica fixada por este desenho; se a transferência HOST→LOCAL
         // aberta ainda vai escrever nela, a próxima palavra invalida a versão. O teste
         // usa o alcance de leitura do desenho (reads[]), que com REGION_CLAMP/REGION_REPEAT
@@ -487,6 +727,7 @@ void Gs::draw(std::uint32_t pc) {
             }
         }
     }
+    if (reachSpared && !anySelf) ++bandStats_.reachSaved;
     if (anySelf) {
         // Um único motivo por desenho, na ordem de prioridade abaixo.
         if (selfWrap) {
@@ -646,6 +887,16 @@ std::uint32_t Gs::texelRaw(const DrawEnv& e, unsigned level, int u, int v) const
     u = wrap(u, w, e.wms, e.minu, e.maxu, level);
     v = wrap(v, h, e.wmt, e.minv, e.maxv, level);
     const auto x = static_cast<std::uint32_t>(u) & 2047, y = static_cast<std::uint32_t>(v) & 2047;
+    if (texVerify_ && level == 0 && e.reachKnown && (x < e.reachU0 || x > e.reachU1 || y < e.reachV0 || y > e.reachV1)) {
+        verifyMismatches_.fetch_add(1, std::memory_order_relaxed);
+        if (verifyAbort_) {
+            std::fprintf(stderr,
+                         "[texcache VERIFY] desenho %llu leu o texel (%u, %u) fora do alcance declarado [%u..%u]x[%u..%u]\n",
+                         static_cast<unsigned long long>(e.drawId), x, y, e.reachU0, e.reachU1, e.reachV0, e.reachV1);
+            std::fflush(stderr);
+            std::abort();
+        }
+    }
     if (const TexLevel* t = e.tex[level].get()) {
         std::uint32_t raw = 0;
         const TexLevel::Got got = t->get(vram_, x, y, raw);

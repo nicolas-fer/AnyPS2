@@ -152,7 +152,12 @@ bool accessesOverlapBlocks(const VramAccess& w, const VramAccess& r);
 //    do outro lado, vira barreira antes da escrita);
 //  * a leitura declarada de um desenho (reads[] de Gs::draw, por páginas) cubra toda página
 //    que tenha um texel que ele busca: o preenchimento é por bloco, e um bloco inteiro cabe
-//    numa página lógica, então preencher um bloco só lê páginas que o desenho declarou;
+//    numa página lógica, então preencher um bloco só lê páginas que o desenho declarou.
+//    O nível 0 declara o retângulo exato que o primitivo amostra (texReach0 em gs_draw.cpp), menor
+//    que a grade w×h da versão: fora dele nada é buscado (o VERIFY confere cada texel contra o
+//    retângulo) e, se fosse, a leitura iria direto à VRAM (TexLevel::Got::Outside). O desenho que
+//    lê e escreve páginas em comum, mas em pixels disjuntos do mesmo buffer, roda nas faixas SEM
+//    cache (Gs::draw, reachSpared): o preenchimento por bloco leria pixels que outra faixa escreve;
 //  * as escritas fora dos desenhos tenham ordem com as faixas: HOST→LOCAL em modo direto só
 //    é escrita pelo produtor se o destino não tem acesso não concluído e, com a transferência
 //    aberta, a palavra seguinte espera (hostDrain_) os desenhos que a tocam; com acesso não

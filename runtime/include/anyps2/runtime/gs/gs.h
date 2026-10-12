@@ -221,6 +221,9 @@ struct BandStats {
     std::uint64_t bandDraws = 0;     // desenhos enfileirados nas faixas
     std::uint64_t lanesTouched = 0;  // soma de faixas tocadas por esses desenhos
     std::uint64_t self[SelfCount] = {};
+    // Desenhos que iriam sozinhos por textura (páginas que se cruzam) e deixaram de ir porque o
+    // alcance exato de leitura não cruza o que escrevem (rodam nas faixas, sem cache de texels).
+    std::uint64_t reachSaved = 0;
     std::uint64_t conflict[ConflictCount] = {};
     std::uint64_t submit[SubmitCount] = {};
     std::uint64_t clutDirect = 0;   // cargas de CLUT feitas no produtor, sem barreira

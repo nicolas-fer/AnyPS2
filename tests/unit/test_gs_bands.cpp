@@ -2497,3 +2497,351 @@ TEST_CASE(gs_bands, clut_dep_does_not_hang) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Alcance exato da leitura de textura (texReach0 em gs_draw.cpp): o desenho que lê uma
+// parte do próprio FRAME/ZBUF e escreve em outra não vai mais sozinho; o que se cruza,
+// vai. A imagem tem de ser a do caminho síncrono em qualquer caso.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::uint32_t floatBits(float f) {
+    std::uint32_t u;
+    std::memcpy(&u, &f, sizeof u);
+    return u;
+}
+
+// Vértice STQ (FST=0): S/T no registrador ST, Q no RGBAQ.
+void stVertex(Gs& g, unsigned x, unsigned y, float s, float t, float q) {
+    g.writeRegister(RGBAQ, 0xFFull | (0xFFull << 8) | (0xFFull << 16) | (0x80ull << 24) | (std::uint64_t{floatBits(q)} << 32), 0);
+    g.writeRegister(ST, std::uint64_t{floatBits(s)} | (std::uint64_t{floatBits(t)} << 32), 0);
+    g.writeRegister(XYZ2, xyzPx(x, y, 0), 0);
+}
+
+// UV cru (1/16 de texel).
+std::uint64_t uvRaw(unsigned u16, unsigned v16) {
+    return std::uint64_t{u16} | (std::uint64_t{v16} << 16);
+}
+
+// Sprite com UV em texels (FST=1): dst [x0,x1)×[y0,y1), textura de (u0,v0) a (u1,v1).
+void uvSprite(Gs& g, unsigned x0, unsigned y0, unsigned x1, unsigned y1, unsigned u0, unsigned v0, unsigned u1,
+              unsigned v1, std::uint64_t z = 0) {
+    g.writeRegister(PRIM, prim(6, false, true, false, true), 0);
+    vertex(g, x0, y0, rgbaq(255, 255, 255, 0x80), z, uv(u0, v0));
+    vertex(g, x1, y1, rgbaq(255, 255, 255, 0x80), z, uv(u1, v1));
+}
+
+void stSprite(Gs& g, unsigned x0, unsigned y0, unsigned x1, unsigned y1, float s0, float t0, float s1, float t1) {
+    g.writeRegister(PRIM, prim(6, false, true, false, false), 0);
+    stVertex(g, x0, y0, s0, t0, 1.0f);
+    stVertex(g, x1, y1, s1, t1, 1.0f);
+}
+
+enum ReachScenario : unsigned {
+    RsSamePage,     // lê a metade de uma página e escreve a outra (nos dois sentidos)
+    RsCross,        // lê e escreve áreas que se cruzam
+    RsBilinOk,      // bilinear que fica a 1 texel da área escrita
+    RsBilinEdge,    // bilinear que alcança o primeiro texel escrito
+    RsRepeatWrap,   // REPEAT que dá a volta numa textura de 32x32 (alcance: a textura inteira)
+    RsRepeatHit,    // REPEAT que dá a volta e cai na área escrita
+    RsRegionClamp,  // REGION_CLAMP limita a leitura a 32 colunas
+    RsRegionHit,    // REGION_CLAMP com a região dentro da área escrita
+    RsStq,          // STQ com Q constante: sprite e triângulo
+    RsStqVarQ,      // STQ com Q variável: textura inteira
+    RsMip,          // mipmap (níveis seguintes fora do FRAME)
+    RsMipOverlap,   // mipmap com um nível dentro do FRAME
+    RsZbuf,         // o ZBUF é a textura; lê uma parte e escreve a outra
+    RsZbufHit,      // o ZBUF é a textura e se cruzam
+    RsCt16,         // CT16 no mesmo buffer
+    RsTriFst,       // triângulos com UV
+    RsCount
+};
+
+enum ReachExpect { ExNoSelfSaved, ExSelf };
+
+ReachExpect expectOf(unsigned sc) {
+    switch (sc) {
+        case RsCross: case RsBilinEdge: case RsRepeatHit: case RsRegionHit: case RsStqVarQ: case RsMipOverlap:
+        case RsZbufHit:
+            return ExSelf;
+        default:
+            return ExNoSelfSaved;
+    }
+}
+
+constexpr std::uint32_t kReachZ = 64 * 32;  // ZBP 64 (blocos 2048)
+
+std::unique_ptr<Gs> makeReachGs(bool threaded, unsigned lanes, bool texCache) {
+    setEnv("ANYPS2_GS_THREAD", threaded ? "1" : "0");
+    setEnv("ANYPS2_GS_THREADS", std::to_string(lanes).c_str());
+    setEnv("ANYPS2_GS_TEXCACHE", texCache ? "1" : "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", texCache ? "1" : "");
+    auto g = std::make_unique<Gs>(nullptr);
+    setEnv("ANYPS2_GS_TEXCACHE", "");
+    setEnv("ANYPS2_GS_TEXCACHE_VERIFY", "");
+    g->setTexVerifyAbort(false);
+    g->writeRegister(SCISSOR_1, scissorReg(0, 127, 0, 127), 0);
+    g->writeRegister(XYOFFSET_1, 0, 0);
+    g->writeRegister(PRMODECONT, 1, 0);
+    g->writeRegister(COLCLAMP, 1, 0);
+    g->writeRegister(TEST_1, 0, 0);
+    g->writeRegister(ZBUF_1, 1ull << 32, 0);
+    return g;
+}
+
+struct ReachRun {
+    Render img;
+    BandStats stats;
+    std::uint64_t mismatches = 0;
+};
+
+ReachRun finishReach(Gs& g) {
+    ReachRun out;
+    out.stats = g.bandStats();
+    out.img = capture(g);
+    out.mismatches = g.texVerifyMismatches();
+    return out;
+}
+
+void reachPrefill(Gs& g, std::uint64_t seed) {
+    Lcg r{seed};
+    auto words = [&r](unsigned n) {
+        std::vector<std::uint64_t> v;
+        for (unsigned i = 0; i < n; ++i) v.push_back(r.word());
+        return v;
+    };
+    hostToLocal(g, 0, 2, PSMCT32, 0, 0, 128, 128, words(128 * 128 / 2));
+    hostToLocal(g, 0, 2, PSMCT16, 0, 0, 128, 128, words(128 * 128 / 4));
+    hostToLocal(g, 0, 2, PSMCT32, 0, 0, 128, 128, words(128 * 128 / 2));  // de novo: CT32 por último
+    hostToLocal(g, kReachZ, 2, PSMCT32, 0, 0, 128, 128, words(128 * 128 / 2));
+    hostToLocal(g, 1024, 1, PSMCT32, 0, 0, 64, 64, words(64 * 64 / 2));
+    hostToLocal(g, 1100, 1, PSMCT32, 0, 0, 32, 32, words(32 * 32 / 2));
+}
+
+constexpr unsigned kReachIters = 12;
+
+// Os desenhos de cada cenário. Frame: FBP 0, 128x128. Metades de 32 px na mesma página
+// (as páginas de 32 bits têm 64x32 px; as de 16 bits, 64x64).
+void reachDraws(Gs& g, unsigned sc) {
+    g.writeRegister(FRAME_1, frameReg(0, 2, sc == RsCt16 ? PSMCT16 : PSMCT32), 0);
+    const std::uint64_t clamp = 1 | (1ull << 2);  // CLAMP/CLAMP
+    g.writeRegister(CLAMP_1, clamp, 0);
+    g.writeRegister(TEX1_1, 0, 0);
+    switch (sc) {
+        case RsSamePage: case RsCt16:
+            g.writeRegister(TEX0_1, tex0(0, 2, sc == RsCt16 ? PSMCT16 : PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (k & 1) uvSprite(g, 0, 0, 32, 64, 32, 0, 64, 64);
+                else uvSprite(g, 32, 0, 64, 64, 0, 0, 32, 64);
+            }
+            break;
+        case RsCross:
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) uvSprite(g, 0, 0, 64, 64, 16 + k, 0, 80 + k, 64);
+            break;
+        case RsBilinOk: case RsBilinEdge: {
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            g.writeRegister(TEX1_1, 1ull << 5, 0);  // MMAG linear
+            const unsigned len = sc == RsBilinOk ? 30 : 33;
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (k & 1) uvSprite(g, 0, 0, 32, 64, 34, 0, 34 + len, 64);
+                else uvSprite(g, 32, 0, 64, 64, 0, 0, len, 64);
+            }
+            break;
+        }
+        case RsRepeatWrap: case RsRepeatHit:
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 5, 5), 0);
+            g.writeRegister(CLAMP_1, 0, 0);  // REPEAT
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (sc == RsRepeatWrap) uvSprite(g, 32, 0, 64, 32, 20, 4, 52, 36);
+                else uvSprite(g, 0, 0, 40, 32, 20, 4, 52, 36);
+            }
+            break;
+        case RsRegionClamp: case RsRegionHit: {
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            const std::uint64_t maxu = 31;
+            g.writeRegister(CLAMP_1, 2 | (1ull << 2) | (0ull << 4) | (maxu << 14), 0);  // REGION_CLAMP u, CLAMP v
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (sc == RsRegionClamp) uvSprite(g, 32, 0, 128, 128, 0, 0, 200, 128);
+                else uvSprite(g, 20, 0, 80, 128, 0, 0, 200, 128);
+            }
+            break;
+        }
+        case RsStq:
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                stSprite(g, 32, 0, 64, 64, 0.0f, 0.0f, 0.25f, 0.5f);
+                g.writeRegister(PRIM, prim(3, false, true, false, false), 0);
+                stVertex(g, 40, 70, 0.0f, 0.0f, 1.0f);
+                stVertex(g, 120, 72, 0.2f, 0.0f, 1.0f);
+                stVertex(g, 80, 125, 0.1f, 0.4f, 1.0f);
+            }
+            break;
+        case RsStqVarQ:
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                g.writeRegister(PRIM, prim(3, false, true, false, false), 0);
+                stVertex(g, 40, 70, 0.0f, 0.0f, 1.0f);
+                stVertex(g, 120, 72, 0.2f, 0.0f, 2.0f);
+                stVertex(g, 80, 125, 0.1f, 0.4f, 1.0f);
+            }
+            break;
+        case RsMip: case RsMipOverlap: {
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            // MXL = 2, LCM = 1, MMAG linear, MMIN linear-mipmap-linear, K = 0,75.
+            g.writeRegister(TEX1_1, 1ull | (2ull << 2) | (1ull << 5) | (5ull << 6) | (12ull << 32), 0);
+            const std::uint64_t l1 = sc == RsMip ? 1024 : 64;  // 64: páginas 2 e 3, as que o desenho escreve
+            g.writeRegister(MIPTBP1_1, l1 | (1ull << 14) | (std::uint64_t{1100} << 20) | (1ull << 34), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (k & 1) uvSprite(g, 0, 0, 32, 64, 34, 0, 64, 64);
+                else uvSprite(g, 32, 0, 64, 64, 0, 0, 30, 64);
+            }
+            break;
+        }
+        case RsZbuf: case RsZbufHit:
+            g.writeRegister(ZBUF_1, 64, 0);  // ZBP 64, Z32, com escrita
+            g.writeRegister(TEST_1, (1ull << 16) | (1ull << 17), 0);  // ZTE, ZTST = ALWAYS
+            g.writeRegister(TEX0_1, tex0(kReachZ, 2, PSMZ32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                if (sc == RsZbuf) uvSprite(g, 32, 0, 64, 64, 0, 0, 32, 64, 100 + k);
+                else uvSprite(g, 0, 0, 64, 64, 16, 0, 80, 64, 100 + k);
+            }
+            break;
+        case RsTriFst:
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) {
+                g.writeRegister(PRIM, prim(3, true, true, false, true), 0);
+                vertex(g, 40, 10 + k, rgbaq(255, 255, 255, 0x80), 0, uv(0, 0));
+                vertex(g, 120, 12, rgbaq(255, 255, 255, 0x80), 0, uv(20, 0));
+                vertex(g, 80, 100, rgbaq(255, 255, 255, 0x80), 0, uv(10, 20));
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+ReachRun runReach(unsigned sc, bool threaded, unsigned lanes, bool texCache) {
+    auto g = makeReachGs(threaded, lanes, texCache);
+    reachPrefill(*g, 0x5EED + sc);
+    reachDraws(*g, sc);
+    return finishReach(*g);
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, reach_scenarios_match_sync_and_classify_self) {
+    for (unsigned sc = 0; sc < RsCount; ++sc) {
+        const ReachRun ref = runReach(sc, false, 1, false);
+        bool any = false;
+        for (std::uint8_t b : ref.img.vram) any = any || b != 0;
+        CHECK(any);
+        for (unsigned rep = 0; rep < 3; ++rep) {
+            for (const unsigned lanes : {1u, 2u, 4u}) {
+                const ReachRun got = runReach(sc, true, lanes, false);
+                CHECK(got.img.vram == ref.img.vram);
+                CHECK_EQ(got.img.shaded, got.img.covered);
+                if (lanes < 2) continue;  // com uma faixa só todo desenho vai "nas faixas"
+                if (expectOf(sc) == ExSelf) {
+                    CHECK(got.stats.self[BandStats::SelfTexture] > 0u);
+                } else {
+                    CHECK_EQ(got.stats.self[BandStats::SelfTexture], 0u);
+                    CHECK_EQ(got.stats.self[BandStats::SelfFrameZ], 0u);
+                    CHECK(got.stats.reachSaved > 0u);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE(gs_bands, reach_scenarios_with_texture_cache_verify) {
+    for (unsigned sc = 0; sc < RsCount; ++sc) {
+        const ReachRun ref = runReach(sc, false, 1, false);
+        for (unsigned rep = 0; rep < 2; ++rep) {
+            for (const unsigned lanes : {1u, 2u, 4u}) {
+                const ReachRun got = runReach(sc, true, lanes, true);
+                CHECK(got.img.vram == ref.img.vram);
+                CHECK_EQ(got.mismatches, 0u);
+            }
+        }
+    }
+}
+
+namespace {
+
+// Desenhos aleatórios que lêem o próprio buffer (mesma base, mesma largura e formato quase
+// sempre), com todos os modos de wrap, filtros, FST/STQ e todos os primitivos: o alcance
+// exato nunca pode declarar menos do que o desenho lê (o VERIFY confere cada texel).
+ReachRun renderReachRandom(bool threaded, unsigned lanes, bool texCache, std::uint64_t seed, int draws) {
+    auto gp = makeReachGs(threaded, lanes, texCache);
+    Gs& g = *gp;
+    reachPrefill(g, seed);
+    Lcg r{seed};
+    static constexpr unsigned kVerts[7] = {1, 2, 2, 3, 3, 3, 2};
+    for (int n = 0; n < draws; ++n) {
+        const bool ct16 = r.next(4) == 0;
+        const std::uint32_t psm = ct16 ? PSMCT16 : PSMCT32;
+        g.writeRegister(FRAME_1, frameReg(0, 2, psm), 0);
+        const unsigned x0 = r.next(128), y0 = r.next(128);
+        g.writeRegister(SCISSOR_1, scissorReg(x0, x0 + r.next(128 - x0), y0, y0 + r.next(128 - y0)), 0);
+        const unsigned type = r.next(7);
+        const bool fst = r.next(10) < 7;
+        const bool abe = r.next(2) == 1;
+        g.writeRegister(PRIM, prim(type, r.next(2) == 1, true, abe, fst), 0);
+        // Textura no próprio buffer quase sempre; às vezes noutra base/largura/formato.
+        const bool same = r.next(8) != 0;
+        const std::uint64_t tbp = same ? 0 : 8 * r.next(5);
+        const std::uint64_t tbw = same ? 2 : 1 + r.next(3);
+        const std::uint32_t tpsm = same ? psm : (r.next(2) ? PSMCT32 : PSMCT16);
+        const unsigned tw = 5 + r.next(3), th = 5 + r.next(3);
+        g.writeRegister(TEX0_1, tex0(tbp, tbw, tpsm, tw, th), 0);
+        const unsigned wms = r.next(4), wmt = r.next(4);
+        const std::uint64_t minu = r.next(1u << 7), maxu = r.next(1u << 7), minv = r.next(1u << 7), maxv = r.next(1u << 7);
+        g.writeRegister(CLAMP_1, wms | (std::uint64_t{wmt} << 2) | (minu << 4) | (maxu << 14) | (minv << 24) | (maxv << 34), 0);
+        const std::uint64_t mmag = r.next(2), mmin = r.next(2);  // nearest ou linear, sem mipmap
+        g.writeRegister(TEX1_1, (mmag << 5) | (mmin << 6), 0);
+        const bool constQ = r.next(10) != 0;
+        const float q = 0.5f + static_cast<float>(r.next(8)) / 4.0f;
+        for (unsigned k = 0; k < kVerts[type]; ++k) {
+            const unsigned vx = r.next(128), vy = r.next(128);
+            if (fst) {
+                vertex(g, vx, vy, rgbaq(r.next(256), r.next(256), r.next(256), 0x80 + r.next(128)), 0,
+                       uvRaw(r.next(140 * 16), r.next(140 * 16)));
+            } else {
+                const float s = static_cast<float>(r.next(1000)) / 800.0f, t = static_cast<float>(r.next(1000)) / 800.0f;
+                stVertex(g, vx, vy, s * q, t * q, constQ ? q : q * (1.0f + static_cast<float>(k) / 4.0f));
+            }
+        }
+    }
+    return finishReach(g);
+}
+
+}  // namespace
+
+TEST_CASE(gs_bands, reach_random_draws_match_sync) {
+    std::uint64_t saved = 0;
+    for (std::uint64_t seed = 1; seed <= 10; ++seed) {
+        const ReachRun ref = renderReachRandom(false, 1, false, seed, 150);
+        for (unsigned rep = 0; rep < 2; ++rep) {
+            for (const unsigned lanes : {2u, 4u}) {
+                const ReachRun got = renderReachRandom(true, lanes, false, seed, 150);
+                CHECK(got.img.vram == ref.img.vram);
+                CHECK_EQ(got.img.shaded, got.img.covered);
+                saved += got.stats.reachSaved;
+            }
+        }
+    }
+    CHECK(saved > 0u);
+}
+
+TEST_CASE(gs_bands, reach_random_draws_with_texture_cache_verify) {
+    for (std::uint64_t seed = 1; seed <= 10; ++seed) {
+        const ReachRun ref = renderReachRandom(false, 1, false, seed, 150);
+        for (const unsigned lanes : {1u, 2u, 4u}) {
+            const ReachRun got = renderReachRandom(true, lanes, true, seed, 150);
+            CHECK(got.img.vram == ref.img.vram);
+            CHECK_EQ(got.mismatches, 0u);  // inclui a conferência do alcance declarado
+        }
+    }
+}

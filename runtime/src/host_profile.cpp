@@ -274,8 +274,10 @@ std::string formatBands(const BandStats& cur, const BandStats& prev, double per,
                   draws ? static_cast<double>(diff(cur.lanesTouched, prev.lanesTouched)) / static_cast<double>(draws)
                         : 0.0);
     s += buf;
-    std::snprintf(buf, sizeof buf, " sozinhos: volta %.1f, textura no FRAME/ZBUF %.1f, FRAME×ZBUF %.1f;",
-                  d(cur.self[0], prev.self[0]), d(cur.self[1], prev.self[1]), d(cur.self[2], prev.self[2]));
+    std::snprintf(buf, sizeof buf, " sozinhos: volta %.1f, textura no FRAME/ZBUF %.1f, FRAME×ZBUF %.1f"
+                  " (poupados pelo alcance exato da textura %.1f);",
+                  d(cur.self[0], prev.self[0]), d(cur.self[1], prev.self[1]), d(cur.self[2], prev.self[2]),
+                  d(cur.reachSaved, prev.reachSaved));
     s += buf;
     std::snprintf(buf, sizeof buf, " barreiras de conflito: fila cheia %.1f, escrita %.1f, textura %.1f;",
                   d(cur.conflict[0], prev.conflict[0]), d(cur.conflict[1], prev.conflict[1]),
