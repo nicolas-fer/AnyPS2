@@ -281,7 +281,8 @@ int main(int argc, char** argv) {
     // Programas de fluxo (fatia 2 do plano do VU1 enxuto): o gerador do código recompilado trata cada
     // contexto de desvio e de bit E por um caminho estático, e o sorteio acima quase não passa por
     // eles (delay slot sempre normal, programas de uma página, sem bit E fora do fim). Estes cobrem,
-    // com a mesma estrutura de programa (termina em par E + delay slot), alvos nas fronteiras de 64 pares,
+    // com a mesma estrutura de programa (termina em par E + delay slot), alvos nas fronteiras de trecho (64 e 128
+    // são fronteiras com trechos de 64, 32, 16 ou 8 pares; com 8, as outras também são cruzadas),
     // desvio no delay slot, bit E no desvio e no delay slot, JR entre trechos e laços infinitos. Entram na
     // mesma imagem, depois dos sorteados, e usam o gerador de números depois deles (os programas
     // sorteados não mudam). Ficam numa tabela à parte (kFuzzVuHand).

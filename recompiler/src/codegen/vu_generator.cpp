@@ -67,7 +67,12 @@ std::string wordsSymbol(const std::string& table, std::size_t i) {
 // função com um rótulo por par; o bloco passa de um trecho a outro por uma tabela.
 // Funções de tamanho limitado mantêm o tempo de compilação linear no tamanho do
 // microprograma (uma função única com milhares de pares leva minutos no GCC).
-constexpr std::uint32_t kChunkPairs = 64;
+// O tamanho também decide a qualidade do código no MSVC: com trechos grandes ele para de expandir inline
+// as funções pequenas do núcleo (ps2f::in, F, o construtor do UpperResult...) e mantém menos coisa em
+// registrador. No replay do GT4 (MSVC, ns/par): 256 pares 25,2, 64 pares 19,9, 32 pares 18,7, 16 pares 18,2,
+// 8 pares 16,2, 4 pares 16,4, 2 pares 16,9; a compilação do vu_000.cpp cai de ~70 s (64) para ~15 s (8).
+// Os trechos curtos custam um retorno ao laço do bloco por saída (o fluxo estático grava o cursor completo).
+constexpr std::uint32_t kChunkPairs = 8;
 
 // Fluxo estático dentro do trecho. O cursor (VuCursor) e o contador de pares
 // não passam pelo objeto a cada par: o que o gerador sabe em tempo de

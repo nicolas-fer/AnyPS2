@@ -299,7 +299,8 @@ Limitações e riscos:
   microcódigo é localizado no ELF — pacotes VIF `MPG` montados em tempo de
   compilação (endereço de carga conhecido) e blocos "crus" que o programa
   envia com um MPG montado em tempo de execução (como o ps2sdk faz) — e cada
-  bloco vira C++: trechos de até 64 pares com um rótulo por par e
+  bloco vira C++: trechos de até 8 pares (no MSVC os trechos curtos geram código
+  bem melhor que os de 64: ver `kChunkPairs`) com um rótulo por par e
   fall-through entre pares consecutivos; o fluxo é estático (o delay slot de
   B/BAL/IBxx/JR e o do bit E são emitidos de novo logo depois do par que os cria,
   com o destino conhecido; o cursor e o contador de pares são locais ao trecho e
