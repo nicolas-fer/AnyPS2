@@ -2555,13 +2555,17 @@ enum ReachScenario : unsigned {
     RsZbufHit,      // o ZBUF é a textura e se cruzam
     RsCt16,         // CT16 no mesmo buffer
     RsTriFst,       // triângulos com UV
+    RsMaskedFrame,  // FBMSK cobre tudo: o FRAME não é escrito; lê a própria área e escreve só o Z
+    RsMaskedDate,   // o mesmo com DATE (o alfa de destino ainda é lido)
     RsCount
 };
 
-enum ReachExpect { ExNoSelfSaved, ExSelf };
+enum ReachExpect { ExNoSelfSaved, ExSelf, ExNoSelf };
 
 ReachExpect expectOf(unsigned sc) {
     switch (sc) {
+        case RsMaskedFrame: case RsMaskedDate:
+            return ExNoSelf;
         case RsCross: case RsBilinEdge: case RsRepeatHit: case RsRegionHit: case RsStqVarQ: case RsMipOverlap:
         case RsZbufHit:
             return ExSelf;
@@ -2708,6 +2712,14 @@ void reachDraws(Gs& g, unsigned sc) {
                 else uvSprite(g, 0, 0, 64, 64, 16, 0, 80, 64, 100 + k);
             }
             break;
+        case RsMaskedFrame: case RsMaskedDate:
+            // Como o efeito do GT4: FRAME 0xF0 com FBMSK = 0xFFFFFFFF, textura no próprio FRAME e Z escrito.
+            g.writeRegister(FRAME_1, frameReg(0, 2, PSMCT32) | (0xFFFFFFFFull << 32), 0);
+            g.writeRegister(ZBUF_1, 64, 0);  // ZBP 64, Z32, com escrita
+            g.writeRegister(TEST_1, (1ull << 16) | (1ull << 17) | (sc == RsMaskedDate ? (1ull << 14) : 0), 0);
+            g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
+            for (unsigned k = 0; k < kReachIters; ++k) uvSprite(g, 0, 0, 64, 64, 8 + k, 0, 72 + k, 64, 100 + k);
+            break;
         case RsTriFst:
             g.writeRegister(TEX0_1, tex0(0, 2, PSMCT32, 7, 7), 0);
             for (unsigned k = 0; k < kReachIters; ++k) {
@@ -2745,6 +2757,9 @@ TEST_CASE(gs_bands, reach_scenarios_match_sync_and_classify_self) {
                 if (lanes < 2) continue;  // com uma faixa só todo desenho vai "nas faixas"
                 if (expectOf(sc) == ExSelf) {
                     CHECK(got.stats.self[BandStats::SelfTexture] > 0u);
+                } else if (expectOf(sc) == ExNoSelf) {
+                    CHECK_EQ(got.stats.self[BandStats::SelfTexture], 0u);
+                    CHECK_EQ(got.stats.self[BandStats::SelfFrameZ], 0u);
                 } else {
                     CHECK_EQ(got.stats.self[BandStats::SelfTexture], 0u);
                     CHECK_EQ(got.stats.self[BandStats::SelfFrameZ], 0u);

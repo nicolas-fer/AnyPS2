@@ -146,6 +146,9 @@ struct Gs::DrawEnv {
     bool owns(int y) const { return rowInLane(lane, lanes, y); }
     // Frame/Z
     std::uint32_t fbp = 0, fbw = 0, fpsm = 0, fbmsk = 0;
+    // FBMSK cobre todos os bits do formato: o FRAME não muda (o valor escrito seria o lido).
+    // O desenho não o escreve nem o lê (salvo DATE, que lê o alfa de destino).
+    bool fbNone = false;
     std::uint32_t zbp = 0, zpsm = 0;
     bool zmsk = false;
     int scax0 = 0, scax1 = 0, scay0 = 0, scay1 = 0;
@@ -215,6 +218,13 @@ void Gs::setupEnv(DrawEnv& e, std::uint32_t pc) {
     e.fbw = static_cast<std::uint32_t>(bits(k.frame, 16, 6));
     e.fpsm = static_cast<std::uint32_t>(bits(k.frame, 24, 6));
     e.fbmsk = static_cast<std::uint32_t>(k.frame >> 32);
+    {
+        // Bits do FBMSK que o formato guarda (nos de 16 bits, os 5 altos de cada canal e o alfa).
+        const std::uint32_t used = (e.fpsm == PSMCT24 || e.fpsm == PSMZ24)   ? 0x00FFFFFFu
+                                   : psmStorageBits(e.fpsm) == 16              ? 0x80F8F8F8u
+                                                                               : 0xFFFFFFFFu;
+        e.fbNone = (e.fbmsk & used) == used;
+    }
     switch (e.fpsm) {
         case PSMCT32: case PSMCT24: case PSMCT16: case PSMCT16S: case PSMZ32: case PSMZ24: case PSMZ16:
         case PSMZ16S:
@@ -571,9 +581,15 @@ void Gs::draw(std::uint32_t pc) {
     };
     VramAccess writes[2];
     unsigned nw = 0;
-    VramAccess reads[8];
+    VramAccess reads[9];  // FRAME (só DATE com FRAME mascarado), ZBUF e até 7 níveis de textura
     unsigned nr = 0;
-    writes[nw++] = access(pageSet(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0, e.fbp, e.fbw, e.fpsm);
+    // FRAME todo mascarado: não é escrito (entra como escrita vazia, para writes[0] continuar sendo
+    // o FRAME); com DATE o alfa de destino ainda é lido.
+    writes[nw++] = access(e.fbNone ? PageSet{} : pageSet(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 0,
+                          e.fbp, e.fbw, e.fpsm);
+    if (e.fbNone && e.date) {
+        reads[nr++] = access(pageSet(e.fpsm, e.fbp, e.fbw, rowLo, rowHi, colLo, colHi), false, 0, e.fbp, e.fbw, e.fpsm);
+    }
     if (e.zte && !e.zmsk) {
         writes[nw++] = access(pageSet(e.zpsm, e.zbp, e.fbw, rowLo, rowHi, colLo, colHi), true, 1, e.zbp, e.fbw, e.zpsm);
     } else if (e.zte && e.ztst >= 2) {
@@ -1236,7 +1252,8 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
 
     const auto ux = static_cast<std::uint32_t>(x), uy = static_cast<std::uint32_t>(y);
     const unsigned fbits = psmStorageBits(e.fpsm);
-    const std::uint32_t dst = vram_.readPixel(e.fpsm, e.fbp, e.fbw, ux, uy);
+    // FRAME todo mascarado e sem DATE: o destino não é lido (o desenho não declara acesso ao FRAME).
+    const std::uint32_t dst = e.fbNone && !e.date ? 0u : vram_.readPixel(e.fpsm, e.fbp, e.fbw, ux, uy);
 
     // Teste de alfa de destino
     if (e.date) {
@@ -1261,7 +1278,7 @@ void Gs::shadePixel(const DrawEnv& e, int x, int y, Fragment& f) {
         }
     }
 
-    if (writeFb) {
+    if (writeFb && !e.fbNone) {
         // Destino como RGBA8
         int dr, dg, db, da;
         if (fbits == 16) {
