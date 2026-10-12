@@ -208,9 +208,14 @@ public:
         std::uint32_t target = 0;    // bytes
     };
     void execPair(const vu::Instr& in, std::uint32_t pc, Flow& flow);
-    // Com as operações fixas em tempo de compilação (código recompilado).
+    // Com as operações fixas em tempo de compilação (código recompilado). `cyc` é o relógio do par: o
+    // interpretador passa o próprio cycle_; o código recompilado, uma cópia local do trecho (o compilador a
+    // mantém em registrador, o que não faz com um membro: toda escrita em vf/vi/memória pode ser, para ele,
+    // uma escrita no cycle_). Antes de qualquer chamada fora de linha que lê ou muda o ciclo, o código
+    // inline grava `cyc` em cycle_ (e relê depois, se a chamada o muda); o trecho grava a cópia em toda
+    // saída (leave). Assim cycle_ está exato em toda saída e em toda exceção.
     template <vu::U UOp, vu::L LOp>
-    void execPairOp(const vu::Instr& in, std::uint32_t pc, Flow& flow);
+    void execPairOp(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc);
     // Executa o par em pc e avança o cursor (delay slot, bit E). O código
     // recompilado passa as operações como parâmetros do template; COUNT_ =
     // decide pela instrução.
@@ -225,15 +230,18 @@ public:
     void countPair(std::uint32_t pc);
 
     // ---- Código recompilado com fluxo estático (gerado por vu_generator.cpp) ----
-    // Cada trecho conta os pares numa variável local e só soma ao pairs_ nas saídas (addPairs), em vez de
+    // Cada trecho conta os pares (e o ciclo) em variáveis locais e só os soma ao Vu nas saídas (leave), em vez de
     // um RMW no objeto por par. O limite de pares é conferido nas arestas de volta e a cada volta do
-    // laço do bloco: pairsOver diz se `n` pares locais a mais estouram o limite, e pairsOverflow soma
+    // laço do bloco: pairsOver diz se `n` pares locais a mais estouram o limite, e pairsOverflow grava o estado
     // e lança o mesmo erro do countPair (o pc é o do par a executar). Numa exceção de um par (erro do
     // guest) os pares locais ainda não somados se perdem: o pairs() fica menor que no interpretador.
-    void addPairs(std::uint64_t n) { pairs_ += n; }
-    bool pairsOver(std::uint64_t n) const { return pairs_ + n > maxPairs_; }
-    [[noreturn]] void pairsOverflow(std::uint64_t n, std::uint32_t pc) {
+    void leave(std::uint64_t n, std::uint64_t cyc) {
         pairs_ += n;
+        cycle_ = cyc;
+    }
+    bool pairsOver(std::uint64_t n) const { return pairs_ + n > maxPairs_; }
+    [[noreturn]] void pairsOverflow(std::uint64_t n, std::uint64_t cyc, std::uint32_t pc) {
+        leave(n, cyc);
         tooManyPairs(pc);
     }
     // Um par pelo interpretador, com o cursor como estiver (o trecho recompilado entra com delay slot ou
@@ -269,11 +277,11 @@ private:
     // Parte comum de todo par (não depende da operação), inline em vu_exec.h:
     // validação, flags/Q/P prontos e stalls antes; escrita do upper, flags
     // pendentes, LOI e ciclo depois.
-    void pairBegin(const vu::Instr& in, std::uint32_t pc);
-    void pairEnd(const vu::Instr& in, const vucore::UpperResult& ur);
+    void pairBegin(const vu::Instr& in, std::uint32_t pc, std::uint64_t& cyc);
+    void pairEnd(const vu::Instr& in, const vucore::UpperResult& ur, std::uint64_t& cyc);
     void pairRejected(const vu::Instr& in, std::uint32_t pc) const;  // caminho de erro, fora de linha
 
-    void commitReady();
+    void commitReady(std::uint64_t& cyc);
     void commitPending();  // só Q e P: as flags de MAC/clip são aplicadas sob demanda (syncFlags)
     // Aplica, em ordem de chegada, as entradas de flags em voo que já ficaram prontas (ready <= cycle_).
     // O pairEnd só as empilha; elas só precisam estar aplicadas quando alguém as lê: os ramos de flag do
@@ -283,22 +291,31 @@ private:
     ANYPS2_VU_INLINE void syncFlags() const {
         if (pendCount_ != 0) syncFlagsSlow();
     }
+    // O mesmo, a partir de um par em execução: grava `cyc` em cycle_ antes de a parte lenta ler o ciclo.
+    ANYPS2_VU_INLINE void syncFlags(std::uint64_t cyc) {
+        if (pendCount_ != 0) {
+            cycle_ = cyc;
+            syncFlagsSlow();
+        }
+    }
     void syncFlagsSlow() const;
     static constexpr std::uint64_t kNoCommit = ~std::uint64_t{0};
     void commitQ();
     void commitP();
-    void stallOn(unsigned vf);
-    void stallUntil(std::uint64_t c) {
-        if (c > cycle_) {
-            ANYPS2_VU_STAT((++stats_.stalls, stats_.stallCycles += c - cycle_));
-            cycle_ = c;
+    void stallOn(unsigned vf, std::uint64_t& cyc);
+    void stallUntil(std::uint64_t c, std::uint64_t& cyc) {
+        if (c > cyc) {
+            ANYPS2_VU_STAT((++stats_.stalls, stats_.stallCycles += c - cyc));
+            cyc = c;
         }
     }
-    Reg128& mem(std::uint32_t qwordIndex, std::uint32_t pc);
+    void stallUntil(std::uint64_t c) { stallUntil(c, cycle_); }
+    void stallOn(unsigned vf);  // o mesmo, no ciclo do objeto (EFU, fora do caminho do par)
+    Reg128& mem(std::uint32_t qwordIndex, std::uint32_t pc, std::uint64_t cyc);
     Reg128& memVu0Cross(std::uint32_t index, std::uint32_t pc);  // VU0 → registradores do VU1
-    void execLower(const vu::Instr& in, std::uint32_t pc, Flow& flow);
+    void execLower(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc);
     template <vu::L Op>
-    void execLowerOp(const vu::Instr& in, std::uint32_t pc, Flow& flow);
+    void execLowerOp(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc);
     void execEfu(const vu::Lower& l, std::uint32_t pc);
     void xgkick(std::uint32_t addr, std::uint32_t pc);
     [[noreturn]] void tooManyPairs(std::uint32_t pc) const;

@@ -303,7 +303,8 @@ Limitações e riscos:
   fall-through entre pares consecutivos; o fluxo é estático (o delay slot de
   B/BAL/IBxx/JR e o do bit E são emitidos de novo logo depois do par que os cria,
   com o destino conhecido; o cursor e o contador de pares são locais ao trecho e
-  só vão para o Vu nas saídas); cada par chama o núcleo do VU com
+  só vão para o Vu nas saídas, junto com o ciclo, que também é uma cópia local do trecho:
+  `pairBegin`/`pairEnd` são inline forçado para o compilador mantê-la em registrador); cada par chama o núcleo do VU com
   as operações como parâmetros de template (`if constexpr`), então sobra só
   o código daquela operação. Os blocos não dependem do endereço de carga: o runtime casa
   o conteúdo da micro memória com os blocos (índice pelo par no pc), e cada

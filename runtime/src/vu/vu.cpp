@@ -186,7 +186,7 @@ void Vu::finish() {
     // microprograma veem o estado final.
     while (pendCount_ > 0) {
         stallUntil(pending_[pendHead_].ready);
-        commitReady();
+        commitReady(cycle_);
         syncFlags();
     }
     if (q_.active) commitQ();

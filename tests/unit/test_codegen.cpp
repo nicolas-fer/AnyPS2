@@ -199,7 +199,7 @@ TEST_CASE(codegen, vu_microcode) {
     // Fluxo estático: o IBNE tem o delay slot (bit E, contexto aninhado) fora do caminho estático, que grava o
     // cursor completo; o par com bit E tem a cópia do delay slot que termina o microprograma.
     CHECK(code.find("cur.hasDelayed = taken; cur.delayedTarget = base + 0x0000u; cur.ending = false;") != std::string::npos);
-    CHECK(code.find("cur.pc = vu.wrap(base + 0x0020u); cur.done = true; vu.addPairs(n); return;") != std::string::npos);
+    CHECK(code.find("cur.pc = vu.wrap(base + 0x0020u); cur.done = true; vu.leave(n, cyc); return;") != std::string::npos);
     CHECK(code.find("void kT_block_0(") != std::string::npos);
     const std::string& table = files[1].text;
     CHECK_EQ(files[1].name, std::string("vu_programs.cpp"));

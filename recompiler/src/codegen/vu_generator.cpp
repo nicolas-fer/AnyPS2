@@ -84,7 +84,7 @@ constexpr std::uint32_t kChunkPairs = 64;
 //    código estático: o trecho grava o cursor completo e sai, e o próximo
 //    par roda no interpretador (stepOne, na entrada do trecho seguinte).
 //  * Toda saída grava o cursor completo (pc, hasDelayed, delayedTarget,
-//    ending, done) e soma os pares locais ao Vu (addPairs). O pairIs de cada
+//    ending, done) e grava os pares e o ciclo locais no Vu (leave). O pairIs de cada
 //    par fica: o findBlock só valida 32 pares adiante. Se ele falha, o
 //    cursor gravado é o do contexto daquele par, e o interpretador retoma ali.
 //  * O limite de pares (laço infinito) é conferido nas arestas de volta
@@ -120,7 +120,7 @@ struct ChunkEmitter {
     }
 
     static std::string exitStr(const std::string& pc, bool done = false) {
-        return "cur.pc = " + pc + "; " + (done ? "cur.done = true; " : "") + "vu.addPairs(n); return;";
+        return "cur.pc = " + pc + "; " + (done ? "cur.done = true; " : "") + "vu.leave(n, cyc); return;";
     }
     void exitTo(const std::string& pc, bool done = false) { o << exitStr(pc, done); }
     // Vai para o alvo t (relativo ao bloco) depois do par `from`: goto no trecho (com o limite de pares nas
@@ -129,7 +129,7 @@ struct ChunkEmitter {
         if (inChunk(t)) {
             const auto idx = static_cast<std::uint32_t>(t / 8);
             if (idx <= from) {
-                o << indent << "if (vu.pairsOver(n)) vu.pairsOverflow(n, " << absPc(idx) << ");\n";
+                o << indent << "if (vu.pairsOver(n)) vu.pairsOverflow(n, cyc, " << absPc(idx) << ");\n";
             }
             o << indent << "goto " << label(idx * 8) << ";\n";
         } else {
@@ -161,7 +161,7 @@ struct ChunkEmitter {
         o << label(p * 8) << ": {  // " << comment(vu::disassemble(in, p * 8)) << "\n";
         pairHeader(p, in, "    ", "k", exitStr(absPc(p)));
         o << "    ::anyps2::rt::Vu::Flow flow;\n"
-          << "    vu.execPairOp" << ops(in) << "(k, " << absPc(p) << ", flow);\n"
+          << "    vu.execPairOp" << ops(in) << "(k, " << absPc(p) << ", flow, cyc);\n"
           << "    ++n;\n";
         if (!branch && !in.e) {
             if (p + 1 >= last) {
@@ -193,7 +193,7 @@ struct ChunkEmitter {
         const auto cursorExit = [&](const std::string& pc) {
             std::string s = "cur.pc = " + pc + "; ";
             if (branch) s += "cur.hasDelayed = " + takenExpr + "; cur.delayedTarget = " + targetExpr + "; ";
-            s += std::string("cur.ending = ") + (in.e ? "true" : "false") + "; vu.addPairs(n); return;";
+            s += std::string("cur.ending = ") + (in.e ? "true" : "false") + "; vu.leave(n, cyc); return;";
             return s;
         };
 
@@ -206,7 +206,7 @@ struct ChunkEmitter {
         o << "    {  // delay slot de " << comment(vu::lowerText(in, p * 8)) << (in.e ? " (bit E)" : "") << "\n";
         pairHeader(q, slot, "        ", "ks", cursorExit(absPc(q)));
         o << "        ::anyps2::rt::Vu::Flow slotFlow;\n"
-          << "        vu.execPairOp" << ops(slot) << "(ks, " << absPc(q) << ", slotFlow);\n"
+          << "        vu.execPairOp" << ops(slot) << "(ks, " << absPc(q) << ", slotFlow, cyc);\n"
           << "        ++n;\n";
         if (in.e) {
             // Depois do delay slot o microprograma termina; o pc fica no destino do desvio (ou no par seguinte).
@@ -224,7 +224,7 @@ struct ChunkEmitter {
         if (isInd) {
             usesDispatch = true;
             o << "        pc = jt;\n"
-              << "        if (vu.pairsOver(n)) vu.pairsOverflow(n, pc);\n"
+              << "        if (vu.pairsOver(n)) vu.pairsOverflow(n, cyc, pc);\n"
               << "        goto dispatch;\n";
         } else if (isCond) {
             o << "        if (taken) {\n";
@@ -250,13 +250,14 @@ struct ChunkEmitter {
             << "        vu.stepOne(cur);\n"
             << "        return;\n"
             << "    }\n"
-            << "    std::uint64_t n = 0;  // pares executados neste trecho, somados ao Vu nas saídas\n"
+            << "    // Pares e ciclo do trecho em variáveis locais (o compilador as mantém em registrador); o Vu os recebe nas saídas.\n"
+            << "    std::uint64_t n = 0, cyc = vu.cycle();\n"
             << "    std::uint32_t pc = cur.pc;\n"
             << (e.usesDispatch ? "dispatch:\n" : "") << "    switch (pc - base) {\n";
         for (std::uint32_t p = first; p < last; ++p) {
             out << "        case " << off16(p * 8) << ": goto " << label(p * 8) << ";\n";
         }
-        out << "        default: cur.pc = pc; vu.addPairs(n); return;  // fora deste trecho\n    }\n"
+        out << "        default: cur.pc = pc; vu.leave(n, cyc); return;  // fora deste trecho\n    }\n"
             << body.str() << "}\n\n";
     }
 };
@@ -290,7 +291,7 @@ void emitBlock(std::ostringstream& o, const vu::MicroBlob& blob, const std::stri
       << "        const std::uint32_t before = cur.pc;\n"
       << "        kChunks[off / " << off16(kChunkPairs * 8) << "](vu, base, cur);\n"
       << "        if (cur.done || cur.pc == before) return;\n"
-      << "        if (vu.pairsOver(0)) vu.pairsOverflow(0, cur.pc);  // laço que passa de um trecho a outro\n"
+      << "        if (vu.pairsOver(0)) vu.pairsOverflow(0, vu.cycle(), cur.pc);  // laço que passa de um trecho a outro\n"
       << "    }\n}\n\n";
 }
 

@@ -416,7 +416,14 @@ int main(int argc, char** argv) {
                 copyState(fc, fi);
                 const std::string ea = guarded([&] { fi.vu.interpret(h.offset, 0); });
                 const std::string eb = guarded([&] { fc.vu.start(h.offset, 0); });
-                compare(name + ", semente " + std::to_string(sd), ea, eb, true);
+                // Depois de um erro do guest o contador de pares do código recompilado (local ao trecho) pode estar
+                // atrás do interpretador; o resto do estado, o ciclo inclusive, tem de ser igual.
+                compare(name + ", semente " + std::to_string(sd), ea, eb, !h.errors);
+                if (h.errors && (ea.empty() || eb.empty())) {
+                    ++failures;
+                    std::printf("FALHA %s: esperava erro do guest nos dois caminhos ('%s' vs '%s')\n", name.c_str(),
+                                ea.c_str(), eb.c_str());
+                }
             }
             if (fc.vu.interpretedPairs() != 0) {
                 ++failures;
@@ -449,7 +456,7 @@ int main(int argc, char** argv) {
                     const std::string ea = guarded([&] { fi.vu.interpret(base, 0); });
                     const std::string eb = guarded([&] { fc.vu.start(base, 0); });
                     compare(name + " realocado para " + std::to_string(base), ea, eb, true);
-                    if (fc.vu.compiledPairs() == before) {
+                    if (!h.errors && fc.vu.compiledPairs() == before) {  // (numa exceção o run não soma os pares compilados)
                         ++failures;
                         std::printf("FALHA %s: realocado para %u não usou o código recompilado\n", name.c_str(), base);
                     }

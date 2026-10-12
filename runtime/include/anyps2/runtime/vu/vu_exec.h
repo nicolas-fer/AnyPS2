@@ -54,9 +54,12 @@ inline constexpr bool isFlagReg(unsigned r) { return r - 16u < 3u; }  // vi16–
 // Caso comum (nada pendente ficou pronto): uma comparação. nextCommit_ é
 // sempre ≤ o primeiro evento pendente de Q ou P (baixá-lo é sempre seguro). As flags de MAC/clip não
 // passam por aqui: ficam na fila até alguém as ler (syncFlags).
-ANYPS2_VU_INLINE void Vu::commitReady() {
+ANYPS2_VU_INLINE void Vu::commitReady(std::uint64_t& cyc) {
     ANYPS2_VU_STAT(++stats_.commitReadyChecks);
-    if (cycle_ >= nextCommit_) commitPending();
+    if (cyc >= nextCommit_) [[unlikely]] {
+        cycle_ = cyc;  // commitPending lê o ciclo do objeto
+        commitPending();
+    }
 }
 
 ANYPS2_VU_INLINE void Vu::commitQ() {
@@ -71,17 +74,25 @@ ANYPS2_VU_INLINE void Vu::commitP() {
     p_.active = false;
 }
 
-ANYPS2_VU_INLINE void Vu::stallOn(unsigned vf) {
-    if (vf != 0) stallUntil(vfReady_[vf]);
+ANYPS2_VU_INLINE void Vu::stallOn(unsigned vf, std::uint64_t& cyc) {
+    if (vf != 0) stallUntil(vfReady_[vf], cyc);
+}
+
+inline void Vu::stallOn(unsigned vf) {
+    stallOn(vf, cycle_);
 }
 
 // Início do par: só o caminho comum fica aqui (inline, com `in` constante no
 // código recompilado, o switch de stalls some). Os erros vão para
-// pairRejected, fora de linha. É inline comum, não forçado: com __forceinline
-// o código gerado do microcódigo cresce e a vazão caiu (~10 para ~8 Mpares/s).
-inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
-    if (in.upper.op == vu::U::INVALID || in.d || in.t) [[unlikely]] pairRejected(in, pc);
-    commitReady();
+// pairRejected, fora de linha. É inline forçado: com pairBegin/pairEnd como chamadas, o ciclo do trecho
+// (`cyc`, uma cópia local) teria de morar na pilha e ser recarregado em cada chamada; inline, o compilador
+// o mantém em registrador e o par custa menos (o crescimento do código é pago em tempo de compilação).
+ANYPS2_VU_INLINE void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc, std::uint64_t& cyc) {
+    if (in.upper.op == vu::U::INVALID || in.d || in.t) [[unlikely]] {
+        cycle_ = cyc;
+        pairRejected(in, pc);
+    }
+    commitReady(cyc);
 
     // Stalls pelos operandos do upper.
     const vu::Upper& u = in.upper;
@@ -91,20 +102,20 @@ inline void Vu::pairBegin(const vu::Instr& in, std::uint32_t pc) {
         // hardware. Um stall aqui atrasa o par e muda quais flags MAC um FMAND
         // no mesmo par enxerga: o microcódigo do GT4 descarta triângulos por esse
         // FMAND (faces da frente sumiam e as de trás apareciam nos carros).
-        stallOn(u.fs);
-        stallOn(u.ft);
-        commitReady();
+        stallOn(u.fs, cyc);
+        stallOn(u.ft, cyc);
+        commitReady(cyc);
     }
 }
 
 // Fim do par: escrita do upper, flags pendentes (4 ciclos depois), LOI e o
 // ciclo. A ordem é observável (o upper vence o lower no mesmo VF; as flags
 // valem 4 ciclos depois) e não pode ser trocada.
-inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
+ANYPS2_VU_INLINE void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur, std::uint64_t& cyc) {
     // O upper é escrito depois do lower (se ambos escrevem o mesmo VF, vale o upper).
     if (ur.writes) {
         vucore::writeUpper(regs_, ur);
-        if (!ur.toAcc && ur.reg) vfReady_[ur.reg] = cycle_ + vuexec::kFmacLatency;
+        if (!ur.toAcc && ur.reg) vfReady_[ur.reg] = cyc + vuexec::kFmacLatency;
     }
     if (ur.setsFlags || ur.setsClip) {
         // Flags preguiçosas: só empilha {ready = ciclo + 4}; a fila é aplicada quando alguém a lê
@@ -116,25 +127,28 @@ inline void Vu::pairEnd(const vu::Instr& in, const vucore::UpperResult& ur) {
             // sequência (I/D/IS/DS preservados, Z/S/U/O da última, sticky acumulados). Como
             // uma entrada nova tem ready = ciclo + 4 e o ciclo avança ≥ 1 por par, no máximo 4 ficam
             // não prontas: só uma fila semeada (seedPipeline) pode continuar cheia, e então o stall é o de antes.
-            syncFlags();
+            syncFlags(cyc);
             if (pendCount_ == kPending) [[unlikely]] {
-                stallUntil(pending_[pendHead_].ready);
-                commitReady();
-                syncFlags();
+                stallUntil(pending_[pendHead_].ready, cyc);
+                commitReady(cyc);
+                syncFlags(cyc);
             }
         }
-        pending_[(pendHead_ + pendCount_) % kPending] = {cycle_ + vuexec::kFmacLatency, ur.setsFlags, ur.mac,
+        pending_[(pendHead_ + pendCount_) % kPending] = {cyc + vuexec::kFmacLatency, ur.setsFlags, ur.mac,
                                                          ur.setsClip, ur.clip};
         ++pendCount_;
     }
     if (in.i) regs_.vi[vucore::reg::I] = in.lowerWord;  // LOI
-    ++cycle_;
+    ++cyc;
 }
 
 // Memória de dados (qword): o caminho comum é um índice; os registradores do
 // VU1 vistos pelo VU0 (0x4000–0x43FF) ficam fora de linha.
-ANYPS2_VU_INLINE Reg128& Vu::mem(std::uint32_t index, std::uint32_t pc) {
-    if (unit_ == 0 && (index & 0x400u)) return memVu0Cross(index, pc);
+ANYPS2_VU_INLINE Reg128& Vu::mem(std::uint32_t index, std::uint32_t pc, std::uint64_t cyc) {
+    if (unit_ == 0 && (index & 0x400u)) [[unlikely]] {
+        cycle_ = cyc;
+        return memVu0Cross(index, pc);
+    }
     const std::uint32_t qwords = dataSize_ / 16;
     Reg128* base = reinterpret_cast<Reg128*>(data_);
     return base[index & (qwords - 1)];
@@ -143,9 +157,9 @@ ANYPS2_VU_INLINE Reg128& Vu::mem(std::uint32_t index, std::uint32_t pc) {
 // UOp/LOp: operação conhecida em tempo de compilação (código recompilado) ou
 // COUNT_ = escolhida pela instrução em tempo de execução (interpretador).
 template <vu::U UOp, vu::L LOp>
-ANYPS2_VU_INLINE void Vu::execPairOp(const vu::Instr& in, std::uint32_t pc, Flow& flow) {
+ANYPS2_VU_INLINE void Vu::execPairOp(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc) {
     flow.taken = false;
-    pairBegin(in, pc);
+    pairBegin(in, pc, cyc);
     vucore::UpperResult ur;
     if constexpr (UOp == vu::U::COUNT_) {
         ur = vucore::computeUpper(regs_, in.upper, regs_.vi[vucore::reg::Q], regs_.vi[vucore::reg::I]);
@@ -153,18 +167,18 @@ ANYPS2_VU_INLINE void Vu::execPairOp(const vu::Instr& in, std::uint32_t pc, Flow
         ur = vucore::computeUpperOp<UOp>(regs_, in.upper, regs_.vi[vucore::reg::Q], regs_.vi[vucore::reg::I]);
     }
     if (!in.i) {
-        if constexpr (LOp == vu::L::COUNT_) execLower(in, pc, flow);
-        else execLowerOp<LOp>(in, pc, flow);
+        if constexpr (LOp == vu::L::COUNT_) execLower(in, pc, flow, cyc);
+        else execLowerOp<LOp>(in, pc, flow, cyc);
     }
-    pairEnd(in, ur);
+    pairEnd(in, ur, cyc);
 }
 
 ANYPS2_VU_INLINE void Vu::execPair(const vu::Instr& in, std::uint32_t pc, Flow& flow) {
-    execPairOp<vu::U::COUNT_, vu::L::COUNT_>(in, pc, flow);
+    execPairOp<vu::U::COUNT_, vu::L::COUNT_>(in, pc, flow, cycle_);
 }
 
 template <vu::L Op>
-ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flow& flow) {
+ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc) {
     const vu::Lower& l = in.lower;
     std::uint32_t* vi = regs_.vi;
     Reg128* vf = regs_.vf;
@@ -177,7 +191,7 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
         for (unsigned c = 0; c < 4; ++c) {
             if (vucore::hasComp(dest, c)) vf[r].uw[c] = v.uw[c];
         }
-        vfReady_[r] = cycle_ + vuexec::kFmacLatency;
+        vfReady_[r] = cyc + vuexec::kFmacLatency;
     };
     [[maybe_unused]] auto firstComp = [](unsigned dest) ANYPS2_VU_LAMBDA_INLINE -> unsigned {
         for (unsigned c = 0; c < 4; ++c) {
@@ -197,51 +211,53 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
         constexpr unsigned m = vuexec::intFields(Op);
         if (((m & 1) && vuexec::isFlagReg(l.fs)) || ((m & 2) && vuexec::isFlagReg(l.ft)) ||
             ((m & 4) && vuexec::isFlagReg(l.fd))) {
-            syncFlags();
+            syncFlags(cyc);
         }
     }
 
     if constexpr (Op == vu::L::NOP || Op == vu::L::WAITQ || Op == vu::L::WAITP || Op == vu::L::LOI) {
         if (l.op == vu::L::WAITQ && q_.active) {
-            stallUntil(q_.ready);
+            stallUntil(q_.ready, cyc);
+            cycle_ = cyc;  // commitQ aplica as flags prontas neste ciclo
             commitQ();
         }
         if (l.op == vu::L::WAITP && p_.active) {
-            stallUntil(p_.ready);
+            stallUntil(p_.ready, cyc);
             commitP();
         }
     } else if constexpr (Op == vu::L::INVALID) {
+        cycle_ = cyc;
         fail("instrução lower inválida " + anyps2::hex(in.lowerWord), pc);
     }
     // ---- Load/store ----------------------------------------------------
     else if constexpr (Op == vu::L::LQ) {
-        writeVf(l.ft, mem(static_cast<std::uint32_t>(viS(l.fs) + l.imm), pc), l.dest);
+        writeVf(l.ft, mem(static_cast<std::uint32_t>(viS(l.fs) + l.imm), pc, cyc), l.dest);
     } else if constexpr (Op == vu::L::SQ) {
-        stallOn(l.fs);
-        Reg128& m = mem(static_cast<std::uint32_t>(viS(l.ft) + l.imm), pc);
+        stallOn(l.fs, cyc);
+        Reg128& m = mem(static_cast<std::uint32_t>(viS(l.ft) + l.imm), pc, cyc);
         for (unsigned c = 0; c < 4; ++c) {
             if (vucore::hasComp(l.dest, c)) m.uw[c] = vf[l.fs].uw[c];
         }
     } else if constexpr (Op == vu::L::LQI) {
-        writeVf(l.ft, mem(vi[l.fs], pc), l.dest);
+        writeVf(l.ft, mem(vi[l.fs], pc, cyc), l.dest);
         setVi(l.fs, vi[l.fs] + 1);
     } else if constexpr (Op == vu::L::LQD) {
         setVi(l.fs, vi[l.fs] - 1);
-        writeVf(l.ft, mem(vi[l.fs], pc), l.dest);
+        writeVf(l.ft, mem(vi[l.fs], pc, cyc), l.dest);
     } else if constexpr (Op == vu::L::SQI || Op == vu::L::SQD) {
-        stallOn(l.fs);
+        stallOn(l.fs, cyc);
         if (l.op == vu::L::SQD) setVi(l.ft, vi[l.ft] - 1);
-        Reg128& m = mem(vi[l.ft], pc);
+        Reg128& m = mem(vi[l.ft], pc, cyc);
         for (unsigned c = 0; c < 4; ++c) {
             if (vucore::hasComp(l.dest, c)) m.uw[c] = vf[l.fs].uw[c];
         }
         if (l.op == vu::L::SQI) setVi(l.ft, vi[l.ft] + 1);
     } else if constexpr (Op == vu::L::ILW || Op == vu::L::ILWR) {
         const std::uint32_t addr = static_cast<std::uint32_t>(viS(l.fs) + (l.op == vu::L::ILW ? l.imm : 0));
-        setVi(l.ft, mem(addr, pc).uw[firstComp(l.dest)]);
+        setVi(l.ft, mem(addr, pc, cyc).uw[firstComp(l.dest)]);
     } else if constexpr (Op == vu::L::ISW || Op == vu::L::ISWR) {
         const std::uint32_t addr = static_cast<std::uint32_t>(viS(l.fs) + (l.op == vu::L::ISW ? l.imm : 0));
-        Reg128& m = mem(addr, pc);
+        Reg128& m = mem(addr, pc, cyc);
         for (unsigned c = 0; c < 4; ++c) {
             if (vucore::hasComp(l.dest, c)) m.uw[c] = vi[l.ft] & 0xFFFFu;
         }
@@ -264,9 +280,9 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
     }
     // ---- Movimentação ----------------------------------------------------
     else if constexpr (Op == vu::L::MOVE) {
-        stallOn(l.fs); writeVf(l.ft, vf[l.fs], l.dest);
+        stallOn(l.fs, cyc); writeVf(l.ft, vf[l.fs], l.dest);
     } else if constexpr (Op == vu::L::MR32) {
-        stallOn(l.fs);
+        stallOn(l.fs, cyc);
         Reg128 v;
         const Reg128& s = vf[l.fs];
         v.uw[0] = s.uw[1];
@@ -280,31 +296,32 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
         v.uw[0] = v.uw[1] = v.uw[2] = v.uw[3] = x;
         writeVf(l.ft, v, l.dest);
     } else if constexpr (Op == vu::L::MTIR) {
-        stallOn(l.fs); setVi(l.ft, vf[l.fs].uw[l.fsf]);
+        stallOn(l.fs, cyc); setVi(l.ft, vf[l.fs].uw[l.fsf]);
     } else if constexpr (Op == vu::L::MFP) {
-        commitReady();
+        commitReady(cyc);
         Reg128 v;
         v.uw[0] = v.uw[1] = v.uw[2] = v.uw[3] = regs_.vi[vucore::reg::P];
         writeVf(l.ft, v, l.dest);
     }
     // ---- FDIV --------------------------------------------------------------
     else if constexpr (Op == vu::L::DIV || Op == vu::L::SQRT || Op == vu::L::RSQRT) {
-        stallOn(l.fs);
-        stallOn(l.ft);
+        stallOn(l.fs, cyc);
+        stallOn(l.ft, cyc);
         if (q_.active) {  // FDIV ocupado: espera o anterior
-            stallUntil(q_.ready);
+            stallUntil(q_.ready, cyc);
+            cycle_ = cyc;
             commitQ();
         }
         const vucore::DivResult d = vucore::fdiv(l.op, vf[l.fs].uw[l.fsf], vf[l.ft].uw[l.ftf]);
-        q_ = {true, cycle_ + vuexec::fdivLatency(l.op), d.q, d.flags};
+        q_ = {true, cyc + vuexec::fdivLatency(l.op), d.q, d.flags};
         nextCommit_ = std::min(nextCommit_, q_.ready);
     }
     // ---- R -----------------------------------------------------------------
     else if constexpr (Op == vu::L::RINIT) {
-        stallOn(l.fs);
+        stallOn(l.fs, cyc);
         vi[vucore::reg::R] = 0x3F800000u | (vf[l.fs].uw[l.fsf] & 0x007FFFFFu);
     } else if constexpr (Op == vu::L::RXOR) {
-        stallOn(l.fs);
+        stallOn(l.fs, cyc);
         vi[vucore::reg::R] = 0x3F800000u | ((vi[vucore::reg::R] ^ vf[l.fs].uw[l.fsf]) & 0x007FFFFFu);
     } else if constexpr (Op == vu::L::RGET || Op == vu::L::RNEXT) {
         if (l.op == vu::L::RNEXT) vi[vucore::reg::R] = vucore::advanceR(vi[vucore::reg::R]);
@@ -316,40 +333,40 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
     // Todo ramo de flag aplica antes as entradas em voo que já estão prontas (syncFlags): é o único
     // ponto em que o programa observa (ou sobrescreve, FSSET/FCSET) status, MAC e clip.
     else if constexpr (Op == vu::L::FSAND) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, vi[vucore::reg::Status] & static_cast<std::uint32_t>(l.imm));
     } else if constexpr (Op == vu::L::FSOR) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, (vi[vucore::reg::Status] & 0xFFF) | static_cast<std::uint32_t>(l.imm));
     } else if constexpr (Op == vu::L::FSEQ) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, (vi[vucore::reg::Status] & 0xFFF) == static_cast<std::uint32_t>(l.imm) ? 1 : 0);
     } else if constexpr (Op == vu::L::FSSET) {
-        syncFlags();
+        syncFlags(cyc);
         vi[vucore::reg::Status] = (vi[vucore::reg::Status] & 0x3Fu) | (static_cast<std::uint32_t>(l.imm) & 0xFC0u);
     } else if constexpr (Op == vu::L::FMAND) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, vi[vucore::reg::Mac] & vi[l.fs]);
     } else if constexpr (Op == vu::L::FMOR) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, vi[vucore::reg::Mac] | vi[l.fs]);
     } else if constexpr (Op == vu::L::FMEQ) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, (vi[vucore::reg::Mac] & 0xFFFF) == (vi[l.fs] & 0xFFFF) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCAND) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(1, (vi[vucore::reg::Clip] & static_cast<std::uint32_t>(l.imm)) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCOR) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(1, ((vi[vucore::reg::Clip] | static_cast<std::uint32_t>(l.imm)) & 0xFFFFFFu) == 0xFFFFFFu ? 1 : 0);
     } else if constexpr (Op == vu::L::FCEQ) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(1, (vi[vucore::reg::Clip] & 0xFFFFFFu) == static_cast<std::uint32_t>(l.imm) ? 1 : 0);
     } else if constexpr (Op == vu::L::FCSET) {
-        syncFlags();
+        syncFlags(cyc);
         vi[vucore::reg::Clip] = static_cast<std::uint32_t>(l.imm) & 0xFFFFFFu;
     } else if constexpr (Op == vu::L::FCGET) {
-        syncFlags();
+        syncFlags(cyc);
         setVi(l.ft, vi[vucore::reg::Clip] & 0xFFF);
     }
     // ---- Desvios ---------------------------------------------------------------
@@ -378,90 +395,94 @@ ANYPS2_VU_INLINE void Vu::execLowerOp(const vu::Instr& in, std::uint32_t pc, Flo
     }
     // ---- VU1 <-> VIF/GIF -----------------------------------------------------------
     else if constexpr (Op == vu::L::XTOP || Op == vu::L::XITOP) {
+        cycle_ = cyc;
         setVi(l.ft, vifTop(l.op == vu::L::XITOP, pc));
     } else if constexpr (Op == vu::L::XGKICK) {
+        cycle_ = cyc;  // o envio ao GIF e o rastreador veem o ciclo do objeto
         if (unit_ != 1) fail("XGKICK só existe no VU1", pc);
         xgkick((vi[l.fs] & 0x3FF) * 16, pc);
     } else {
+        cycle_ = cyc;
         execEfu(l, pc);
+        cyc = cycle_;  // o EFU espera o P anterior: muda o ciclo
     }
 }
 
-ANYPS2_VU_INLINE void Vu::execLower(const vu::Instr& in, std::uint32_t pc, Flow& flow) {
+ANYPS2_VU_INLINE void Vu::execLower(const vu::Instr& in, std::uint32_t pc, Flow& flow, std::uint64_t& cyc) {
     switch (in.lower.op) {
-        case vu::L::LQ: execLowerOp<vu::L::LQ>(in, pc, flow); return;
-        case vu::L::SQ: execLowerOp<vu::L::SQ>(in, pc, flow); return;
-        case vu::L::ILW: execLowerOp<vu::L::ILW>(in, pc, flow); return;
-        case vu::L::ISW: execLowerOp<vu::L::ISW>(in, pc, flow); return;
-        case vu::L::IADDIU: execLowerOp<vu::L::IADDIU>(in, pc, flow); return;
-        case vu::L::ISUBIU: execLowerOp<vu::L::ISUBIU>(in, pc, flow); return;
-        case vu::L::FCEQ: execLowerOp<vu::L::FCEQ>(in, pc, flow); return;
-        case vu::L::FCSET: execLowerOp<vu::L::FCSET>(in, pc, flow); return;
-        case vu::L::FCAND: execLowerOp<vu::L::FCAND>(in, pc, flow); return;
-        case vu::L::FCOR: execLowerOp<vu::L::FCOR>(in, pc, flow); return;
-        case vu::L::FSEQ: execLowerOp<vu::L::FSEQ>(in, pc, flow); return;
-        case vu::L::FSSET: execLowerOp<vu::L::FSSET>(in, pc, flow); return;
-        case vu::L::FSAND: execLowerOp<vu::L::FSAND>(in, pc, flow); return;
-        case vu::L::FSOR: execLowerOp<vu::L::FSOR>(in, pc, flow); return;
-        case vu::L::FMEQ: execLowerOp<vu::L::FMEQ>(in, pc, flow); return;
-        case vu::L::FMAND: execLowerOp<vu::L::FMAND>(in, pc, flow); return;
-        case vu::L::FMOR: execLowerOp<vu::L::FMOR>(in, pc, flow); return;
-        case vu::L::FCGET: execLowerOp<vu::L::FCGET>(in, pc, flow); return;
-        case vu::L::B: execLowerOp<vu::L::B>(in, pc, flow); return;
-        case vu::L::BAL: execLowerOp<vu::L::BAL>(in, pc, flow); return;
-        case vu::L::JR: execLowerOp<vu::L::JR>(in, pc, flow); return;
-        case vu::L::JALR: execLowerOp<vu::L::JALR>(in, pc, flow); return;
-        case vu::L::IBEQ: execLowerOp<vu::L::IBEQ>(in, pc, flow); return;
-        case vu::L::IBNE: execLowerOp<vu::L::IBNE>(in, pc, flow); return;
-        case vu::L::IBLTZ: execLowerOp<vu::L::IBLTZ>(in, pc, flow); return;
-        case vu::L::IBGTZ: execLowerOp<vu::L::IBGTZ>(in, pc, flow); return;
-        case vu::L::IBLEZ: execLowerOp<vu::L::IBLEZ>(in, pc, flow); return;
-        case vu::L::IBGEZ: execLowerOp<vu::L::IBGEZ>(in, pc, flow); return;
-        case vu::L::IADD: execLowerOp<vu::L::IADD>(in, pc, flow); return;
-        case vu::L::ISUB: execLowerOp<vu::L::ISUB>(in, pc, flow); return;
-        case vu::L::IADDI: execLowerOp<vu::L::IADDI>(in, pc, flow); return;
-        case vu::L::IAND: execLowerOp<vu::L::IAND>(in, pc, flow); return;
-        case vu::L::IOR: execLowerOp<vu::L::IOR>(in, pc, flow); return;
-        case vu::L::MOVE: execLowerOp<vu::L::MOVE>(in, pc, flow); return;
-        case vu::L::MR32: execLowerOp<vu::L::MR32>(in, pc, flow); return;
-        case vu::L::LQI: execLowerOp<vu::L::LQI>(in, pc, flow); return;
-        case vu::L::SQI: execLowerOp<vu::L::SQI>(in, pc, flow); return;
-        case vu::L::LQD: execLowerOp<vu::L::LQD>(in, pc, flow); return;
-        case vu::L::SQD: execLowerOp<vu::L::SQD>(in, pc, flow); return;
-        case vu::L::DIV: execLowerOp<vu::L::DIV>(in, pc, flow); return;
-        case vu::L::SQRT: execLowerOp<vu::L::SQRT>(in, pc, flow); return;
-        case vu::L::RSQRT: execLowerOp<vu::L::RSQRT>(in, pc, flow); return;
-        case vu::L::WAITQ: execLowerOp<vu::L::WAITQ>(in, pc, flow); return;
-        case vu::L::MTIR: execLowerOp<vu::L::MTIR>(in, pc, flow); return;
-        case vu::L::MFIR: execLowerOp<vu::L::MFIR>(in, pc, flow); return;
-        case vu::L::ILWR: execLowerOp<vu::L::ILWR>(in, pc, flow); return;
-        case vu::L::ISWR: execLowerOp<vu::L::ISWR>(in, pc, flow); return;
-        case vu::L::RNEXT: execLowerOp<vu::L::RNEXT>(in, pc, flow); return;
-        case vu::L::RGET: execLowerOp<vu::L::RGET>(in, pc, flow); return;
-        case vu::L::RINIT: execLowerOp<vu::L::RINIT>(in, pc, flow); return;
-        case vu::L::RXOR: execLowerOp<vu::L::RXOR>(in, pc, flow); return;
-        case vu::L::MFP: execLowerOp<vu::L::MFP>(in, pc, flow); return;
-        case vu::L::XTOP: execLowerOp<vu::L::XTOP>(in, pc, flow); return;
-        case vu::L::XITOP: execLowerOp<vu::L::XITOP>(in, pc, flow); return;
-        case vu::L::XGKICK: execLowerOp<vu::L::XGKICK>(in, pc, flow); return;
-        case vu::L::ESADD: execLowerOp<vu::L::ESADD>(in, pc, flow); return;
-        case vu::L::ERSADD: execLowerOp<vu::L::ERSADD>(in, pc, flow); return;
-        case vu::L::ELENG: execLowerOp<vu::L::ELENG>(in, pc, flow); return;
-        case vu::L::ERLENG: execLowerOp<vu::L::ERLENG>(in, pc, flow); return;
-        case vu::L::EATANxy: execLowerOp<vu::L::EATANxy>(in, pc, flow); return;
-        case vu::L::EATANxz: execLowerOp<vu::L::EATANxz>(in, pc, flow); return;
-        case vu::L::ESUM: execLowerOp<vu::L::ESUM>(in, pc, flow); return;
-        case vu::L::ESQRT: execLowerOp<vu::L::ESQRT>(in, pc, flow); return;
-        case vu::L::ERSQRT: execLowerOp<vu::L::ERSQRT>(in, pc, flow); return;
-        case vu::L::ERCPR: execLowerOp<vu::L::ERCPR>(in, pc, flow); return;
-        case vu::L::WAITP: execLowerOp<vu::L::WAITP>(in, pc, flow); return;
-        case vu::L::ESIN: execLowerOp<vu::L::ESIN>(in, pc, flow); return;
-        case vu::L::EATAN: execLowerOp<vu::L::EATAN>(in, pc, flow); return;
-        case vu::L::EEXP: execLowerOp<vu::L::EEXP>(in, pc, flow); return;
-        case vu::L::NOP: execLowerOp<vu::L::NOP>(in, pc, flow); return;
-        case vu::L::LOI: execLowerOp<vu::L::LOI>(in, pc, flow); return;
-        case vu::L::INVALID: execLowerOp<vu::L::INVALID>(in, pc, flow); return;
-        default: execLowerOp<vu::L::INVALID>(in, pc, flow); return;
+        case vu::L::LQ: execLowerOp<vu::L::LQ>(in, pc, flow, cyc); return;
+        case vu::L::SQ: execLowerOp<vu::L::SQ>(in, pc, flow, cyc); return;
+        case vu::L::ILW: execLowerOp<vu::L::ILW>(in, pc, flow, cyc); return;
+        case vu::L::ISW: execLowerOp<vu::L::ISW>(in, pc, flow, cyc); return;
+        case vu::L::IADDIU: execLowerOp<vu::L::IADDIU>(in, pc, flow, cyc); return;
+        case vu::L::ISUBIU: execLowerOp<vu::L::ISUBIU>(in, pc, flow, cyc); return;
+        case vu::L::FCEQ: execLowerOp<vu::L::FCEQ>(in, pc, flow, cyc); return;
+        case vu::L::FCSET: execLowerOp<vu::L::FCSET>(in, pc, flow, cyc); return;
+        case vu::L::FCAND: execLowerOp<vu::L::FCAND>(in, pc, flow, cyc); return;
+        case vu::L::FCOR: execLowerOp<vu::L::FCOR>(in, pc, flow, cyc); return;
+        case vu::L::FSEQ: execLowerOp<vu::L::FSEQ>(in, pc, flow, cyc); return;
+        case vu::L::FSSET: execLowerOp<vu::L::FSSET>(in, pc, flow, cyc); return;
+        case vu::L::FSAND: execLowerOp<vu::L::FSAND>(in, pc, flow, cyc); return;
+        case vu::L::FSOR: execLowerOp<vu::L::FSOR>(in, pc, flow, cyc); return;
+        case vu::L::FMEQ: execLowerOp<vu::L::FMEQ>(in, pc, flow, cyc); return;
+        case vu::L::FMAND: execLowerOp<vu::L::FMAND>(in, pc, flow, cyc); return;
+        case vu::L::FMOR: execLowerOp<vu::L::FMOR>(in, pc, flow, cyc); return;
+        case vu::L::FCGET: execLowerOp<vu::L::FCGET>(in, pc, flow, cyc); return;
+        case vu::L::B: execLowerOp<vu::L::B>(in, pc, flow, cyc); return;
+        case vu::L::BAL: execLowerOp<vu::L::BAL>(in, pc, flow, cyc); return;
+        case vu::L::JR: execLowerOp<vu::L::JR>(in, pc, flow, cyc); return;
+        case vu::L::JALR: execLowerOp<vu::L::JALR>(in, pc, flow, cyc); return;
+        case vu::L::IBEQ: execLowerOp<vu::L::IBEQ>(in, pc, flow, cyc); return;
+        case vu::L::IBNE: execLowerOp<vu::L::IBNE>(in, pc, flow, cyc); return;
+        case vu::L::IBLTZ: execLowerOp<vu::L::IBLTZ>(in, pc, flow, cyc); return;
+        case vu::L::IBGTZ: execLowerOp<vu::L::IBGTZ>(in, pc, flow, cyc); return;
+        case vu::L::IBLEZ: execLowerOp<vu::L::IBLEZ>(in, pc, flow, cyc); return;
+        case vu::L::IBGEZ: execLowerOp<vu::L::IBGEZ>(in, pc, flow, cyc); return;
+        case vu::L::IADD: execLowerOp<vu::L::IADD>(in, pc, flow, cyc); return;
+        case vu::L::ISUB: execLowerOp<vu::L::ISUB>(in, pc, flow, cyc); return;
+        case vu::L::IADDI: execLowerOp<vu::L::IADDI>(in, pc, flow, cyc); return;
+        case vu::L::IAND: execLowerOp<vu::L::IAND>(in, pc, flow, cyc); return;
+        case vu::L::IOR: execLowerOp<vu::L::IOR>(in, pc, flow, cyc); return;
+        case vu::L::MOVE: execLowerOp<vu::L::MOVE>(in, pc, flow, cyc); return;
+        case vu::L::MR32: execLowerOp<vu::L::MR32>(in, pc, flow, cyc); return;
+        case vu::L::LQI: execLowerOp<vu::L::LQI>(in, pc, flow, cyc); return;
+        case vu::L::SQI: execLowerOp<vu::L::SQI>(in, pc, flow, cyc); return;
+        case vu::L::LQD: execLowerOp<vu::L::LQD>(in, pc, flow, cyc); return;
+        case vu::L::SQD: execLowerOp<vu::L::SQD>(in, pc, flow, cyc); return;
+        case vu::L::DIV: execLowerOp<vu::L::DIV>(in, pc, flow, cyc); return;
+        case vu::L::SQRT: execLowerOp<vu::L::SQRT>(in, pc, flow, cyc); return;
+        case vu::L::RSQRT: execLowerOp<vu::L::RSQRT>(in, pc, flow, cyc); return;
+        case vu::L::WAITQ: execLowerOp<vu::L::WAITQ>(in, pc, flow, cyc); return;
+        case vu::L::MTIR: execLowerOp<vu::L::MTIR>(in, pc, flow, cyc); return;
+        case vu::L::MFIR: execLowerOp<vu::L::MFIR>(in, pc, flow, cyc); return;
+        case vu::L::ILWR: execLowerOp<vu::L::ILWR>(in, pc, flow, cyc); return;
+        case vu::L::ISWR: execLowerOp<vu::L::ISWR>(in, pc, flow, cyc); return;
+        case vu::L::RNEXT: execLowerOp<vu::L::RNEXT>(in, pc, flow, cyc); return;
+        case vu::L::RGET: execLowerOp<vu::L::RGET>(in, pc, flow, cyc); return;
+        case vu::L::RINIT: execLowerOp<vu::L::RINIT>(in, pc, flow, cyc); return;
+        case vu::L::RXOR: execLowerOp<vu::L::RXOR>(in, pc, flow, cyc); return;
+        case vu::L::MFP: execLowerOp<vu::L::MFP>(in, pc, flow, cyc); return;
+        case vu::L::XTOP: execLowerOp<vu::L::XTOP>(in, pc, flow, cyc); return;
+        case vu::L::XITOP: execLowerOp<vu::L::XITOP>(in, pc, flow, cyc); return;
+        case vu::L::XGKICK: execLowerOp<vu::L::XGKICK>(in, pc, flow, cyc); return;
+        case vu::L::ESADD: execLowerOp<vu::L::ESADD>(in, pc, flow, cyc); return;
+        case vu::L::ERSADD: execLowerOp<vu::L::ERSADD>(in, pc, flow, cyc); return;
+        case vu::L::ELENG: execLowerOp<vu::L::ELENG>(in, pc, flow, cyc); return;
+        case vu::L::ERLENG: execLowerOp<vu::L::ERLENG>(in, pc, flow, cyc); return;
+        case vu::L::EATANxy: execLowerOp<vu::L::EATANxy>(in, pc, flow, cyc); return;
+        case vu::L::EATANxz: execLowerOp<vu::L::EATANxz>(in, pc, flow, cyc); return;
+        case vu::L::ESUM: execLowerOp<vu::L::ESUM>(in, pc, flow, cyc); return;
+        case vu::L::ESQRT: execLowerOp<vu::L::ESQRT>(in, pc, flow, cyc); return;
+        case vu::L::ERSQRT: execLowerOp<vu::L::ERSQRT>(in, pc, flow, cyc); return;
+        case vu::L::ERCPR: execLowerOp<vu::L::ERCPR>(in, pc, flow, cyc); return;
+        case vu::L::WAITP: execLowerOp<vu::L::WAITP>(in, pc, flow, cyc); return;
+        case vu::L::ESIN: execLowerOp<vu::L::ESIN>(in, pc, flow, cyc); return;
+        case vu::L::EATAN: execLowerOp<vu::L::EATAN>(in, pc, flow, cyc); return;
+        case vu::L::EEXP: execLowerOp<vu::L::EEXP>(in, pc, flow, cyc); return;
+        case vu::L::NOP: execLowerOp<vu::L::NOP>(in, pc, flow, cyc); return;
+        case vu::L::LOI: execLowerOp<vu::L::LOI>(in, pc, flow, cyc); return;
+        case vu::L::INVALID: execLowerOp<vu::L::INVALID>(in, pc, flow, cyc); return;
+        default: execLowerOp<vu::L::INVALID>(in, pc, flow, cyc); return;
     }
 }
 
@@ -476,7 +497,7 @@ ANYPS2_VU_INLINE void Vu::step(const vu::Instr& in, std::uint32_t pc, VuCursor& 
     countPair(pc);
     const bool endAfter = cur.ending;  // este par é o delay slot do bit E
     Flow flow;
-    execPairOp<UOp, LOp>(in, pc, flow);
+    execPairOp<UOp, LOp>(in, pc, flow, cycle_);
     std::uint32_t next = wrap(pc + 8);
     if (cur.hasDelayed) {
         next = cur.delayedTarget;

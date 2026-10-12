@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
     struct HandProg {
         std::string name;
         std::uint32_t offset, pairs;
-        bool hasJr, infinite;
+        bool hasJr, infinite, errors;
         std::vector<std::uint32_t> slots;  // índices dos pares que são delay slot (o teste os altera)
     };
     std::vector<HandProg> hands;
@@ -353,7 +353,7 @@ int main(int argc, char** argv) {
                 normal();
             }
         };
-        auto place = [&](const std::string& name, bool hasJr, bool infinite, Asm& a) {
+        auto place = [&](const std::string& name, bool hasJr, bool infinite, Asm& a, bool errors = false) {
             const auto pairs = static_cast<std::uint32_t>(a.w.size() / 2);
             if (at + pairs * 8 > kMicro) {
                 std::cerr << "sem espaço para o programa de fluxo " << name << "\n";
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
             blob.loadAddress = at;
             blob.words = a.w;
             handBlobs.push_back(blob);
-            hands.push_back({name, at, pairs, hasJr, infinite, a.slots});
+            hands.push_back({name, at, pairs, hasJr, infinite, errors, a.slots});
             at += pairs * 8;
         };
 
@@ -433,6 +433,38 @@ int main(int argc, char** argv) {
             a.end();
             place(kNames[v], jr, false, a);
         }
+        // Erro do guest no meio do trecho (lower inválido, bit D): depois da exceção, o ciclo e o estado visíveis
+        // têm de ser os do interpretador (o código recompilado mantém o ciclo numa variável local e o grava em
+        // cycle_ antes de qualquer chamada que lança).
+        {
+            std::uint32_t invalidLower = 0;
+            for (std::uint32_t op = 0; op < 128 && !invalidLower; ++op) {
+                for (const std::uint32_t low : {0x0u, 0x3Cu, 0x3Du, 0x3Eu, 0x3Fu}) {
+                    const std::uint32_t w = (op << 25) | low;
+                    if (anyps2::vu::decode(w, kUNop).lower.op == L::INVALID) {
+                        invalidLower = w;
+                        break;
+                    }
+                }
+            }
+            if (!invalidLower) {
+                std::cerr << "nenhum lower inválido para o teste de erro\n";
+                return 1;
+            }
+            for (unsigned v = 0; v < 2; ++v) {
+                Asm a{{}, {}, rng, lowers, uppers};
+                a.fillTo(12);
+                if (v == 0) {
+                    a.withUpper(invalidLower);
+                } else {
+                    a.normal();
+                    a.w.back() |= 1u << 28;  // bit D
+                }
+                a.fillTo(18);
+                a.end();
+                place(v == 0 ? "erro: lower inválido" : "erro: bit D", false, false, a, true);
+            }
+        }
         // Laços infinitos: o limite de pares por execução tem de dar o erro (dentro de um trecho, entre
         // trechos e por JR).
         {
@@ -497,11 +529,11 @@ int main(int argc, char** argv) {
     }
     h << "};\n";
     h << "struct HandProgram {\n    const char* name;\n    std::uint32_t offset;\n    std::uint32_t pairs;\n    bool hasJr;\n"
-         "    bool infinite;\n    std::uint32_t slots[16];\n    std::uint32_t slotCount;\n};\n"
+         "    bool infinite;\n    bool errors;\n    std::uint32_t slots[16];\n    std::uint32_t slotCount;\n};\n"
          "inline constexpr HandProgram kHandPrograms[] = {\n";
     for (const auto& p : hands) {
         h << "    {\"" << p.name << "\", " << p.offset << "u, " << p.pairs << "u, " << (p.hasJr ? "true" : "false") << ", "
-          << (p.infinite ? "true" : "false") << ", {";
+          << (p.infinite ? "true" : "false") << ", " << (p.errors ? "true" : "false") << ", {";
         const std::size_t n = std::min<std::size_t>(p.slots.size(), 16);
         for (std::size_t k = 0; k < 16; ++k) h << (k ? ", " : "") << (k < n ? p.slots[k] : 0u) << "u";
         h << "}, " << n << "u},\n";
