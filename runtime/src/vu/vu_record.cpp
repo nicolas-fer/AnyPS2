@@ -341,7 +341,7 @@ VuRunHash hashVuRun(Vu& vu, std::uint64_t cycle0, const std::vector<VuXgkickEven
                    (std::uint64_t{f.mac} << 16) | (std::uint64_t{f.clip} << 32));
         }
         for (const auto* u : {&s.q, &s.p}) {
-            h.word(u->active | (std::uint64_t{u->delay} << 8) | (std::uint64_t{u->value} << 32));
+            h.word(std::uint64_t{u->active} | (std::uint64_t{u->delay} << 8) | (std::uint64_t{u->value} << 32));
             h.word(u->flags);
         }
         r.pipe = h.done();
